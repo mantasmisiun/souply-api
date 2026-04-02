@@ -2,7 +2,9 @@ import express from 'express';
 import dotenv from 'dotenv';
 import pool from './config/db';
 import storeRoutes from './routes/storeRoutes';
+import productRoutes from './routes/productRoutes';
 import categoryRoutes from './routes/categoryRoutes';
+
 
 dotenv.config();
 
@@ -13,6 +15,7 @@ app.use(express.json());
 
 app.use('/api', storeRoutes);
 app.use('/api', categoryRoutes);
+app.use('/api', productRoutes);
 
 app.get('/health', async (req, res) => {
     try {
