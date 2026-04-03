@@ -32,13 +32,12 @@ export const getReceiptById = async (id: number) => {
 export const updateReceiptDetails = async (
     id: number,
     receiptNo: string,
-    chainId: number,
     receiptDate: Date,
     processingStatus: string
 ) => {
     await pool.query(
-        'UPDATE Receipt SET receiptNo = ?, chainId = ?, receiptDate = ?, processingStatus = ? WHERE id = ?',
-        [receiptNo, chainId, receiptDate, processingStatus, id]
+        'UPDATE Receipt SET receiptNo = ?, receiptDate = ?, processingStatus = ? WHERE id = ?',
+        [receiptNo, receiptDate, processingStatus, id]
     );
 };
 

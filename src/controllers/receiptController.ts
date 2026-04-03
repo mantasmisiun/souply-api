@@ -46,8 +46,8 @@ export const fetchReceiptById = async (req: Request, res: Response, next: NextFu
 export const updateReceiptOcrDetails = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const id = Number(req.params.id);
-        const { receiptNo, chainId, receiptDate, processingStatus } = req.body;
-        if (isNaN(id) || !receiptNo || !chainId || !receiptDate || !processingStatus) {
+        const { receiptNo, receiptDate, processingStatus } = req.body;
+        if (isNaN(id) || !receiptNo || !receiptDate || !processingStatus) {
             res.status(400).json({ error: 'Invalid ID or missing fields' });
             return;
         }
@@ -56,8 +56,8 @@ export const updateReceiptOcrDetails = async (req: Request, res: Response, next:
             res.status(400).json({ error: 'Status must be pending, processing, completed or failed' });
             return;
         }
-        await updateReceiptDetails(id, receiptNo, chainId, new Date(receiptDate), processingStatus);
-        res.json({ id, receiptNo, chainId, receiptDate, processingStatus });
+        await updateReceiptDetails(id, receiptNo, new Date(receiptDate), processingStatus);
+        res.json({ id, receiptNo, receiptDate, processingStatus });
     } catch (error) {
         next(error);
     }
