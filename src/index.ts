@@ -8,6 +8,7 @@ import storeProductRoutes from './routes/storeProductRoutes';
 import priceRoutes from './routes/priceRoutes';
 import { errorHandler } from './middleware/errorHandler';
 import userRoutes from './routes/userRoutes';
+import basketRoutes from './routes/basketRoutes';
 
 
 dotenv.config();
@@ -23,6 +24,7 @@ app.use('/api', productRoutes);
 app.use('/api', storeProductRoutes);
 app.use('/api', priceRoutes);
 app.use('/api', userRoutes);
+app.use('/api', basketRoutes);
 
 
 // 404 handler for unknown routes
