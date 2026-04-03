@@ -3,13 +3,65 @@ import { addUser, fetchUserById, updateUserLastActive } from '../controllers/use
 
 const router = Router();
 
-// POST /api/users - Create a new user
+/**
+ * @swagger
+ * /api/users:
+ *   post:
+ *     summary: Create a new anonymous user
+ *     tags: [User]
+ *     responses:
+ *       201:
+ *         description: User created successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 id:
+ *                   type: string
+ *                   format: uuid
+ *                   example: 954b8b32-3976-4cb3-a3dd-5b035ec87d24
+ */
 router.post('/users', addUser);
 
-// GET /api/users/:id - Get a single user by ID
+/**
+ * @swagger
+ * /api/users/{id}:
+ *   get:
+ *     summary: Get a user by ID
+ *     tags: [User]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *         required: true
+ *         description: The user ID
+ *     responses:
+ *       200:
+ *         description: User retrieved successfully
+ */
 router.get('/users/:id', fetchUserById);
 
-// PUT /api/users/:id/last-active - Update user's last active time
+/**
+ * @swagger
+ * /api/users/{id}/last-active:
+ *   patch:
+ *     summary: Update user's last active time
+ *     tags: [User]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *         required: true
+ *         description: The user ID
+ *     responses:
+ *       200:
+ *         description: User's last active time updated successfully
+ */
 router.patch('/users/:id/last-active', updateUserLastActive);
 
-export default router; 
+export default router;
