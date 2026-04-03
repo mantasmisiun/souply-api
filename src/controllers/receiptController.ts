@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from "express";
-import { createReceipt, getReceiptsByUserId, getReceiptById, updateReceiptStatus, deleteReceipt } from "../models/receiptModel";
+import { createReceipt, getReceiptsByUserId, getReceiptById, updateReceiptDetails, deleteReceipt } from "../models/receiptModel";
 
 export const addReceipt = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -43,26 +43,21 @@ export const fetchReceiptById = async (req: Request, res: Response, next: NextFu
     }
 };
 
-export const updateReceipt = async (req: Request, res: Response, next: NextFunction) => {
+export const updateReceiptOcrDetails = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const id = Number(req.params.id);
-        const { processingStatus } = req.body;
-        if (isNaN(id)) {
-            res.status(400).json({ error: 'Invalid receipt ID' });
+        const { receiptNo, chainId, receiptDate, processingStatus } = req.body;
+        if (isNaN(id) || !receiptNo || !chainId || !receiptDate || !processingStatus) {
+            res.status(400).json({ error: 'Invalid ID or missing fields' });
             return;
         }
         const validStatuses = ['pending', 'processing', 'completed', 'failed'];
-        if (!processingStatus || !validStatuses.includes(processingStatus)) {
+        if (!validStatuses.includes(processingStatus)) {
             res.status(400).json({ error: 'Status must be pending, processing, completed or failed' });
             return;
         }
-        const receipt = await getReceiptById(id);
-        if (!receipt) {
-            res.status(404).json({ error: 'Receipt not found' });
-            return;
-        }
-        await updateReceiptStatus(id, processingStatus);
-        res.json({ id, processingStatus });
+        await updateReceiptDetails(id, receiptNo, chainId, new Date(receiptDate), processingStatus);
+        res.json({ id, receiptNo, chainId, receiptDate, processingStatus });
     } catch (error) {
         next(error);
     }

@@ -13,6 +13,8 @@ import basketItemRoutes from './routes/basketItemRoutes';
 import shoppingListRoutes from './routes/shoppingListRoutes';
 import shoppingListItemRoutes from './routes/shoppingListItemRoutes';
 import receiptRoutes from './routes/receiptRoutes';
+import swaggerUi from 'swagger-ui-express';
+import swaggerSpec from './config/swagger';
 
 
 dotenv.config();
@@ -33,6 +35,7 @@ app.use('/api', basketItemRoutes);
 app.use('/api', shoppingListRoutes);
 app.use('/api', shoppingListItemRoutes);
 app.use('/api', receiptRoutes);
+app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
 // 404 handler for unknown routes
 app.use((req, res) => {

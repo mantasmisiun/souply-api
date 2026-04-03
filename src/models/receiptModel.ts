@@ -29,10 +29,16 @@ export const getReceiptById = async (id: number) => {
     return rows[0] || null;
 };
 
-export const updateReceiptStatus = async (id: number, processingStatus: string) => {
+export const updateReceiptDetails = async (
+    id: number,
+    receiptNo: string,
+    chainId: number,
+    receiptDate: Date,
+    processingStatus: string
+) => {
     await pool.query(
-        'UPDATE Receipt SET processingStatus = ? WHERE id = ?',
-        [processingStatus, id]
+        'UPDATE Receipt SET receiptNo = ?, chainId = ?, receiptDate = ?, processingStatus = ? WHERE id = ?',
+        [receiptNo, chainId, receiptDate, processingStatus, id]
     );
 };
 
