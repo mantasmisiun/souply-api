@@ -10,6 +10,7 @@ import { errorHandler } from './middleware/errorHandler';
 import userRoutes from './routes/userRoutes';
 import basketRoutes from './routes/basketRoutes';
 import basketItemRoutes from './routes/basketItemRoutes';
+import shoppingListRoutes from './routes/shoppingListRoutes';
 
 
 dotenv.config();
@@ -27,7 +28,7 @@ app.use('/api', priceRoutes);
 app.use('/api', userRoutes);
 app.use('/api', basketRoutes);
 app.use('/api', basketItemRoutes);
-
+app.use('/api', shoppingListRoutes);
 
 // 404 handler for unknown routes
 app.use((req, res) => {
