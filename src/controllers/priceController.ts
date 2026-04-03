@@ -6,7 +6,7 @@ const SYSTEM_USER_ID = '00000000-0000-0000-0000-000000000000';
 
 export const addPrice = async (req: Request, res: Response) => {
     const { storeProductId, storeId, userId, price, promoPrice, promoEnd, isFallback, date, priceVerified } = req.body;
-
+    
     // Validate required fields
     if (!storeProductId || !storeId || !price || !date) {
         res.status(400).json({ error: 'storeProductId, storeId, price and date are required' });
@@ -15,7 +15,9 @@ export const addPrice = async (req: Request, res: Response) => {
 
     // If no userId provided, use system user
     const resolvedUserId = userId || SYSTEM_USER_ID;
-
+    // If submitted by system user, price is automatically verified
+    const resolvedPriceVerified = resolvedUserId === SYSTEM_USER_ID ? true : (priceVerified || false);
+    
     const id = await createPrice(
         storeProductId,
         storeId,
@@ -25,10 +27,10 @@ export const addPrice = async (req: Request, res: Response) => {
         promoEnd || null,
         isFallback || false,
         new Date(date),
-        priceVerified || false
+        resolvedPriceVerified
     );
 
-    res.status(201).json({ id, storeProductId, storeId, userId: resolvedUserId, price, promoPrice, promoEnd, date, isFallback, priceVerified });
+    res.status(201).json({ id, storeProductId, storeId, userId: resolvedUserId, price, promoPrice, promoEnd, date, isFallback, resolvedPriceVerified });
 };
 
 export const fetchLatestPriceByStoreProduct = async (req: Request, res: Response) => {
