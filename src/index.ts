@@ -12,6 +12,7 @@ import basketRoutes from './routes/basketRoutes';
 import basketItemRoutes from './routes/basketItemRoutes';
 import shoppingListRoutes from './routes/shoppingListRoutes';
 import shoppingListItemRoutes from './routes/shoppingListItemRoutes';
+import receiptRoutes from './routes/receiptRoutes';
 
 
 dotenv.config();
@@ -31,6 +32,7 @@ app.use('/api', basketRoutes);
 app.use('/api', basketItemRoutes);
 app.use('/api', shoppingListRoutes);
 app.use('/api', shoppingListItemRoutes);
+app.use('/api', receiptRoutes);
 
 // 404 handler for unknown routes
 app.use((req, res) => {
