@@ -5,6 +5,7 @@ import storeRoutes from './routes/storeRoutes';
 import productRoutes from './routes/productRoutes';
 import categoryRoutes from './routes/categoryRoutes';
 import storeProductRoutes from './routes/storeProductRoutes';
+import priceRoutes from './routes/priceRoutes';
 
 
 dotenv.config();
@@ -18,6 +19,7 @@ app.use('/api', storeRoutes);
 app.use('/api', categoryRoutes);
 app.use('/api', productRoutes);
 app.use('/api', storeProductRoutes);
+app.use('/api', priceRoutes);
 
 app.get('/health', async (req, res) => {
     try {

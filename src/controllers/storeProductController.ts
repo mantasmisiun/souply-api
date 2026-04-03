@@ -1,17 +1,16 @@
 import { Request, Response } from 'express';
-import { createStoreProduct, getStoreProductsByProductId, getStoreProductsByStoreId, getStoreProductByName } from '../models/storeProductModel';
+import { createStoreProduct, getStoreProductsByProductId, getStoreProductsByChainId, getStoreProductByName } from '../models/storeProductModel';
 
 export const addStoreProduct = async (req: Request, res: Response) => {
-    const { productId, storeId, storeProductName } = req.body;
-    if (!productId || !storeId || !storeProductName) {
+    const { productId, chainId, storeProductName } = req.body;
+    if (!productId || !chainId || !storeProductName) {
         res.status(400).json({ error: 'All fields are required' });
         return;
     }
-    const id = await createStoreProduct(productId, storeId, storeProductName);
-    res.status(201).json({ id, productId, storeId, storeProductName });
+    const id = await createStoreProduct(productId, chainId, storeProductName);
+    res.status(201).json({ id, productId, chainId, storeProductName });
 };
 
-// Controller to get store products by product ID
 export const fetchStoreProductsByProductId = async (req: Request, res: Response) => {
     const productId = Number(req.params.productId);
     if (isNaN(productId)) {
@@ -22,18 +21,16 @@ export const fetchStoreProductsByProductId = async (req: Request, res: Response)
     res.json(storeProducts);
 };
 
-// Controller to get store products by store ID
-export const fetchStoreProductsByStoreId = async (req: Request, res: Response) => {
-    const storeId = Number(req.params.storeId);
-    if (isNaN(storeId)) {
-        res.status(400).json({ error: 'Invalid store ID' });
+export const fetchStoreProductsByChainId = async (req: Request, res: Response) => {
+    const chainId = Number(req.params.chainId);
+    if (isNaN(chainId)) {
+        res.status(400).json({ error: 'Invalid chain ID' });
         return;
     }
-    const storeProducts = await getStoreProductsByStoreId(storeId);
+    const storeProducts = await getStoreProductsByChainId(chainId);
     res.json(storeProducts);
 };
 
-// Controller to get store products by name
 export const fetchStoreProductByName = async (req: Request, res: Response) => {
     const { name } = req.query;
     if (!name || typeof name !== 'string') {
