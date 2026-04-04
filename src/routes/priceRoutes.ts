@@ -17,15 +17,40 @@ const router = Router();
  *             type: object
  *             required:
  *               - storeProductId
+ *               - storeId
  *               - price
+ *               - date
  *             properties:
  *               storeProductId:
+ *                 type: integer
+ *                 example: 1
+ *               storeId:
  *                 type: integer
  *                 example: 1
  *               price:
  *                 type: number
  *                 format: float
- *                 example: 10.99
+ *                 example: 1.99
+ *               promoPrice:
+ *                 type: number
+ *                 format: float
+ *                 nullable: true
+ *                 example: null
+ *               promoEnd:
+ *                 type: string
+ *                 format: date-time
+ *                 nullable: true
+ *                 example: null
+ *               date:
+ *                 type: string
+ *                 format: date-time
+ *                 example: "2026-03-29 16:42:09"
+ *               isFallback:
+ *                 type: boolean
+ *                 example: false
+ *               priceVerified:
+ *                 type: boolean
+ *                 example: true
  *     responses:
  *       201:
  *         description: Price created successfully

@@ -44,8 +44,8 @@ export const getLatestPricesAcrossStores = async (productId: number) => {
          JOIN Store s ON p.storeId = s.id
          JOIN StoreChain sc ON sp.chainId = sc.id
          WHERE sp.productId = ?
-         AND p.date = (
-             SELECT MAX(p2.date)
+         AND p.id = (
+             SELECT MAX(p2.id)
              FROM Price p2
              WHERE p2.storeProductId = p.storeProductId
              AND p2.storeId = p.storeId
@@ -54,11 +54,11 @@ export const getLatestPricesAcrossStores = async (productId: number) => {
         [productId]
     );
     return rows.map((row: any) => ({
-    ...row,
-    price: parseFloat(row.price),
-    promoPrice: row.promoPrice ? parseFloat(row.promoPrice) : null,
-    isFallback: row.isFallback === 1,
-    priceVerified: row.priceVerified === 1
+        ...row,
+        price: parseFloat(row.price),
+        promoPrice: row.promoPrice ? parseFloat(row.promoPrice) : null,
+        isFallback: row.isFallback === 1,
+        priceVerified: row.priceVerified === 1
     }));
 };
 

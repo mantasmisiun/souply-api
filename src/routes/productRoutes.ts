@@ -31,6 +31,9 @@ const router = Router();
  *                 type: integer
  *                 nullable: true
  *                 example: null
+ *               isWeighable:
+ *                 type: boolean
+ *                 example: false
  *     responses:
  *       201:
  *         description: Product created successfully

@@ -12,6 +12,14 @@ export const createBasketItem = async (
     return result.insertId;
 };
 
+export const getBasketItemById = async (id: number) => {
+    const [rows]: any = await pool.query(
+        'SELECT * FROM BasketItem WHERE id = ?',
+        [id]
+    );
+    return rows[0] || null;
+};
+
 export const getBasketItemsByBasketId = async (basketId: number) => {
     const [rows]: any = await pool.query(
         `SELECT BasketItem.*, Product.name AS productName 
@@ -35,4 +43,13 @@ export const updateBasketItemQuantity = async (
 
 export const deleteBasketItem = async (id: number) => {
     await pool.query('DELETE FROM BasketItem WHERE id = ?', [id]);
+};
+
+//Function to get a basket item by basketId and productId (used to check if item already exists in basket)
+export const getBasketItemByBasketAndProduct = async (basketId: number, productId: number) => {
+    const [rows]: any = await pool.query(
+        'SELECT * FROM BasketItem WHERE basketId = ? AND productId = ?',
+        [basketId, productId]
+    );
+    return rows[0] || null;
 };

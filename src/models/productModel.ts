@@ -5,11 +5,12 @@ export const createProduct = async (
     categoryId: number,
     baseProductId: number | null,
     name: string,
-    imageUrl: string | null
+    imageUrl: string | null,
+    isWeighable: boolean
 ) => {
     const [result]: any = await pool.query(
-        'INSERT INTO Product (categoryId, baseProductId, name, imageUrl) VALUES (?, ?, ?, ?)',
-        [categoryId, baseProductId, name, imageUrl]
+        'INSERT INTO Product (categoryId, baseProductId, name, imageUrl, isWeighable) VALUES (?, ?, ?, ?, ?)',
+        [categoryId, baseProductId, name, imageUrl, isWeighable]
     );
     return result.insertId;
 };

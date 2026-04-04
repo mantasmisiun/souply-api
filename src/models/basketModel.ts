@@ -10,7 +10,11 @@ export const createBasket = async (userId: string) => {
 
 export const getBasketsByUserId = async (userId: string) => {
     const [rows]: any = await pool.query(
-        'SELECT * FROM Basket WHERE userId = ?',
+        `SELECT * FROM Basket 
+         WHERE userId = ?
+         ORDER BY 
+             FIELD(status, 'draft', 'compared', 'completed'),
+             updatedAt DESC`,
         [userId]
     );
     return rows;

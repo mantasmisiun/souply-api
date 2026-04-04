@@ -102,6 +102,19 @@ router.patch('/baskets/:id', updateBasket);
  *           type: integer
  *         required: true
  *         description: The basket ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - status
+ *             properties:
+ *               status:
+ *                 type: string
+ *                 enum: [draft, compared, completed]
+ *                 example: compared
  *     responses:
  *       200:
  *         description: Basket status updated successfully
