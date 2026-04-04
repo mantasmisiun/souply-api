@@ -42,15 +42,27 @@ app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 app.post('/test-ocr', async (req, res, next) => {
     try {
         const { imageBase64, filename } = req.body;
+        
         const text = await extractTextFromImage(imageBase64);
         const parsed = await parseReceiptText(text);
 
-        // Save parsed JSON to file
         const outputPath = path.join(__dirname, '../receipts/parsed json', `${filename || 'receipt'}-parsed.json`);
         fs.writeFileSync(outputPath, JSON.stringify(parsed, null, 2));
 
-        res.json({ message: 'Receipt processed successfully', parsed });
+        const { createReceipt } = await import('./models/receiptModel');
+        const receiptId = await createReceipt(
+            '00000000-0000-0000-0000-000000000000',
+            1,
+            filename || 'receipt',
+            'image/jpeg'
+        );
+
+        const { processReceipt } = await import('./services/receiptProcessingService');
+        const result = await processReceipt(receiptId, parsed);
+
+        res.json({ message: 'Receipt processed successfully', parsed, result });
     } catch (error) {
+        console.error('TEST OCR ERROR:', error);
         next(error);
     }
 });

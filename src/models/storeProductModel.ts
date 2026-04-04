@@ -40,3 +40,18 @@ export const getStoreProductByName = async (storeProductName: string) => {
     );
     return rows;
 };
+
+//Get store product by name and chain for OCR matching
+export const getStoreProductByNameAndChain = async (storeProductName: string, chainId: number) => {
+    // Use first 60% of the name for fuzzy matching
+    const matchLength = Math.floor(storeProductName.length * 0.6);
+    const searchTerm = storeProductName.substring(0, matchLength);
+    
+    const [rows]: any = await pool.query(
+        `SELECT * FROM StoreProduct 
+         WHERE chainId = ? 
+         AND storeProductName LIKE ?`,
+        [chainId, `%${searchTerm}%`]
+    );
+    return rows[0] || null;
+};

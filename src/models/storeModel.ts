@@ -48,3 +48,12 @@ export const getStoreById = async (id: number) => {
     // Return the first row or null if not found
     return rows[0] || null;
 };
+
+//Get store by name and address for OCR matching
+export const getStoreByNameAndAddress = async (name: string, address: string) => {
+    const [rows]: any = await pool.query(
+        'SELECT * FROM Store WHERE name = ? AND address = ?',
+        [name, address]
+    );
+    return rows[0] || null;
+};

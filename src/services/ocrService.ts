@@ -35,7 +35,7 @@ You are a receipt parser. Extract the following information from this Lithuanian
     "items": [
         {
             "name": "product name",
-            "price": 0.00,
+            "price": "unit price per item, NOT the total. If receipt shows '4 vnt. X 0,75 EUR' then price is 0.75 not 3.00",
             "quantity": 1,
             "isWeighable": false,
             "promoPrice": "per unit price after discount. Calculate by dividing total discounted price by quantity. null if no discount"
@@ -44,8 +44,13 @@ You are a receipt parser. Extract the following information from this Lithuanian
     "total": 0.00
 }
 
+Rules for price:
+- Always use unit price, never total price
+- If receipt shows 'X vnt. X Y EUR' then price is Y
+- If receipt shows weight like '0,862 kg X 1,19 EUR/kg' then price is 1.19
+
 Rules for isWeighable:
-- Set isWeighable to true ONLY if the receipt shows a pattern like "0,862 kg X 1,19 EUR/kg" indicating weight and price per kg
+- Set isWeighable to true ONLY if the receipt shows a pattern like '0,862 kg X 1,19 EUR/kg'
 - Otherwise always set isWeighable to false
 
 Rules for promoPrice:
