@@ -15,14 +15,16 @@ import shoppingListItemRoutes from './routes/shoppingListItemRoutes';
 import receiptRoutes from './routes/receiptRoutes';
 import swaggerUi from 'swagger-ui-express';
 import swaggerSpec from './config/swagger';
-
+import { extractTextFromImage, parseReceiptText } from './services/ocrService';
+import fs from 'fs';
+import path from 'path';
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 
 app.use('/api', storeRoutes);
 app.use('/api', categoryRoutes);
@@ -36,6 +38,22 @@ app.use('/api', shoppingListRoutes);
 app.use('/api', shoppingListItemRoutes);
 app.use('/api', receiptRoutes);
 app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+
+app.post('/test-ocr', async (req, res, next) => {
+    try {
+        const { imageBase64, filename } = req.body;
+        const text = await extractTextFromImage(imageBase64);
+        const parsed = await parseReceiptText(text);
+
+        // Save parsed JSON to file
+        const outputPath = path.join(__dirname, '../receipts/parsed json', `${filename || 'receipt'}-parsed.json`);
+        fs.writeFileSync(outputPath, JSON.stringify(parsed, null, 2));
+
+        res.json({ message: 'Receipt processed successfully', parsed });
+    } catch (error) {
+        next(error);
+    }
+});
 
 // 404 handler for unknown routes
 app.use((req, res) => {
