@@ -26,10 +26,10 @@ export const getLatestPriceByStoreProduct = async (storeProductId: number) => {
     return rows[0] || null;
 };
 
-export const getPriceHistoryForStoreProduct = async (storeProductId: number) => {
+export const getPriceHistoryForStoreProduct = async (storeProductId: number, storeId: number) => {
     const [rows]: any = await pool.query(
-        'SELECT * FROM Price WHERE storeProductId = ? ORDER BY date DESC',
-        [storeProductId]
+        'SELECT * FROM Price WHERE storeProductId = ? AND storeId = ? ORDER BY date DESC',
+        [storeProductId, storeId]
     );
     return rows;
 };

@@ -47,3 +47,11 @@ export const toggleListItem = async (id: number, isChecked: boolean) => {
 export const deleteListItem = async (id: number) => {
     await pool.query('DELETE FROM ShoppingListItem WHERE id = ?', [id]);
 };
+
+export const getListItemByListAndProduct = async (listId: number, productId: number) => {
+    const [rows]: any = await pool.query(
+        'SELECT * FROM ShoppingListItem WHERE listId = ? AND productId = ?',
+        [listId, productId]
+    );
+    return rows[0] || null;
+};

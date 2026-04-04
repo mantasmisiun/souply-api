@@ -16,19 +16,18 @@ const router = Router();
  *           schema:
  *             type: object
  *             required:
- *               - shoppingListId
+ *               - listId
  *               - productId
  *               - quantity
  *             properties:
- *               shoppingListId:
+ *               listId:
  *                 type: integer
  *                 example: 1
  *               productId:
  *                 type: integer
  *                 example: 1
  *               quantity:
- *                 type: integer
- *                 minimum: 1
+ *                 type: number
  *     responses:
  *       201:
  *         description: Shopping list item added successfully

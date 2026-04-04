@@ -115,9 +115,9 @@ router.get('/prices/promos', fetchActivePromoPrices);
 
 /**
  * @swagger
- * /api/prices/history/store-product/{storeProductId}:
+ * /api/prices/store-product/{storeProductId}/store/{storeId}/history:
  *   get:
- *     summary: Get the price history for a specific store product
+ *     summary: Get the price history for a specific store product in a specific store
  *     tags: [Price]
  *     parameters:
  *       - in: path
@@ -126,11 +126,18 @@ router.get('/prices/promos', fetchActivePromoPrices);
  *           type: integer
  *         required: true
  *         description: The store product ID
+ *       - in: path
+ *         name: storeId
+ *         schema:
+ *           type: integer
+ *         required: true
+ *         description: The store ID
  *     responses:
  *       200:
  *         description: The price history for the store product
  */
-// GET /api/prices/history/store-product/:storeProductId - Get the price history for a specific store product
-router.get('/prices/history/store-product/:storeProductId', fetchPriceHistoryForStoreProduct);
+
+// GET /api/prices/store-product/:storeProductId/store/:storeId/history
+router.get('/prices/store-product/:storeProductId/store/:storeId/history', fetchPriceHistoryForStoreProduct);
 
 export default router;

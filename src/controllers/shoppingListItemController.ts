@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { createListItem, getListItemsByShoppingListId, updateListItemQuantity, toggleListItem, deleteListItem } from '../models/shoppingListItemModel';
+import { createListItem, getListItemsByShoppingListId, updateListItemQuantity, toggleListItem, deleteListItem, getListItemByListAndProduct } from '../models/shoppingListItemModel';
 import { getProductById } from '../models/productModel';
 
 export const addListItem = async (req: Request, res: Response, next: NextFunction) => {
@@ -10,18 +10,25 @@ export const addListItem = async (req: Request, res: Response, next: NextFunctio
             return;
         }
 
-        // Fetch product to check if it's weighable
         const product = await getProductById(productId);
         if (!product) {
             res.status(404).json({ error: 'Product not found' });
             return;
         }
-
-        // If not weighable, quantity must be a whole number
         if (!product.isWeighable && !Number.isInteger(quantity)) {
             res.status(400).json({ error: 'Quantity must be a whole number for packaged products' });
             return;
         }
+
+        // Check if product already exists in list
+        const existingItem = await getListItemByListAndProduct(listId, productId);
+        if (existingItem) {
+            const newQuantity = parseFloat(existingItem.quantity) + parseFloat(quantity);
+            await updateListItemQuantity(existingItem.id, newQuantity);
+            res.json({ id: existingItem.id, listId, productId, quantity: newQuantity });
+            return;
+        }
+
         const id = await createListItem(listId, productId, quantity);
         res.status(201).json({ id, listId, productId, quantity });
     } catch (error) {

@@ -88,7 +88,12 @@ export const fetchPriceHistoryForStoreProduct = async (req: Request, res: Respon
             res.status(400).json({ error: 'Invalid store product ID' });
             return;
         }
-        const priceHistory = await getPriceHistoryForStoreProduct(storeProductId);
+        const storeId = Number(req.params.storeId);
+        if (isNaN(storeId)) {
+            res.status(400).json({ error: 'Invalid store ID' });
+            return;
+        }
+        const priceHistory = await getPriceHistoryForStoreProduct(storeProductId, storeId);
         res.json(priceHistory);
     } catch (error) {
         next(error);
