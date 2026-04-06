@@ -4,6 +4,8 @@ import { getStoreProductByNameAndChain, createStoreProduct } from '../models/sto
 import { createProduct, getProductByName } from '../models/productModel';
 import { createPrice } from '../models/priceModel';
 import { updateReceiptDetails } from '../models/receiptModel';
+import { getAllCategories } from '../models/categoryModel';
+import { assignCategoriesToProducts } from './ocrService';
 
 const SYSTEM_USER_ID = '00000000-0000-0000-0000-000000000000';
 
@@ -22,17 +24,23 @@ export const processReceipt = async (receiptId: number, parsedData: any) => {
         store = { id: storeId, name: parsedData.storeName };
     }
 
-    // Step 3 — Process each item
+    // Step 3 — Assign categories to all items in one gemma4 call
+    const categories = await getAllCategories();
+    const assignments = await assignCategoriesToProducts(parsedData.items, categories);
+
+    // Step 4 — Process each item
     for (const item of parsedData.items) {
+        const assignment = assignments.find(a => a.index === parsedData.items.indexOf(item));
+        const categoryId = assignment?.categoryId ?? null;
+
         // Find or create StoreProduct
         let storeProduct = await getStoreProductByNameAndChain(item.name, chain.id);
-        
+
         if (!storeProduct) {
             let baseProductName = item.name;
             let baseProductId = null;
 
             if (item.brandName) {
-                // Calculate base product name by removing brand name
                 baseProductName = item.name
                     .replace(item.brandName, '')
                     .replace(/\s{2,}/g, ' ')
@@ -42,22 +50,20 @@ export const processReceipt = async (receiptId: number, parsedData: any) => {
                     .replace(/\.\s*$/g, '')
                     .trim();
 
-                // Find or create base product
                 let baseProduct = await getProductByName(baseProductName);
                 if (!baseProduct) {
-                    const newBaseProductId = await createProduct(1, null, baseProductName, null, item.isWeighable);
+                    const newBaseProductId = await createProduct(categoryId!, null, baseProductName, null, item.isWeighable);
                     baseProduct = { id: newBaseProductId };
                 }
                 baseProductId = baseProduct.id;
             }
 
-            // Create product — if no brand, it IS the base product (baseProductId: null)
-            const productId = await createProduct(1, baseProductId, item.name, null, item.isWeighable);
+            const productId = await createProduct(categoryId!, baseProductId, item.name, null, item.isWeighable);
             const storeProductId = await createStoreProduct(productId, chain.id, item.name, item.brandName || null);
             storeProduct = { id: storeProductId };
         }
 
-        // Step 4 — Create Price entry
+        // Step 5 — Create Price entry
         try {
             await createPrice(
                 storeProduct.id,
@@ -68,17 +74,16 @@ export const processReceipt = async (receiptId: number, parsedData: any) => {
                 null,
                 false,
                 new Date(parsedData.date),
-                true // priceVerified true for system user
+                true
             );
         } catch (error: any) {
-            // Skip duplicate prices
             if (error.code !== 'ER_DUP_ENTRY') {
                 throw error;
             }
         }
     }
 
-    // Step 5 — Update receipt with extracted details
+    // Step 6 — Update receipt with extracted details
     await updateReceiptDetails(
         receiptId,
         parsedData.receiptNo,

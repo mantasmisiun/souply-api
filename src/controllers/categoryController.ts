@@ -41,3 +41,4 @@ export const fetchSubCategories = async (req: Request, res: Response, next: Next
         next(error);
     }
 };
+

@@ -28,9 +28,9 @@ const router = Router();
  *               storeProductName:
  *                 type: string
  *                 example: Kava
- *              brandName:
- *                type: string
- *                example: Nescafe
+ *               brandName:
+ *                 type: string
+ *                 example: Nescafe
  *     responses:
  *       201:
  *         description: Store product created successfully

@@ -28,3 +28,11 @@ export const getSubCategories = async (parentCategoryId: number) => {
     );
     return categories;
 };
+
+//Get all categories for category assignment
+export const getAllCategories = async () => {
+    const [categories]: any = await pool.query(
+        'SELECT id, parentCategoryId, name FROM Category'
+    );
+    return categories;
+};

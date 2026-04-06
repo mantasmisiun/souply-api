@@ -66,6 +66,16 @@ app.post('/test-ocr', async (req, res, next) => {
         next(error);
     }
 });
+app.post('/test-parse-only', async (req, res, next) => {
+    try {
+        const { imageBase64 } = req.body;
+        const text = await extractTextFromImage(imageBase64);
+        const parsed = await parseReceiptTextWithOllama(text);
+        res.json({ parsed });
+    } catch (error) {
+        next(error);
+    }
+});
 
 // 404 handler for unknown routes
 app.use((req, res) => {
