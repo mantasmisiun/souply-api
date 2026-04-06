@@ -15,7 +15,7 @@ import shoppingListItemRoutes from './routes/shoppingListItemRoutes';
 import receiptRoutes from './routes/receiptRoutes';
 import swaggerUi from 'swagger-ui-express';
 import swaggerSpec from './config/swagger';
-import { extractTextFromImage, parseReceiptText } from './services/ocrService';
+import { extractTextFromImage, parseReceiptTextWithOllama } from './services/ocrService';
 import fs from 'fs';
 import path from 'path';
 
@@ -44,7 +44,7 @@ app.post('/test-ocr', async (req, res, next) => {
         const { imageBase64, filename } = req.body;
         
         const text = await extractTextFromImage(imageBase64);
-        const parsed = await parseReceiptText(text);
+        const parsed = await parseReceiptTextWithOllama(text);
 
         const outputPath = path.join(__dirname, '../receipts/parsed json', `${filename || 'receipt'}-parsed.json`);
         fs.writeFileSync(outputPath, JSON.stringify(parsed, null, 2));

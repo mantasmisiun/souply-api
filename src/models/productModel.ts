@@ -41,3 +41,12 @@ export const getProductsByCategory = async (categoryId: number) => {
     );
     return products;
 };
+
+// Function to get a product by name for creating base products
+export const getProductByName = async (name: string) => {
+    const [rows]: any = await pool.query(
+        'SELECT * FROM Product WHERE name = ?',
+        [name]
+    );
+    return rows[0] || null;
+};

@@ -3,12 +3,12 @@ import { createStoreProduct, getStoreProductsByProductId, getStoreProductsByChai
 
 export const addStoreProduct = async (req: Request, res: Response, next: NextFunction) => {
     try {
-        const { productId, chainId, storeProductName } = req.body;
+        const { productId, chainId, storeProductName, brandName } = req.body;
         if (!productId || !chainId || !storeProductName) {
             res.status(400).json({ error: 'All fields are required' });
             return;
         }
-        const id = await createStoreProduct(productId, chainId, storeProductName);
+        const id = await createStoreProduct(productId, chainId, storeProductName, brandName || null);
         res.status(201).json({ id, productId, chainId, storeProductName });
     } catch (error) {
         next(error);

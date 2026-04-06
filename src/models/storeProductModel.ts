@@ -4,10 +4,11 @@ export const createStoreProduct = async (
     productId: number,
     chainId: number,
     storeProductName: string,
+    brandName: string | null
 ) => {
     const [result]: any = await pool.query(
-        'INSERT INTO StoreProduct (productId, chainId, storeProductName) VALUES (?, ?, ?)',
-        [productId, chainId, storeProductName]
+        'INSERT INTO StoreProduct (productId, chainId, storeProductName, brandName) VALUES (?, ?, ?, ?)',
+        [productId, chainId, storeProductName, brandName]
     );
     return result.insertId;
 };

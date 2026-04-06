@@ -1,7 +1,7 @@
 import { getStoreChainByName, createStoreChain } from '../models/storeChainModel';
 import { getStoreByNameAndAddress, createStore } from '../models/storeModel';
 import { getStoreProductByNameAndChain, createStoreProduct } from '../models/storeProductModel';
-import { createProduct } from '../models/productModel';
+import { createProduct, getProductByName } from '../models/productModel';
 import { createPrice } from '../models/priceModel';
 import { updateReceiptDetails } from '../models/receiptModel';
 
@@ -28,17 +28,32 @@ export const processReceipt = async (receiptId: number, parsedData: any) => {
         let storeProduct = await getStoreProductByNameAndChain(item.name, chain.id);
         
         if (!storeProduct) {
-            // Create a new Product
-            const productId = await createProduct(
-                1, // default category, can be updated later
-                null,
-                item.name,
-                null,
-                item.isWeighable
-            );
+            let baseProductName = item.name;
+            let baseProductId = null;
 
-            // Create StoreProduct linking product to chain
-            const storeProductId = await createStoreProduct(productId, chain.id, item.name);
+            if (item.brandName) {
+                // Calculate base product name by removing brand name
+                baseProductName = item.name
+                    .replace(item.brandName, '')
+                    .replace(/\s{2,}/g, ' ')
+                    .replace(/,\s*,/g, ',')
+                    .replace(/\.\s*,/g, ',')
+                    .replace(/,\s*$/g, '')
+                    .replace(/\.\s*$/g, '')
+                    .trim();
+
+                // Find or create base product
+                let baseProduct = await getProductByName(baseProductName);
+                if (!baseProduct) {
+                    const newBaseProductId = await createProduct(1, null, baseProductName, null, item.isWeighable);
+                    baseProduct = { id: newBaseProductId };
+                }
+                baseProductId = baseProduct.id;
+            }
+
+            // Create product — if no brand, it IS the base product (baseProductId: null)
+            const productId = await createProduct(1, baseProductId, item.name, null, item.isWeighable);
+            const storeProductId = await createStoreProduct(productId, chain.id, item.name, item.brandName || null);
             storeProduct = { id: storeProductId };
         }
 
