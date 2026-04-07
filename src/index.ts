@@ -42,7 +42,12 @@ app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 app.post('/test-ocr', async (req, res, next) => {
     try {
         const { imageBase64, filename } = req.body;
-        
+
+        // Upload image to MinIO
+        const { uploadReceiptImage } = await import('./services/storageService');
+        const imageBuffer = Buffer.from(imageBase64, 'base64');
+        const imageUrl = await uploadReceiptImage(imageBuffer, filename || 'receipt.jpg', 'image/jpeg');
+
         const text = await extractTextFromImage(imageBase64);
         const parsed = await parseReceiptTextWithOllama(text);
 
@@ -53,7 +58,7 @@ app.post('/test-ocr', async (req, res, next) => {
         const receiptId = await createReceipt(
             '00000000-0000-0000-0000-000000000000',
             1,
-            filename || 'receipt',
+            imageUrl,
             'image/jpeg'
         );
 
