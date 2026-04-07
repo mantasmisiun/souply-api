@@ -18,6 +18,7 @@ import swaggerSpec from './config/swagger';
 import { extractTextFromImage, parseReceiptTextWithOllama } from './services/ocrService';
 import fs from 'fs';
 import path from 'path';
+import { receiptQueue, startWorker } from './services/queueService';
 
 dotenv.config();
 
@@ -76,13 +77,13 @@ app.post('/test-ocr', async (req, res, next) => {
             finalMimeType
         );
 
-        const { processReceipt } = await import('./services/receiptProcessingService');
-        const result = await processReceipt(receiptId!, parsed);
+        // Add to queue instead of processing inline
+        await receiptQueue.add('process-receipt', {
+            receiptId,
+            parsedData: parsed
+        });
 
-        const { updateReceiptStore } = await import('./models/receiptModel');
-        await updateReceiptStore(receiptId!, result.storeId);
-
-        res.json({ message: 'Receipt processed successfully', parsed, result });
+        res.json({ message: 'Receipt uploaded and queued for processing', receiptId, parsed });
     } catch (error) {
         console.error('TEST OCR ERROR:', error);
         if (receiptId) {
@@ -118,6 +119,8 @@ app.get('/health', async (req, res) => {
         res.status(500).json({ status: 'error', database: 'disconnected' });
     }
 });
+startWorker();
+console.log('Receipt queue worker started');
 
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
