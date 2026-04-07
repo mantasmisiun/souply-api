@@ -2,7 +2,7 @@ import pool from '../config/db';
 
 export const createReceipt = async (
     userId: string,
-    storeId: number,
+    storeId: number | null,
     filePath: string,
     fileType: string
 ) => {
@@ -31,8 +31,8 @@ export const getReceiptById = async (id: number) => {
 
 export const updateReceiptDetails = async (
     id: number,
-    receiptNo: string,
-    receiptDate: Date,
+    receiptNo: string | null,
+    receiptDate: Date | null,
     processingStatus: string
 ) => {
     await pool.query(
@@ -43,4 +43,11 @@ export const updateReceiptDetails = async (
 
 export const deleteReceipt = async (id: number) => {
     await pool.query('DELETE FROM Receipt WHERE id = ?', [id]);
+};
+
+export const updateReceiptStore = async (id: number, storeId: number) => {
+    await pool.query(
+        'UPDATE Receipt SET storeId = ? WHERE id = ?',
+        [storeId, id]
+    );
 };

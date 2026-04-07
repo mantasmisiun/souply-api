@@ -38,36 +38,57 @@ app.use('/api', shoppingListRoutes);
 app.use('/api', shoppingListItemRoutes);
 app.use('/api', receiptRoutes);
 app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+import { convertPdfToImageBuffer } from './services/pdfService';
 
 app.post('/test-ocr', async (req, res, next) => {
+    let receiptId: number | null = null;
     try {
-        const { imageBase64, filename } = req.body;
+        const { imageBase64, filename, mimeType } = req.body;
 
-        // Upload image to MinIO
+        let imageBuffer: Buffer;
+        let finalMimeType = mimeType || 'image/jpeg';
+
+        if (mimeType === 'application/pdf') {
+            const pdfBuffer = Buffer.from(imageBase64, 'base64');
+            imageBuffer = await convertPdfToImageBuffer(pdfBuffer);
+            finalMimeType = 'image/jpeg';
+        } else {
+            imageBuffer = Buffer.from(imageBase64, 'base64');
+        }
+
+        const finalImageBase64 = imageBuffer.toString('base64');
+
         const { uploadReceiptImage } = await import('./services/storageService');
-        const imageBuffer = Buffer.from(imageBase64, 'base64');
-        const imageUrl = await uploadReceiptImage(imageBuffer, filename || 'receipt.jpg', 'image/jpeg');
+        const imageFilename = filename ? filename.replace('.pdf', '.jpg') : 'receipt.jpg';
+        const imageUrl = await uploadReceiptImage(imageBuffer, imageFilename, finalMimeType);
 
-        const text = await extractTextFromImage(imageBase64);
+        const text = await extractTextFromImage(finalImageBase64);
         const parsed = await parseReceiptTextWithOllama(text);
 
         const outputPath = path.join(__dirname, '../receipts/parsed json', `${filename || 'receipt'}-parsed.json`);
         fs.writeFileSync(outputPath, JSON.stringify(parsed, null, 2));
 
         const { createReceipt } = await import('./models/receiptModel');
-        const receiptId = await createReceipt(
+        receiptId = await createReceipt(
             '00000000-0000-0000-0000-000000000000',
-            1,
+            null,
             imageUrl,
-            'image/jpeg'
+            finalMimeType
         );
 
         const { processReceipt } = await import('./services/receiptProcessingService');
-        const result = await processReceipt(receiptId, parsed);
+        const result = await processReceipt(receiptId!, parsed);
+
+        const { updateReceiptStore } = await import('./models/receiptModel');
+        await updateReceiptStore(receiptId!, result.storeId);
 
         res.json({ message: 'Receipt processed successfully', parsed, result });
     } catch (error) {
         console.error('TEST OCR ERROR:', error);
+        if (receiptId) {
+            const { updateReceiptDetails } = await import('./models/receiptModel');
+            await updateReceiptDetails(receiptId, null, null, 'failed').catch(() => {});
+        }
         next(error);
     }
 });

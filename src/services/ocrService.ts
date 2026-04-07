@@ -66,6 +66,11 @@ Rules for brandName:
 - Brand names are usually in ALL CAPS or are a distinct proper noun
 - If no brand is identifiable set brandName to null
 
+Rules for storeName:
+- Look for a store code/branch identifier on the receipt e.g. T703, X-912 MAXIMA
+- It is usually found near the top of the receipt or after the expenses section
+- If no store code is identifiable, use store address as storeName
+
 Receipt text:
 ${text}`;
     const ollamaUrl = process.env.OLLAMA_BASE_URL || 'http://192.168.1.127:11434';
