@@ -37,28 +37,7 @@ export const processReceipt = async (receiptId: number, parsedData: any) => {
         let storeProduct = await getStoreProductByNameAndChain(item.name, chain.id);
 
         if (!storeProduct) {
-            let baseProductName = item.name;
-            let baseProductId = null;
-
-            if (item.brandName) {
-                baseProductName = item.name
-                    .replace(item.brandName, '')
-                    .replace(/\s{2,}/g, ' ')
-                    .replace(/,\s*,/g, ',')
-                    .replace(/\.\s*,/g, ',')
-                    .replace(/,\s*$/g, '')
-                    .replace(/\.\s*$/g, '')
-                    .trim();
-
-                let baseProduct = await getProductByName(baseProductName);
-                if (!baseProduct) {
-                    const newBaseProductId = await createProduct(categoryId!, null, baseProductName, null, item.isWeighable);
-                    baseProduct = { id: newBaseProductId };
-                }
-                baseProductId = baseProduct.id;
-            }
-
-            const productId = await createProduct(categoryId!, baseProductId, item.name, null, item.isWeighable);
+            const productId = await createProduct(categoryId!, null, item.name, null, item.isWeighable);
             const storeProductId = await createStoreProduct(productId, chain.id, item.name, item.brandName || null);
             storeProduct = { id: storeProductId };
         }

@@ -1,7 +1,4 @@
 import { Queue, Worker, Job } from 'bullmq';
-import { extractTextFromImage } from './ocrService';
-import { parseReceiptTextWithOllama } from './ocrService';
-import { assignCategoriesToProducts } from './ocrService';
 
 const connection = {
     host: process.env.REDIS_HOST || '192.168.1.212',
@@ -12,7 +9,7 @@ export const receiptQueue = new Queue('receipt-processing', { connection });
 
 export const startWorker = () => {
     const worker = new Worker('receipt-processing', async (job: Job) => {
-        const { receiptId, imageBase64, parsedData } = job.data;
+        const { receiptId, parsedData } = job.data;
 
         const { updateReceiptDetails } = await import('../models/receiptModel');
         const { updateReceiptStore } = await import('../models/receiptModel');

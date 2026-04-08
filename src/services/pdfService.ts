@@ -14,6 +14,12 @@ export const convertPdfToImageBuffer = async (pdfBuffer: Buffer): Promise<Buffer
 
     const result = await convert(1, { responseType: 'buffer' });
 
+    // Temporary debug - save to disk
+    if (result.buffer) {
+        fs.writeFileSync('/tmp/debug_receipt.jpg', result.buffer);
+        console.log('Saved debug image to /tmp/debug_receipt.jpg, size:', result.buffer.length);
+    }
+
     if (!result.buffer) {
         throw new Error('Failed to convert PDF to image');
     }

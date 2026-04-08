@@ -15,10 +15,12 @@ import shoppingListItemRoutes from './routes/shoppingListItemRoutes';
 import receiptRoutes from './routes/receiptRoutes';
 import swaggerUi from 'swagger-ui-express';
 import swaggerSpec from './config/swagger';
+import { receiptQueue, startWorker } from './services/queueService';
+import { convertPdfToImageBuffer } from './services/pdfService';
 import { extractTextFromImage, parseReceiptTextWithOllama } from './services/ocrService';
+import { uploadReceiptImage } from './services/storageService';
 import fs from 'fs';
 import path from 'path';
-import { receiptQueue, startWorker } from './services/queueService';
 
 dotenv.config();
 
@@ -39,9 +41,8 @@ app.use('/api', shoppingListRoutes);
 app.use('/api', shoppingListItemRoutes);
 app.use('/api', receiptRoutes);
 app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
-import { convertPdfToImageBuffer } from './services/pdfService';
 
-app.post('/test-ocr', async (req, res, next) => {
+app.post('/api/receipts/upload', async (req, res, next) => {
     let receiptId: number | null = null;
     try {
         const { imageBase64, filename, mimeType } = req.body;
@@ -58,16 +59,11 @@ app.post('/test-ocr', async (req, res, next) => {
         }
 
         const finalImageBase64 = imageBuffer.toString('base64');
-
-        const { uploadReceiptImage } = await import('./services/storageService');
         const imageFilename = filename ? filename.replace('.pdf', '.jpg') : 'receipt.jpg';
         const imageUrl = await uploadReceiptImage(imageBuffer, imageFilename, finalMimeType);
 
         const text = await extractTextFromImage(finalImageBase64);
         const parsed = await parseReceiptTextWithOllama(text);
-
-        const outputPath = path.join(__dirname, '../receipts/parsed json', `${filename || 'receipt'}-parsed.json`);
-        fs.writeFileSync(outputPath, JSON.stringify(parsed, null, 2));
 
         const { createReceipt } = await import('./models/receiptModel');
         receiptId = await createReceipt(
@@ -77,7 +73,6 @@ app.post('/test-ocr', async (req, res, next) => {
             finalMimeType
         );
 
-        // Add to queue instead of processing inline
         await receiptQueue.add('process-receipt', {
             receiptId,
             parsedData: parsed
@@ -85,7 +80,7 @@ app.post('/test-ocr', async (req, res, next) => {
 
         res.json({ message: 'Receipt uploaded and queued for processing', receiptId, parsed });
     } catch (error) {
-        console.error('TEST OCR ERROR:', error);
+        console.error('RECEIPT UPLOAD ERROR:', error);
         if (receiptId) {
             const { updateReceiptDetails } = await import('./models/receiptModel');
             await updateReceiptDetails(receiptId, null, null, 'failed').catch(() => {});
@@ -93,17 +88,6 @@ app.post('/test-ocr', async (req, res, next) => {
         next(error);
     }
 });
-app.post('/test-parse-only', async (req, res, next) => {
-    try {
-        const { imageBase64 } = req.body;
-        const text = await extractTextFromImage(imageBase64);
-        const parsed = await parseReceiptTextWithOllama(text);
-        res.json({ parsed });
-    } catch (error) {
-        next(error);
-    }
-});
-
 // 404 handler for unknown routes
 app.use((req, res) => {
     res.status(404).json({ error: `Route ${req.method} ${req.path} not found` });

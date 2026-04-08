@@ -1,26 +1,40 @@
 import vision from '@google-cloud/vision';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
-const client = new vision.ImageAnnotatorClient({
-    apiKey: process.env.GOOGLE_VISION_API_KEY
-});
+let visionClient: any = null;
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
-const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+const getVisionClient = () => {
+    if (!visionClient) {
+        visionClient = new vision.ImageAnnotatorClient({
+            apiKey: process.env.GOOGLE_VISION_API_KEY
+        });
+    }
+    return visionClient;
+};
+
+let geminiModel: any = null;
+
+const getGeminiModel = () => {
+    if (!geminiModel) {
+        const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
+        geminiModel = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+    }
+    return geminiModel;
+};
 
 export const extractTextFromImage = async (imageBase64: string): Promise<string> => {
-    const [result] = await client.textDetection({
+    const [result] = await getVisionClient().documentTextDetection({
         image: {
             content: imageBase64
         }
     });
 
-    const detections = result.textAnnotations;
-    if (!detections || detections.length === 0) {
+    const fullText = result.fullTextAnnotation?.text || result.textAnnotations?.[0]?.description;
+    if (!fullText) {
         throw new Error('No text detected in image');
     }
 
-    return detections[0].description || '';
+    return fullText;
 };
 
 export const parseReceiptTextWithOllama = async (text: string): Promise<any> => {
