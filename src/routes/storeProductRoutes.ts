@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { addStoreProduct, fetchStoreProductsByProductId, fetchStoreProductsByChainId, fetchStoreProductByName, fetchStoreProductByProductAndChain } from '../controllers/storeProductController';
+import { addStoreProduct, fetchStoreProductsByProductId, fetchStoreProductsByChainId, fetchStoreProductByName, fetchStoreProductByProductAndChain, searchStoreProductsByChain } from '../controllers/storeProductController';
 
 const router = Router();
 /**
@@ -98,7 +98,7 @@ router.get('/store-products/chain/:chainId', fetchStoreProductsByChainId);
 *         description: A list of store products
  */
 // GET /api/store-products/search?name= - Get store products by name
-router.get('/store-products/search', fetchStoreProductByName);
+router.get('/store-products/search', searchStoreProductsByChain);
 
 router.get('/store-products/by-product-chain', fetchStoreProductByProductAndChain);
 

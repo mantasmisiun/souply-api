@@ -67,3 +67,14 @@ export const getStoreProductByProductAndChain = async (productId: number, chainI
     );
     return rows[0] || null;
 };
+
+export const searchStoreProductsByChain = async (name: string, chainId: number) => {
+    const [rows]: any = await pool.query(
+        `SELECT * FROM StoreProduct 
+         WHERE chainId = ? 
+         AND storeProductName LIKE ?
+         LIMIT 5`,
+        [chainId, `%${name}%`]
+    );
+    return rows;
+};

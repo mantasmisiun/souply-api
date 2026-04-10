@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { createStoreProduct, getStoreProductsByProductId, getStoreProductsByChainId, getStoreProductByName, getStoreProductByProductAndChain } from '../models/storeProductModel';
+import { createStoreProduct, getStoreProductsByProductId, getStoreProductsByChainId, getStoreProductByName, getStoreProductByProductAndChain, searchStoreProductsByChain as searchByChain } from '../models/storeProductModel';
 
 export const addStoreProduct = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -70,6 +70,25 @@ export const fetchStoreProductByProductAndChain = async (req: Request, res: Resp
             return;
         }
         res.json(storeProduct);
+    } catch (error) {
+        next(error);
+    }
+};
+
+export const searchStoreProductsByChain = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const { name, chainId } = req.query;
+        if (!name || typeof name !== 'string') {
+            res.status(400).json({ error: 'Name query parameter is required and must be a string' });
+            return;
+        }
+        if (chainId) {
+            const results = await searchByChain(name, Number(chainId));
+            res.json(results);
+        } else {
+            const results = await getStoreProductByName(name);
+            res.json(results);
+        }
     } catch (error) {
         next(error);
     }
