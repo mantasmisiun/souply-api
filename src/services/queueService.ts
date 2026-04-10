@@ -11,23 +11,26 @@ export const startWorker = () => {
     const worker = new Worker('receipt-processing', async (job: Job) => {
         const { receiptId, parsedData } = job.data;
 
-        const { updateReceiptDetails } = await import('../models/receiptModel');
-        const { updateReceiptStore } = await import('../models/receiptModel');
+        const { updateReceiptDetails, updateReceiptStore, getReceiptById, getReceiptByReceiptNoAndUser, deleteReceipt } = await import('../models/receiptModel');
+        const { deleteReceiptImage } = await import('../services/storageService');
         const { processReceipt } = await import('./receiptProcessingService');
 
         try {
-            // Update status to processing
             await updateReceiptDetails(receiptId, null, null, 'processing', parsedData);
+
+            if (parsedData.receiptNo) {
+                const receipt = await getReceiptById(receiptId);
+                const duplicate = await getReceiptByReceiptNoAndUser(parsedData.receiptNo, receipt.userId);
+                if (duplicate) {
+                    await deleteReceiptImage(receipt.filePath);
+                    await deleteReceipt(receiptId);
+                    return;
+                }
+            }
 
             const result = await processReceipt(receiptId, parsedData);
             await updateReceiptStore(receiptId, result.storeId);
-
-            await updateReceiptDetails(
-                receiptId,
-                parsedData.receiptNo,
-                new Date(parsedData.date),
-                'completed'
-            );
+            await updateReceiptDetails(receiptId, parsedData.receiptNo, new Date(parsedData.date), 'completed');
 
             return result;
         } catch (error) {

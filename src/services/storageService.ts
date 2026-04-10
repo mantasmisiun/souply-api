@@ -45,3 +45,9 @@ export const getPresignedUrl = async (objectName: string): Promise<string> => {
     // Generate presigned URL valid for 1 hour
     return await client.presignedGetObject(BUCKET, key, 60 * 60);
 };
+
+export const deleteReceiptImage = async (fileUrl: string): Promise<void> => {
+    const client = getClient();
+    const key = fileUrl.split(`/${BUCKET}/`)[1];
+    await client.removeObject(BUCKET, key);
+};
