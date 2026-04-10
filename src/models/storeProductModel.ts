@@ -1,12 +1,16 @@
 import pool from '../config/db';
 
-export const createStoreProduct = async (  
+type Connection = typeof pool | any;
+
+export const createStoreProduct = async (
     productId: number,
     chainId: number,
     storeProductName: string,
-    brandName: string | null
+    brandName: string | null,
+    conn?: Connection
 ) => {
-    const [result]: any = await pool.query(
+    const db = conn || pool;
+    const [result]: any = await db.query(
         'INSERT INTO StoreProduct (productId, chainId, storeProductName, brandName) VALUES (?, ?, ?, ?)',
         [productId, chainId, storeProductName, brandName]
     );
@@ -34,6 +38,7 @@ export const getStoreProductsByChainId = async (chainId: number) => {
     );
     return rows;
 };
+
 export const getStoreProductByName = async (storeProductName: string) => {
     const [rows]: any = await pool.query(
         'SELECT * FROM StoreProduct WHERE storeProductName LIKE ?',
@@ -42,13 +47,11 @@ export const getStoreProductByName = async (storeProductName: string) => {
     return rows;
 };
 
-//Get store product by name and chain for OCR matching
-export const getStoreProductByNameAndChain = async (storeProductName: string, chainId: number) => {
-    // Use first 60% of the name for fuzzy matching
+export const getStoreProductByNameAndChain = async (storeProductName: string, chainId: number, conn?: Connection) => {
+    const db = conn || pool;
     const matchLength = Math.floor(storeProductName.length * 0.6);
     const searchTerm = storeProductName.substring(0, matchLength);
-    
-    const [rows]: any = await pool.query(
+    const [rows]: any = await db.query(
         `SELECT * FROM StoreProduct 
          WHERE chainId = ? 
          AND storeProductName LIKE ?`,

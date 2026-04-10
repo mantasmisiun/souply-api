@@ -17,7 +17,7 @@ export const startWorker = () => {
 
         try {
             // Update status to processing
-            await updateReceiptDetails(receiptId, null, null, 'processing');
+            await updateReceiptDetails(receiptId, null, null, 'processing', parsedData);
 
             const result = await processReceipt(receiptId, parsedData);
             await updateReceiptStore(receiptId, result.storeId);

@@ -1,5 +1,7 @@
 import pool from '../config/db';
 
+type Connection = typeof pool | any;
+
 export const createPrice = async (
     storeProductId: number,
     storeId: number,
@@ -9,9 +11,11 @@ export const createPrice = async (
     promoEnd: Date | null,
     isFallback: boolean,
     date: Date,
-    priceVerified: boolean
+    priceVerified: boolean,
+    conn?: Connection
 ) => {
-    const [result]: any = await pool.query(
+    const db = conn || pool;
+    const [result]: any = await db.query(
         'INSERT INTO Price (storeProductId, storeId, userId, price, promoPrice, promoEnd, isFallback, date, priceVerified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
         [storeProductId, storeId, userId, price, promoPrice, promoEnd, isFallback, date, priceVerified]
     );
