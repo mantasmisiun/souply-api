@@ -96,3 +96,19 @@ export const fetchReceiptImage = async (req: Request, res: Response, next: NextF
         next(error);
     }
 };
+
+export const processReceiptManually = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const id = Number(req.params.id);
+        if (isNaN(id)) {
+            res.status(400).json({ error: 'Invalid receipt ID' });
+            return;
+        }
+        const { chainName, receiptNo, date, items, storeName, storeAddress } = req.body;
+        const { processReceiptManual } = await import('../services/receiptProcessingService');
+        const result = await processReceiptManual(id, { chainName, receiptNo, date, items, storeName, storeAddress });
+        res.json({ message: 'Receipt processed successfully', result });
+    } catch (error: any) {
+        next(error);
+    }
+};
