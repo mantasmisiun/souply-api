@@ -37,3 +37,11 @@ export const uploadReceiptImage = async (
 
     return `http://${process.env.MINIO_ENDPOINT}:${process.env.MINIO_PORT}/${BUCKET}/${objectName}`;
 };
+
+export const getPresignedUrl = async (objectName: string): Promise<string> => {
+    const client = getClient();
+    // Extract just the object name from the full URL
+    const key = objectName.split(`/${BUCKET}/`)[1];
+    // Generate presigned URL valid for 1 hour
+    return await client.presignedGetObject(BUCKET, key, 60 * 60);
+};

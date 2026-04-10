@@ -76,3 +76,23 @@ export const removeReceipt = async (req: Request, res: Response, next: NextFunct
         next(error);
     }
 };
+
+export const fetchReceiptImage = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const id = Number(req.params.id);
+        if (isNaN(id)) {
+            res.status(400).json({ error: 'Invalid receipt ID' });
+            return;
+        }
+        const receipt = await getReceiptById(id);
+        if (!receipt) {
+            res.status(404).json({ error: 'Receipt not found' });
+            return;
+        }
+        const { getPresignedUrl } = await import('../services/storageService');
+        const url = await getPresignedUrl(receipt.filePath);
+        res.json({ url });
+    } catch (error) {
+        next(error);
+    }
+};

@@ -23,7 +23,11 @@ export const getReceiptsByUserId = async (userId: string) => {
 
 export const getReceiptById = async (id: number) => {
     const [rows]: any = await pool.query(
-        'SELECT * FROM Receipt WHERE id = ?',
+        `SELECT r.*, sc.name as chainName 
+         FROM Receipt r
+         LEFT JOIN Store s ON r.storeId = s.id
+         LEFT JOIN StoreChain sc ON s.chainId = sc.id
+         WHERE r.id = ?`,
         [id]
     );
     return rows[0] || null;

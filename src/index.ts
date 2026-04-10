@@ -67,7 +67,7 @@ app.post('/api/receipts/upload', async (req, res, next) => {
 
         const { createReceipt } = await import('./models/receiptModel');
         receiptId = await createReceipt(
-            '00000000-0000-0000-0000-000000000000',
+            req.body.userId || '00000000-0000-0000-0000-000000000000',
             null,
             imageUrl,
             finalMimeType
