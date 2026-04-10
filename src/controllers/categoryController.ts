@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { createCategory, getTopLevelCategories, getSubCategories } from '../models/categoryModel';
+import { createCategory, getTopLevelCategories, getSubCategories, getCategoryById, getCategoryPath } from '../models/categoryModel';
 
 export const addCategory = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -42,3 +42,34 @@ export const fetchSubCategories = async (req: Request, res: Response, next: Next
     }
 };
 
+export const fetchCategoryById = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const id = Number(req.params.id);
+        if (isNaN(id)) {
+            res.status(400).json({ error: 'Invalid category ID' });
+            return;
+        }
+        const category = await getCategoryById(id);
+        if (!category) {
+            res.status(404).json({ error: 'Category not found' });
+            return;
+        }
+        res.json(category);
+    } catch (error) {
+        next(error);
+    }
+};
+
+export const fetchCategoryPath = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const id = Number(req.params.id);
+        if (isNaN(id)) {
+            res.status(400).json({ error: 'Invalid category ID' });
+            return;
+        }
+        const path = await getCategoryPath(id);
+        res.json({ path });
+    } catch (error) {
+        next(error);
+    }
+};

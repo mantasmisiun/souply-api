@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { addCategory, fetchAllCategories, fetchSubCategories } from '../controllers/categoryController';
+import { addCategory, fetchAllCategories, fetchSubCategories, fetchCategoryById, fetchCategoryPath } from '../controllers/categoryController';
 
 const router = Router();
 /**
@@ -66,5 +66,9 @@ router.get('/categories', fetchAllCategories);
  */
 // GET /api/categories/:id/subcategories - Get subcategories of a category
 router.get('/categories/:id/subcategories', fetchSubCategories);
+
+router.get('/categories/:id', fetchCategoryById);
+
+router.get('/categories/:id/path', fetchCategoryPath);
 
 export default router;

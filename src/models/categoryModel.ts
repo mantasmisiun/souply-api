@@ -36,3 +36,28 @@ export const getAllCategories = async () => {
     );
     return categories;
 };
+
+export const getCategoryById = async (id: number) => {
+    const [rows]: any = await pool.query(
+        'SELECT * FROM Category WHERE id = ?',
+        [id]
+    );
+    return rows[0] || null;
+};
+
+export const getCategoryPath = async (id: number): Promise<string> => {
+    const parts: string[] = [];
+    let currentId: number | null = id;
+    
+    while (currentId !== null) {
+        const [rows]: any = await pool.query(
+            'SELECT * FROM Category WHERE id = ?',
+            [currentId]
+        );
+        if (!rows[0]) break;
+        parts.unshift(rows[0].name);
+        currentId = rows[0].parentCategoryId;
+    }
+    
+    return parts.join(' > ');
+};
