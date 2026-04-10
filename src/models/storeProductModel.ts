@@ -59,3 +59,11 @@ export const getStoreProductByNameAndChain = async (storeProductName: string, ch
     );
     return rows[0] || null;
 };
+
+export const getStoreProductByProductAndChain = async (productId: number, chainId: number) => {
+    const [rows]: any = await pool.query(
+        'SELECT * FROM StoreProduct WHERE productId = ? AND chainId = ?',
+        [productId, chainId]
+    );
+    return rows[0] || null;
+};

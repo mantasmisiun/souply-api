@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { createStoreChain } from '../models/storeChainModel';
+import { createStoreChain, getAllChains } from '../models/storeChainModel';
 import { createStore, getAllStores, getStoreById } from '../models/storeModel';
 
 export const addStoreChain = async (req: Request, res: Response, next: NextFunction) => {
@@ -52,6 +52,16 @@ export const fetchStoreById = async (req: Request, res: Response, next: NextFunc
             return;
         }
         res.json(store);
+    } catch (error) {
+        next(error);
+    }
+};
+
+export const fetchAllChains = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const { name } = req.query;
+        const rows = await getAllChains(name as string | undefined);
+        res.json(rows);
     } catch (error) {
         next(error);
     }

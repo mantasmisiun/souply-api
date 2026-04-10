@@ -19,3 +19,11 @@ export const getStoreChainByName = async (name: string, conn?: Connection) => {
     );
     return rows[0] || null;
 };
+
+export const getAllChains = async (name?: string) => {
+    const [rows]: any = await pool.query(
+        name ? 'SELECT * FROM StoreChain WHERE name = ?' : 'SELECT * FROM StoreChain',
+        name ? [name] : []
+    );
+    return rows;
+};

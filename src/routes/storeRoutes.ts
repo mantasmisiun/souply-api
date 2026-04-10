@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { addStoreChain, addStore, fetchAllStores, fetchStoreById } from '../controllers/storeController';
+import { addStoreChain, addStore, fetchAllStores, fetchStoreById, fetchAllChains } from '../controllers/storeController';
 
 const router = Router();
 
@@ -107,5 +107,7 @@ router.get('/stores', fetchAllStores);
  *         description: Store not found
  */
 router.get('/stores/:id', fetchStoreById);
+
+router.get('/chains', fetchAllChains);
 
 export default router;

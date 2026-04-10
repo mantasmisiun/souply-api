@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { createStoreProduct, getStoreProductsByProductId, getStoreProductsByChainId, getStoreProductByName } from '../models/storeProductModel';
+import { createStoreProduct, getStoreProductsByProductId, getStoreProductsByChainId, getStoreProductByName, getStoreProductByProductAndChain } from '../models/storeProductModel';
 
 export const addStoreProduct = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -52,6 +52,24 @@ export const fetchStoreProductByName = async (req: Request, res: Response, next:
         }
         const storeProducts = await getStoreProductByName(name);
         res.json(storeProducts);
+    } catch (error) {
+        next(error);
+    }
+};
+
+export const fetchStoreProductByProductAndChain = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const { productId, chainId } = req.query;
+        if (!productId || !chainId) {
+            res.status(400).json({ error: 'Both productId and chainId are required' });
+            return;
+        }
+        const storeProduct = await getStoreProductByProductAndChain(Number(productId), Number(chainId));
+        if (!storeProduct) {
+            res.status(404).json({ error: 'Store product not found' });
+            return;
+        }
+        res.json(storeProduct);
     } catch (error) {
         next(error);
     }
