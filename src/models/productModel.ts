@@ -59,3 +59,13 @@ export const updateProductCategory = async (storeProductId: number, categoryId: 
         [categoryId, storeProductId]
     );
 };
+
+export const updateProductIsWeighable = async (storeProductId: number, isWeighable: boolean) => {
+    await pool.query(
+        `UPDATE Product p
+         JOIN StoreProduct sp ON sp.productId = p.id
+         SET p.isWeighable = ?
+         WHERE sp.id = ?`,
+        [isWeighable ? 1 : 0, storeProductId]
+    );
+};

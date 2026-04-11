@@ -2,7 +2,7 @@ import { Request, Response, NextFunction } from "express";
 import { createReceipt, getReceiptsByUserId, getReceiptById, updateReceiptDetails, deleteReceipt, getReceiptItemsWithDetails, updateReceiptParsedDataItem } from "../models/receiptModel";
 import { updatePriceById, createPrice } from "../models/priceModel";
 import { updateStoreProductName, createStoreProduct } from "../models/storeProductModel";
-import { updateProductCategory, createProduct } from "../models/productModel";
+import { updateProductCategory, createProduct, updateProductIsWeighable } from "../models/productModel";
 import { getChainIdByStoreId } from "../models/storeModel";
 import { getPresignedUrl } from "../services/storageService";
 
@@ -135,8 +135,8 @@ export const updateReceiptItem = async (req: Request, res: Response, next: NextF
     try {
         const receiptId = Number(req.params.id);
         const priceId = Number(req.params.priceId);
-        const { name, categoryId, price, promoPrice, oldName, storeProductId } = req.body;
-
+        const { name, categoryId, price, promoPrice, oldName, storeProductId, isWeighable } = req.body;
+        await updateProductIsWeighable(storeProductId, isWeighable || false);
         if (isNaN(receiptId) || isNaN(priceId)) {
             res.status(400).json({ error: 'Invalid IDs' });
             return;
