@@ -1,8 +1,10 @@
 import { Request, Response, NextFunction } from "express";
 import { createReceipt, getReceiptsByUserId, getReceiptById, updateReceiptDetails, deleteReceipt, getReceiptItemsWithDetails, updateReceiptParsedDataItem } from "../models/receiptModel";
-import { updatePriceById } from "../models/priceModel";
-import { updateStoreProductName } from "../models/storeProductModel";
-import { updateProductCategory } from "../models/productModel";
+import { updatePriceById, createPrice } from "../models/priceModel";
+import { updateStoreProductName, createStoreProduct } from "../models/storeProductModel";
+import { updateProductCategory, createProduct } from "../models/productModel";
+import { getChainIdByStoreId } from "../models/storeModel";
+import { getPresignedUrl } from "../services/storageService";
 
 export const addReceipt = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -92,7 +94,6 @@ export const fetchReceiptImage = async (req: Request, res: Response, next: NextF
             res.status(404).json({ error: 'Receipt not found' });
             return;
         }
-        const { getPresignedUrl } = await import('../services/storageService');
         const url = await getPresignedUrl(receipt.filePath);
         res.json({ url });
     } catch (error) {
@@ -140,12 +141,58 @@ export const updateReceiptItem = async (req: Request, res: Response, next: NextF
             res.status(400).json({ error: 'Invalid IDs' });
             return;
         }
+
         await updatePriceById(priceId, price, promoPrice || null);
         await updateStoreProductName(storeProductId, name);
         await updateProductCategory(storeProductId, categoryId);
         await updateReceiptParsedDataItem(receiptId, oldName, name, categoryId, price, promoPrice || null);
 
         res.json({ message: 'Item updated successfully' });
+    } catch (error) {
+        next(error);
+    }
+};
+
+export const addReceiptItem = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const receiptId = Number(req.params.id);
+        if (isNaN(receiptId)) {
+            res.status(400).json({ error: 'Invalid receipt ID' });
+            return;
+        }
+
+        const { name, categoryId, price, promoPrice, brandName, isWeighable } = req.body;
+
+        if (!name || !categoryId || !price) {
+            res.status(400).json({ error: 'name, categoryId and price are required' });
+            return;
+        }
+
+        const receipt = await getReceiptById(receiptId);
+        if (!receipt) {
+            res.status(404).json({ error: 'Receipt not found' });
+            return;
+        }
+
+        const chainId = await getChainIdByStoreId(receipt.storeId);
+        const productId = await createProduct(categoryId, null, name, null, isWeighable || false);
+        const storeProductId = await createStoreProduct(productId, chainId, name, brandName || null);
+
+        await createPrice(
+            storeProductId,
+            receipt.storeId,
+            price,
+            promoPrice || null,
+            null,
+            false,
+            new Date(receipt.receiptDate || new Date()),
+            true,
+            receiptId
+        );
+
+        await updateReceiptParsedDataItem(receiptId, '', name, categoryId, price, promoPrice || null);
+
+        res.status(201).json({ message: 'Item added successfully' });
     } catch (error) {
         next(error);
     }

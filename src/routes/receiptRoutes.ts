@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { addReceipt, fetchReceiptById, fetchReceiptsByUserId, updateReceiptOcrDetails, removeReceipt, fetchReceiptImage, processReceiptManually, fetchReceiptItems, updateReceiptItem } from '../controllers/receiptController';
+import { addReceipt, fetchReceiptById, fetchReceiptsByUserId, updateReceiptOcrDetails, removeReceipt, fetchReceiptImage, processReceiptManually, fetchReceiptItems, updateReceiptItem, addReceiptItem } from '../controllers/receiptController';
 
 const router = Router();
 
@@ -143,5 +143,7 @@ router.post('/receipts/:id/process', processReceiptManually);
 router.get('/receipts/:id/items', fetchReceiptItems);
 
 router.patch('/receipts/:id/items/:priceId', updateReceiptItem);
+
+router.post('/receipts/:id/items', addReceiptItem);
 
 export default router;

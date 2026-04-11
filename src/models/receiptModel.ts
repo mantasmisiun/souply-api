@@ -109,11 +109,26 @@ export const updateReceiptParsedDataItem = async (
     if (!receipt?.parsedData) return;
 
     const parsedData = receipt.parsedData;
-    parsedData.items = parsedData.items.map((item: any) =>
-        item.name === oldName
-            ? { ...item, name: newName, categoryId, price, promoPrice }
-            : item
-    );
+
+    if (oldName === '') {
+        // Add new item
+        parsedData.items.push({
+            name: newName,
+            categoryId,
+            price,
+            promoPrice,
+            quantity: 1,
+            isWeighable: false,
+            brandName: null
+        });
+    } else {
+        // Update existing item
+        parsedData.items = parsedData.items.map((item: any) =>
+            item.name === oldName
+                ? { ...item, name: newName, categoryId, price, promoPrice }
+                : item
+        );
+    }
 
     await pool.query(
         'UPDATE Receipt SET parsedData = ? WHERE id = ?',
