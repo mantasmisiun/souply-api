@@ -1,33 +1,28 @@
 import { Request, Response, NextFunction } from 'express';
 import { createPrice, getLatestPriceByStoreProduct, getLatestPricesAcrossStores, getActivePromoPrices, getPriceHistoryForStoreProduct } from '../models/priceModel';
 
-const SYSTEM_USER_ID = '00000000-0000-0000-0000-000000000000';
-
 export const addPrice = async (req: Request, res: Response, next: NextFunction) => {
     try {
-        const { storeProductId, storeId, userId, price, promoPrice, promoEnd, isFallback, date, priceVerified } = req.body;
+        const { storeProductId, storeId, price, promoPrice, promoEnd, isFallback, date, priceVerified, receiptId } = req.body;
 
         if (!storeProductId || !storeId || !price || !date) {
             res.status(400).json({ error: 'storeProductId, storeId, price and date are required' });
             return;
         }
 
-        const resolvedUserId = userId || SYSTEM_USER_ID;
-        const resolvedPriceVerified = resolvedUserId === SYSTEM_USER_ID ? true : (priceVerified || false);
-
         try {
             const id = await createPrice(
                 storeProductId,
                 storeId,
-                resolvedUserId,
                 price,
                 promoPrice || null,
                 promoEnd || null,
                 isFallback || false,
                 new Date(date),
-                resolvedPriceVerified
+                priceVerified || false,
+                receiptId || null
             );
-            res.status(201).json({ id, storeProductId, storeId, userId: resolvedUserId, price, promoPrice, promoEnd, date, isFallback, priceVerified: resolvedPriceVerified });
+            res.status(201).json({ id, storeProductId, storeId, price, promoPrice, promoEnd, date, isFallback, priceVerified, receiptId });
         } catch (error: any) {
             if (error.code === 'ER_DUP_ENTRY') {
                 res.status(409).json({ error: 'Price entry already exists for this store product, store and date' });

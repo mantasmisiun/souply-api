@@ -62,10 +62,14 @@ export const updateReceiptStore = async (id: number, storeId: number, conn?: Con
     );
 };
 
-export const getReceiptByReceiptNoAndUser = async (receiptNo: string, userId: string) => {
+export const getReceiptByReceiptNoAndUser = async (receiptNo: string, userId: string, excludeReceiptId?: number) => {
     const [rows]: any = await pool.query(
-        'SELECT * FROM Receipt WHERE receiptNo = ? AND userId = ? AND processingStatus = "completed"',
-        [receiptNo, userId]
+        `SELECT * FROM Receipt 
+         WHERE receiptNo = ? 
+         AND userId = ? 
+         AND processingStatus IN ("completed", "failed")
+         ${excludeReceiptId ? 'AND id != ?' : ''}`,
+        excludeReceiptId ? [receiptNo, userId, excludeReceiptId] : [receiptNo, userId]
     );
     return rows[0] || null;
 };

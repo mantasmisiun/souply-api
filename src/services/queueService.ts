@@ -20,11 +20,20 @@ export const startWorker = () => {
 
             if (parsedData.receiptNo) {
                 const receipt = await getReceiptById(receiptId);
-                const duplicate = await getReceiptByReceiptNoAndUser(parsedData.receiptNo, receipt.userId);
-                if (duplicate) {
+                
+                // Check for completed duplicate
+                const completedDuplicate = await getReceiptByReceiptNoAndUser(parsedData.receiptNo, receipt.userId, receiptId);
+                if (completedDuplicate && completedDuplicate.processingStatus === 'completed') {
                     await deleteReceiptImage(receipt.filePath);
                     await deleteReceipt(receiptId);
                     return;
+                }
+                
+                // Delete any failed duplicates to clean up
+                const failedDuplicate = await getReceiptByReceiptNoAndUser(parsedData.receiptNo, receipt.userId, receiptId);
+                if (failedDuplicate && failedDuplicate.processingStatus === 'failed') {
+                    await deleteReceiptImage(failedDuplicate.filePath);
+                    await deleteReceipt(failedDuplicate.id);
                 }
             }
 

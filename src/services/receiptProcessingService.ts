@@ -8,8 +8,6 @@ import { getAllCategories } from '../models/categoryModel';
 import { assignCategoriesToProducts } from './ocrService';
 import pool from '../config/db';
 
-const SYSTEM_USER_ID = '00000000-0000-0000-0000-000000000000';
-
 export const processReceipt = async (receiptId: number, parsedData: any) => {
     const connection = await (pool as any).getConnection();
 
@@ -55,13 +53,13 @@ export const processReceipt = async (receiptId: number, parsedData: any) => {
                 await createPrice(
                     storeProduct.id,
                     store.id,
-                    SYSTEM_USER_ID,
                     item.price,
                     item.promoPrice || null,
                     null,
                     false,
                     new Date(parsedData.date),
                     true,
+                    receiptId,
                     connection
                 );
             } catch (error: any) {
@@ -129,13 +127,13 @@ export const processReceiptManual = async (receiptId: number, parsedData: any) =
                 await createPrice(
                     storeProduct.id,
                     store.id,
-                    SYSTEM_USER_ID,
                     item.price,
                     item.promoPrice || null,
                     null,
                     false,
                     new Date(parsedData.date),
                     true,
+                    receiptId,
                     connection
                 );
             } catch (error: any) {
@@ -147,9 +145,9 @@ export const processReceiptManual = async (receiptId: number, parsedData: any) =
 
         // Step 4 — Update receipt
         await updateReceiptDetails(
-            receiptId, 
-            parsedData.receiptNo, 
-            new Date(parsedData.date), 
+            receiptId,
+            parsedData.receiptNo,
+            new Date(parsedData.date),
             'completed',
             parsedData,
             connection
