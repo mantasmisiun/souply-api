@@ -73,3 +73,50 @@ export const getReceiptByReceiptNoAndUser = async (receiptNo: string, userId: st
     );
     return rows[0] || null;
 };
+
+export const getReceiptItemsWithDetails = async (receiptId: number) => {
+    const [rows]: any = await pool.query(
+        `SELECT 
+            sp.storeProductName as name,
+            sp.brandName,
+            p.categoryId,
+            c.name as categoryName,
+            pr.price,
+            pr.promoPrice,
+            pr.id as priceId,
+            sp.id as storeProductId
+         FROM Price pr
+         JOIN StoreProduct sp ON pr.storeProductId = sp.id
+         JOIN Product p ON sp.productId = p.id
+         JOIN Category c ON p.categoryId = c.id
+         JOIN Store s ON pr.storeId = s.id
+         JOIN Receipt r ON r.storeId = s.id
+         WHERE r.id = ? AND pr.receiptId = ?`,
+        [receiptId, receiptId]
+    );
+    return rows;
+};
+
+export const updateReceiptParsedDataItem = async (
+    receiptId: number,
+    oldName: string,
+    newName: string,
+    categoryId: number,
+    price: number,
+    promoPrice: number | null
+) => {
+    const receipt = await getReceiptById(receiptId);
+    if (!receipt?.parsedData) return;
+
+    const parsedData = receipt.parsedData;
+    parsedData.items = parsedData.items.map((item: any) =>
+        item.name === oldName
+            ? { ...item, name: newName, categoryId, price, promoPrice }
+            : item
+    );
+
+    await pool.query(
+        'UPDATE Receipt SET parsedData = ? WHERE id = ?',
+        [JSON.stringify(parsedData), receiptId]
+    );
+};

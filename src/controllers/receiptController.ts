@@ -1,5 +1,8 @@
 import { Request, Response, NextFunction } from "express";
-import { createReceipt, getReceiptsByUserId, getReceiptById, updateReceiptDetails, deleteReceipt } from "../models/receiptModel";
+import { createReceipt, getReceiptsByUserId, getReceiptById, updateReceiptDetails, deleteReceipt, getReceiptItemsWithDetails, updateReceiptParsedDataItem } from "../models/receiptModel";
+import { updatePriceById } from "../models/priceModel";
+import { updateStoreProductName } from "../models/storeProductModel";
+import { updateProductCategory } from "../models/productModel";
 
 export const addReceipt = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -109,6 +112,41 @@ export const processReceiptManually = async (req: Request, res: Response, next: 
         const result = await processReceiptManual(id, { chainName, receiptNo, date, items, storeName, storeAddress });
         res.json({ message: 'Receipt processed successfully', result });
     } catch (error: any) {
+        next(error);
+    }
+};
+
+export const fetchReceiptItems = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const id = Number(req.params.id);
+        if (isNaN(id)) {
+            res.status(400).json({ error: 'Invalid receipt ID' });
+            return;
+        }
+        const items = await getReceiptItemsWithDetails(id);
+        res.json(items);
+    } catch (error) {
+        next(error);
+    }
+};
+
+export const updateReceiptItem = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const receiptId = Number(req.params.id);
+        const priceId = Number(req.params.priceId);
+        const { name, categoryId, price, promoPrice, oldName, storeProductId } = req.body;
+
+        if (isNaN(receiptId) || isNaN(priceId)) {
+            res.status(400).json({ error: 'Invalid IDs' });
+            return;
+        }
+        await updatePriceById(priceId, price, promoPrice || null);
+        await updateStoreProductName(storeProductId, name);
+        await updateProductCategory(storeProductId, categoryId);
+        await updateReceiptParsedDataItem(receiptId, oldName, name, categoryId, price, promoPrice || null);
+
+        res.json({ message: 'Item updated successfully' });
+    } catch (error) {
         next(error);
     }
 };

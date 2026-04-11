@@ -49,3 +49,13 @@ export const getProductByName = async (name: string) => {
     );
     return rows[0] || null;
 };
+
+export const updateProductCategory = async (storeProductId: number, categoryId: number) => {
+    await pool.query(
+        `UPDATE Product p
+         JOIN StoreProduct sp ON sp.productId = p.id
+         SET p.categoryId = ?
+         WHERE sp.id = ?`,
+        [categoryId, storeProductId]
+    );
+};

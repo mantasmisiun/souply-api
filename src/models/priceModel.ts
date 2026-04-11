@@ -86,3 +86,10 @@ export const getActivePromoPrices = async () => {
         priceVerified: row.priceVerified === 1
     }));
 };
+
+export const updatePriceById = async (id: number, price: number, promoPrice: number | null) => {
+    await pool.query(
+        'UPDATE Price SET price = ?, promoPrice = ? WHERE id = ?',
+        [price, promoPrice, id]
+    );
+};

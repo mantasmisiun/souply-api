@@ -78,3 +78,10 @@ export const searchStoreProductsByChain = async (name: string, chainId: number) 
     );
     return rows;
 };
+
+export const updateStoreProductName = async (id: number, storeProductName: string) => {
+    await pool.query(
+        'UPDATE StoreProduct SET storeProductName = ? WHERE id = ?',
+        [storeProductName, id]
+    );
+};
