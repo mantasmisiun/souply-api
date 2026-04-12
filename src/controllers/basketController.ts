@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { createBasket, getBasketsByUserId, getBasketById, updateBasketUpdatedAt, updateBasketStatus, deleteBasket } from '../models/basketModel';
+import { createBasket, getBasketsByUserId, getBasketById, updateBasketUpdatedAt, updateBasketStatus, deleteBasket, updateBasketName } from '../models/basketModel';
 
 export const addBasket = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -101,6 +101,30 @@ export const removeBasket = async (req: Request, res: Response, next: NextFuncti
         }
         await deleteBasket(id);
         res.json({ message: 'Basket deleted successfully' });
+    } catch (error) {
+        next(error);
+    }
+};
+
+export const renameBasket = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const id = Number(req.params.id);
+        const { name } = req.body;
+        if (isNaN(id)) {
+            res.status(400).json({ error: 'Invalid basket ID' });
+            return;
+        }
+        if (!name || typeof name !== 'string') {
+            res.status(400).json({ error: 'Name is required' });
+            return;
+        }
+        const basket = await getBasketById(id);
+        if (!basket) {
+            res.status(404).json({ error: 'Basket not found' });
+            return;
+        }
+        await updateBasketName(id, name);
+        res.json({ message: 'Basket renamed successfully' });
     } catch (error) {
         next(error);
     }
