@@ -129,3 +129,25 @@ export const renameBasket = async (req: Request, res: Response, next: NextFuncti
         next(error);
     }
 };
+
+// This endpoint will trigger price comparison for the basket and update its status to 'compared'
+export const calculateBasket = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const id = Number(req.params.id);
+        if (isNaN(id)) {
+            res.status(400).json({ error: 'Invalid basket ID' });
+            return;
+        }
+        const basket = await getBasketById(id);
+        if (!basket) {
+            res.status(404).json({ error: 'Basket not found' });
+            return;
+        }
+        const { calculateBasketForStores } = await import('../services/basketCalculationService');
+        const results = await calculateBasketForStores(id);
+        await updateBasketStatus(id, 'compared');
+        res.json(results);
+    } catch (error) {
+        next(error);
+    }
+};

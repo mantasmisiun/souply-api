@@ -71,3 +71,21 @@ export const getStoresByChainId = async (chainId: number) => {
     );
     return rows;
 };
+
+//For basket price comparison, pull closest stores to user
+export const getClosestStores = async (lat: number, lng: number, limit: number = 10) => {
+    const [rows]: any = await pool.query(
+        `SELECT s.*, sc.name as chainName,
+            (6371 * ACOS(
+                COS(RADIANS(?)) * COS(RADIANS(latitude)) *
+                COS(RADIANS(longitude) - RADIANS(?)) +
+                SIN(RADIANS(?)) * SIN(RADIANS(latitude))
+            )) AS distance
+         FROM Store s
+         JOIN StoreChain sc ON s.chainId = sc.id
+         ORDER BY distance ASC
+         LIMIT ?`,
+        [lat, lng, lat, limit]
+    );
+    return rows;
+};

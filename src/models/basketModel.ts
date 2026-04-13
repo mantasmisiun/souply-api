@@ -49,3 +49,15 @@ export const updateBasketName = async (id: number, name: string) => {
 export const deleteBasket = async (id: number) => {
     await pool.query('DELETE FROM Basket WHERE id = ?', [id]);
 };
+
+//For basket price comparison, to get productIds and their details for items in the basket
+export const getBasketProductIds = async (basketId: number) => {
+    const [rows]: any = await pool.query(
+        `SELECT bi.productId, bi.quantity, p.name, p.isWeighable
+         FROM BasketItem bi
+         JOIN Product p ON bi.productId = p.id
+         WHERE bi.basketId = ?`,
+        [basketId]
+    );
+    return rows;
+};
