@@ -17,7 +17,9 @@ export const createListItem = async (
 export const getListItemsByShoppingListId = async (listId: number) => {
     const [rows]: any = await pool.query(
         `SELECT ShoppingListItem.*,
-                COALESCE(Product.name, ShoppingListItem.customName) AS productName
+                COALESCE(Product.name, ShoppingListItem.customName) AS productName,
+                Product.isWeighable,
+                Product.imageUrl
          FROM ShoppingListItem
          LEFT JOIN Product ON ShoppingListItem.productId = Product.id
          WHERE ShoppingListItem.listId = ?
@@ -27,6 +29,7 @@ export const getListItemsByShoppingListId = async (listId: number) => {
     return rows.map((row: any) => ({
         ...row,
         isChecked: row.isChecked === 1,
+        isWeighable: row.isWeighable === 1,
         quantity: parseFloat(row.quantity),
         price: row.price ? parseFloat(row.price) : null,
     }));
