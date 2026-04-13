@@ -9,6 +9,8 @@ interface StoreResult {
     storeName: string;
     chainName: string;
     chainId: number;
+    chainLogoUrl: string | null;
+    storeAddress: string;
     distance: number;
     total: number;
     isApproximated: boolean;
@@ -62,6 +64,8 @@ export const calculateBasketForStores = async (basketId: number): Promise<StoreR
             storeName: store.name,
             chainName: store.chainName,
             chainId: store.chainId,
+            chainLogoUrl: store.logoUrl || null,
+            storeAddress: store.address,
             distance: parseFloat(store.distance.toFixed(2)),
             total: Math.round(total * 100) / 100,
             isApproximated,

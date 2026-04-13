@@ -75,7 +75,7 @@ export const getStoresByChainId = async (chainId: number) => {
 //For basket price comparison, pull closest stores to user
 export const getClosestStores = async (lat: number, lng: number, limit: number = 10) => {
     const [rows]: any = await pool.query(
-        `SELECT s.*, sc.name as chainName,
+        `SELECT s.*, sc.name as chainName, sc.logoUrl,
             (6371 * ACOS(
                 COS(RADIANS(?)) * COS(RADIANS(latitude)) *
                 COS(RADIANS(longitude) - RADIANS(?)) +
