@@ -142,13 +142,38 @@ const calculateItemPrice = async (
     );
 
     if (!priceRows.length) {
+        // No price for this store — calculate average from other stores
+        const [avgRows]: any = await pool.query(
+            `SELECT AVG(COALESCE(p.promoPrice, p.price)) as avgPrice
+            FROM Price p
+            JOIN StoreProduct sp ON p.storeProductId = sp.id
+            JOIN Store s ON p.storeId = s.id
+            JOIN (
+                SELECT id FROM Store
+                ORDER BY (
+                    6371 * ACOS(
+                        COS(RADIANS(?)) * COS(RADIANS(latitude)) *
+                        COS(RADIANS(longitude) - RADIANS(?)) +
+                        SIN(RADIANS(?)) * SIN(RADIANS(latitude))
+                    )
+                ) ASC LIMIT 10
+            ) closest ON s.id = closest.id
+            WHERE sp.productId = ?
+            AND p.id = (
+                SELECT MAX(p2.id) FROM Price p2
+                WHERE p2.storeProductId = p.storeProductId
+                AND p2.storeId = p.storeId
+            )`,
+            [55.91130643124872, 23.24787565545356, 55.91130643124872, productId]
+        );
+        const avgPrice = avgRows[0]?.avgPrice ? parseFloat(avgRows[0].avgPrice) : null;
         return {
             productId,
             productName,
             quantity,
-            price: null,
+            price: avgPrice,
             promoPrice: null,
-            effectivePrice: null,
+            effectivePrice: avgPrice,
             isApproximated: true,
             isFallback: false,
         };
