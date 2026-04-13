@@ -85,3 +85,12 @@ export const updateStoreProductName = async (id: number, storeProductName: strin
         [storeProductName, id]
     );
 };
+
+//For verifying price's storeProduct and store belong to the same chain
+export const getChainIdByStoreProductId = async (storeProductId: number) => {
+    const [rows]: any = await pool.query(
+        'SELECT chainId FROM StoreProduct WHERE id = ?',
+        [storeProductId]
+    );
+    return rows[0]?.chainId || null;
+};

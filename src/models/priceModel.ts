@@ -93,3 +93,20 @@ export const updatePriceById = async (id: number, price: number, promoPrice: num
         [price, promoPrice, id]
     );
 };
+
+//For fallback price
+export const getPriceByStoreProductAndStore = async (storeProductId: number, storeId: number) => {
+    const [rows]: any = await pool.query(
+        `SELECT * FROM Price WHERE storeProductId = ? AND storeId = ? 
+         ORDER BY date DESC LIMIT 1`,
+        [storeProductId, storeId]
+    );
+    return rows[0] || null;
+};
+// For fallback price
+export const updateFallbackPrice = async (id: number, price: number, promoPrice: number | null, date: Date) => {
+    await pool.query(
+        'UPDATE Price SET price = ?, promoPrice = ?, date = ? WHERE id = ?',
+        [price, promoPrice, date, id]
+    );
+};

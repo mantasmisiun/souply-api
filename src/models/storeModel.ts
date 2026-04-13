@@ -62,3 +62,12 @@ export const getChainIdByStoreId = async (storeId: number) => {
     );
     return rows[0]?.chainId || null;
 };
+
+//For fallback price service
+export const getStoresByChainId = async (chainId: number) => {
+    const [rows]: any = await pool.query(
+        'SELECT * FROM Store WHERE chainId = ?',
+        [chainId]
+    );
+    return rows;
+};

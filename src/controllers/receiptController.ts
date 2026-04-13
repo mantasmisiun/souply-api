@@ -136,7 +136,7 @@ export const updateReceiptItem = async (req: Request, res: Response, next: NextF
         const receiptId = Number(req.params.id);
         const priceId = Number(req.params.priceId);
         const { name, categoryId, price, promoPrice, oldName, storeProductId, isWeighable } = req.body;
-        await updateProductIsWeighable(storeProductId, isWeighable || false);
+
         if (isNaN(receiptId) || isNaN(priceId)) {
             res.status(400).json({ error: 'Invalid IDs' });
             return;
@@ -145,7 +145,18 @@ export const updateReceiptItem = async (req: Request, res: Response, next: NextF
         await updatePriceById(priceId, price, promoPrice || null);
         await updateStoreProductName(storeProductId, name);
         await updateProductCategory(storeProductId, categoryId);
+        await updateProductIsWeighable(storeProductId, isWeighable || false);
         await updateReceiptParsedDataItem(receiptId, oldName, name, categoryId, price, promoPrice || null);
+
+        // Propagate fallback prices
+        const receipt = await getReceiptById(receiptId);
+        if (receipt?.storeId) {
+            const chainId = await getChainIdByStoreId(receipt.storeId);
+            if (chainId) {
+                const { propagateFallbackPrices } = await import('../services/priceService');
+                await propagateFallbackPrices(storeProductId, receipt.storeId, chainId, price, promoPrice || null, new Date());
+            }
+        }
 
         res.json({ message: 'Item updated successfully' });
     } catch (error) {

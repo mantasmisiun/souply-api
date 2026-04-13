@@ -6,6 +6,7 @@ import { createPrice } from '../models/priceModel';
 import { updateReceiptDetails, updateReceiptStore } from '../models/receiptModel';
 import { getAllCategories } from '../models/categoryModel';
 import { assignCategoriesToProducts } from './ocrService';
+import { propagateFallbackPrices } from './priceService';
 import pool from '../config/db';
 
 export const processReceipt = async (receiptId: number, parsedData: any) => {
@@ -67,6 +68,16 @@ export const processReceipt = async (receiptId: number, parsedData: any) => {
                     throw error;
                 }
             }
+
+            // Propagate fallback prices to other stores in the same chain
+            await propagateFallbackPrices(
+                storeProduct.id,
+                store.id,
+                chain.id,
+                item.price,
+                item.promoPrice || null,
+                new Date(parsedData.date)
+            );
         }
 
         // Step 5 — Update receipt
@@ -141,6 +152,16 @@ export const processReceiptManual = async (receiptId: number, parsedData: any) =
                     throw error;
                 }
             }
+
+            // Propagate fallback prices to other stores in the same chain
+            await propagateFallbackPrices(
+                storeProduct.id,
+                store.id,
+                chain.id,
+                item.price,
+                item.promoPrice || null,
+                new Date(parsedData.date)
+            );
         }
 
         // Step 4 — Update receipt
