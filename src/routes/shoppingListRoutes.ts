@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { addShoppingList, fetchShoppingListsByUserId, fetchShoppingListById, removeShoppingList } from '../controllers/shoppingListController';
+import { addShoppingList, fetchShoppingListsByUserId, fetchShoppingListById, removeShoppingList, changeShoppingListStatus, duplicateList } from '../controllers/shoppingListController';
 
 const router = Router();
 
@@ -94,4 +94,7 @@ router.get('/shopping-lists/:id', fetchShoppingListById);
 // DELETE /api/shopping-lists/:id - Delete a shopping list by ID
 router.delete('/shopping-lists/:id', removeShoppingList);
 
+router.patch('/shopping-lists/:id/status', changeShoppingListStatus);
+
+router.post('/shopping-lists/:id/duplicate', duplicateList);
 export default router;

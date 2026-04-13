@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { createShoppingList, getShoppingListById, getShoppingListsByUserId, deleteShoppingList } from '../models/shoppingListModel';
+import { createShoppingList, getShoppingListById, getShoppingListsByUserId, deleteShoppingList, updateShoppingListStatus } from '../models/shoppingListModel';
 
 export const addShoppingList = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -43,6 +43,26 @@ export const fetchShoppingListById = async (req: Request, res: Response, next: N
     }
 };
 
+export const changeShoppingListStatus = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const id = Number(req.params.id);
+        const { status } = req.body;
+        if (isNaN(id)) {
+            res.status(400).json({ error: 'Invalid shopping list ID' });
+            return;
+        }
+        const validStatuses = ['active', 'completed'];
+        if (!status || !validStatuses.includes(status)) {
+            res.status(400).json({ error: 'Status must be active or completed' });
+            return;
+        }
+        await updateShoppingListStatus(id, status);
+        res.json({ message: 'Status updated successfully' });
+    } catch (error) {
+        next(error);
+    }
+};
+
 export const removeShoppingList = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const id = Number(req.params.id);
@@ -52,6 +72,24 @@ export const removeShoppingList = async (req: Request, res: Response, next: Next
         }
         await deleteShoppingList(id);
         res.status(204).send();
+    } catch (error) {
+        next(error);
+    }
+};
+
+export const duplicateList = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const id = Number(req.params.id);
+        const { userId } = req.body;
+        if (isNaN(id) || !userId) {
+            res.status(400).json({ error: 'Invalid ID or missing userId' });
+            return;
+        }
+        const { duplicateShoppingList } = await import('../models/shoppingListModel');
+        const { duplicateListItems } = await import('../models/shoppingListItemModel');
+        const newId = await duplicateShoppingList(id, userId);
+        await duplicateListItems(id, newId);
+        res.json({ id: newId });
     } catch (error) {
         next(error);
     }

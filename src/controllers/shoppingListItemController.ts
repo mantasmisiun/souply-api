@@ -4,9 +4,22 @@ import { getProductById } from '../models/productModel';
 
 export const addListItem = async (req: Request, res: Response, next: NextFunction) => {
     try {
-        const { listId, productId, quantity } = req.body;
-        if (!listId || !productId || !quantity) {
-            res.status(400).json({ error: 'All fields are required' });
+        const { listId, productId, quantity, price, customName } = req.body;
+
+        if (!listId || !quantity) {
+            res.status(400).json({ error: 'listId and quantity are required' });
+            return;
+        }
+
+        // Custom item — no productId
+        if (!productId && customName) {
+            const id = await createListItem(listId, null, quantity, price || null, customName);
+            res.status(201).json({ id, listId, productId: null, quantity, customName });
+            return;
+        }
+
+        if (!productId) {
+            res.status(400).json({ error: 'Either productId or customName is required' });
             return;
         }
 
@@ -15,7 +28,8 @@ export const addListItem = async (req: Request, res: Response, next: NextFunctio
             res.status(404).json({ error: 'Product not found' });
             return;
         }
-        if (!product.isWeighable && !Number.isInteger(quantity)) {
+
+        if (!product.isWeighable && !Number.isInteger(Number(quantity))) {
             res.status(400).json({ error: 'Quantity must be a whole number for packaged products' });
             return;
         }
@@ -29,8 +43,8 @@ export const addListItem = async (req: Request, res: Response, next: NextFunctio
             return;
         }
 
-        const id = await createListItem(listId, productId, quantity);
-        res.status(201).json({ id, listId, productId, quantity });
+        const id = await createListItem(listId, productId, quantity, price || null);
+        res.status(201).json({ id, listId, productId, quantity, price });
     } catch (error) {
         next(error);
     }
