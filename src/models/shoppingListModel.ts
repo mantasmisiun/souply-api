@@ -1,9 +1,9 @@
 import pool from '../config/db';
 
-export const createShoppingList = async (userId: string, storeId: number) => {
+export const createShoppingList = async (userId: string, storeId: number, basketId?: number) => {
     const [result]: any = await pool.query(
-        'INSERT INTO ShoppingList (userId, storeId, status) VALUES (?, ?, "active")',
-        [userId, storeId]
+        'INSERT INTO ShoppingList (userId, storeId, status, basketId) VALUES (?, ?, "active", ?)',
+        [userId, storeId, basketId || null]
     );
     return result.insertId;
 };
@@ -56,4 +56,16 @@ export const duplicateShoppingList = async (id: number, userId: string): Promise
 
     const newId = await createShoppingList(userId, original.storeId);
     return newId;
+};
+
+export const getBasketIdByListId = async (listId: number): Promise<number | null> => {
+    const [rows]: any = await pool.query(
+        'SELECT basketId FROM ShoppingList WHERE id = ?',
+        [listId]
+    );
+    return rows[0]?.basketId || null;
+};
+
+export const updateShoppingListBasket = async (listId: number, basketId: number) => {
+    await pool.query('UPDATE ShoppingList SET basketId = ? WHERE id = ?', [basketId, listId]);
 };
