@@ -88,7 +88,22 @@ export const removeShoppingList = async (req: Request, res: Response, next: Next
             res.status(400).json({ error: 'Invalid shopping list ID' });
             return;
         }
+
+        // Get basketId before deleting
+        const { getBasketIdByListId } = await import('../models/shoppingListModel');
+        const basketId = await getBasketIdByListId(id);
+
         await deleteShoppingList(id);
+
+        // Revert basket to compared if it was active
+        if (basketId) {
+            const { updateBasketStatus, getBasketById } = await import('../models/basketModel');
+            const basket = await getBasketById(basketId);
+            if (basket && basket.status === 'active') {
+                await updateBasketStatus(basketId, 'compared');
+            }
+        }
+
         res.status(204).send();
     } catch (error) {
         next(error);
