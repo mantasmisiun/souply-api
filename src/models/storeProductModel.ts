@@ -70,9 +70,11 @@ export const getStoreProductByProductAndChain = async (productId: number, chainI
 
 export const searchStoreProductsByChain = async (name: string, chainId: number) => {
     const [rows]: any = await pool.query(
-        `SELECT * FROM StoreProduct 
-         WHERE chainId = ? 
-         AND storeProductName LIKE ?
+        `SELECT sp.*, p.isWeighable, p.imageUrl
+         FROM StoreProduct sp
+         JOIN Product p ON sp.productId = p.id
+         WHERE sp.chainId = ?
+         AND sp.storeProductName LIKE ?
          LIMIT 5`,
         [chainId, `%${name}%`]
     );

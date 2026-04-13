@@ -29,7 +29,7 @@ export const getShoppingListsByUserId = async (userId: string) => {
 export const getShoppingListById = async (id: number) => {
     const [rows]: any = await pool.query(
         `SELECT ShoppingList.*, Store.name AS storeName, Store.address,
-                StoreChain.name AS chainName, StoreChain.logoUrl
+                StoreChain.id AS chainId, StoreChain.name AS chainName, StoreChain.logoUrl
          FROM ShoppingList
          JOIN Store ON ShoppingList.storeId = Store.id
          JOIN StoreChain ON Store.chainId = StoreChain.id
