@@ -10,8 +10,11 @@ export const createBasket = async (userId: string) => {
 
 export const getBasketsByUserId = async (userId: string) => {
     const [rows]: any = await pool.query(
-        `SELECT * FROM Basket 
-         WHERE userId = ?
+        `SELECT Basket.*, COUNT(BasketItem.id) as itemCount
+         FROM Basket
+         LEFT JOIN BasketItem ON Basket.id = BasketItem.basketId
+         WHERE Basket.userId = ?
+         GROUP BY Basket.id
          ORDER BY 
              FIELD(status, 'draft', 'compared', 'completed'),
              updatedAt DESC`,
