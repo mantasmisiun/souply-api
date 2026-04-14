@@ -8,12 +8,14 @@ export const createProduct = async (
     name: string,
     imageUrl: string | null,
     isWeighable: boolean,
+    amount: number | null = null,
+    unit: string | null = null,
     conn?: Connection
 ) => {
     const db = conn || pool;
     const [result]: any = await db.query(
-        'INSERT INTO Product (categoryId, baseProductId, name, imageUrl, isWeighable) VALUES (?, ?, ?, ?, ?)',
-        [categoryId, baseProductId, name, imageUrl, isWeighable]
+        'INSERT INTO Product (categoryId, baseProductId, name, imageUrl, isWeighable, amount, unit) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [categoryId, baseProductId, name, imageUrl, isWeighable, amount, unit]
     );
     return result.insertId;
 };

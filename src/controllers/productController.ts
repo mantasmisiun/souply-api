@@ -3,13 +3,13 @@ import { createProduct, searchProduct, getProductById, getProductsByCategory } f
 
 export const addProduct = async (req: Request, res: Response, next: NextFunction) => {
     try {
-        const { categoryId, baseProductId, name, imageUrl, isWeighable } = req.body;
+        const { categoryId, baseProductId, name, imageUrl, isWeighable, amount, unit } = req.body;
         if (!categoryId || !name) {
             res.status(400).json({ error: 'Category ID and name are required' });
             return;
         }
-        const id = await createProduct(categoryId, baseProductId || null, name, imageUrl || null, isWeighable || false);
-        res.status(201).json({ id, categoryId, baseProductId, name, imageUrl, isWeighable });
+        const id = await createProduct(categoryId, baseProductId || null, name, imageUrl || null, isWeighable || false, amount || null, unit || null);
+        res.status(201).json({ id, categoryId, baseProductId, name, imageUrl, isWeighable, amount, unit });
     } catch (error) {
         next(error);
     }
