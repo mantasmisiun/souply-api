@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { addCategory, fetchAllCategories, fetchSubCategories, fetchCategoryById, fetchCategoryPath } from '../controllers/categoryController';
+import { addCategory, fetchAllCategories, fetchSubCategories, fetchCategoryById, fetchCategoryPath, fetchAllProductsByParentCategory } from '../controllers/categoryController';
 
 const router = Router();
 /**
@@ -70,5 +70,7 @@ router.get('/categories/:id/subcategories', fetchSubCategories);
 router.get('/categories/:id', fetchCategoryById);
 
 router.get('/categories/:id/path', fetchCategoryPath);
+
+router.get('/categories/:categoryId/all-products', fetchAllProductsByParentCategory);
 
 export default router;

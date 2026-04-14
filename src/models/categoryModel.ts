@@ -61,3 +61,14 @@ export const getCategoryPath = async (id: number): Promise<string> => {
     
     return parts.join(' > ');
 };
+
+export const getAllProductsByParentCategory = async (parentCategoryId: number) => {
+    const [rows]: any = await pool.query(
+        `SELECT DISTINCT p.*
+         FROM Product p
+         JOIN Category c ON p.categoryId = c.id
+         WHERE c.parentCategoryId = ?`,
+        [parentCategoryId]
+    );
+    return rows;
+};
