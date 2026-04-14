@@ -73,3 +73,10 @@ export const duplicateListItems = async (originalListId: number, newListId: numb
         );
     }
 };
+
+export const checkAllItemsByListId = async (listId: number) => {
+    await pool.query(
+        'UPDATE ShoppingListItem SET isChecked = 1 WHERE listId = ?',
+        [listId]
+    );
+};

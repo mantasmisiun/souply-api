@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { createShoppingList, getShoppingListById, getShoppingListsByUserId, deleteShoppingList, updateShoppingListStatus, updateShoppingListBasket } from '../models/shoppingListModel';
+import { checkAllItemsByListId } from '../models/shoppingListItemModel';
 
 export const addShoppingList = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -65,6 +66,17 @@ export const changeShoppingListStatus = async (req: Request, res: Response, next
         }
         await updateShoppingListStatus(id, status);
 
+        if (status === 'completed') {
+            const { checkAllItemsByListId } = await import('../models/shoppingListItemModel');
+            await checkAllItemsByListId(id);
+
+            const { getBasketIdByListId } = await import('../models/shoppingListModel');
+            const basketId = await getBasketIdByListId(id);
+            if (basketId) {
+                const { updateBasketStatus } = await import('../models/basketModel');
+                await updateBasketStatus(basketId, 'completed');
+            }
+        }
         // Update basket status if list is completed
         if (status === 'completed') {
             const { getBasketIdByListId } = await import('../models/shoppingListModel');
