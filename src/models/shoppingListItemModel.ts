@@ -2,28 +2,31 @@ import pool from '../config/db';
 
 export const createListItem = async (
     listId: number,
-    productId: number | null,
+    productId: number,
+    storeProductId: number | null,
     quantity: number,
-    price: number | null = null,
-    customName: string | null = null
+    price: number | null = null
 ) => {
     const [result]: any = await pool.query(
-        'INSERT INTO ShoppingListItem (listId, productId, quantity, price, customName) VALUES (?, ?, ?, ?, ?)',
-        [listId, productId, quantity, price, customName]
+        'INSERT INTO ShoppingListItem (listId, productId, storeProductId, quantity, price) VALUES (?, ?, ?, ?, ?)',
+        [listId, productId, storeProductId, quantity, price]
     );
     return result.insertId;
 };
 
 export const getListItemsByShoppingListId = async (listId: number) => {
     const [rows]: any = await pool.query(
-        `SELECT ShoppingListItem.*,
-                COALESCE(Product.name, ShoppingListItem.customName) AS productName,
-                Product.isWeighable,
-                Product.imageUrl
-         FROM ShoppingListItem
-         LEFT JOIN Product ON ShoppingListItem.productId = Product.id
-         WHERE ShoppingListItem.listId = ?
-         ORDER BY ShoppingListItem.isChecked ASC, ShoppingListItem.id ASC`,
+        `SELECT sli.*,
+                COALESCE(sp.storeProductName, p.name) AS productName,
+                p.imageUrl,
+                sp.unit,
+                sp.amount,
+                sp.isWeighable
+         FROM ShoppingListItem sli
+         LEFT JOIN Product p ON sli.productId = p.id
+         LEFT JOIN StoreProduct sp ON sli.storeProductId = sp.id
+         WHERE sli.listId = ?
+         ORDER BY sli.isChecked ASC, sli.id ASC`,
         [listId]
     );
     return rows.map((row: any) => ({
@@ -32,6 +35,8 @@ export const getListItemsByShoppingListId = async (listId: number) => {
         isWeighable: row.isWeighable === 1,
         quantity: parseFloat(row.quantity),
         price: row.price ? parseFloat(row.price) : null,
+        unit: row.isWeighable ? 'kg' : 'vnt.',
+        amount: row.amount ? parseFloat(row.amount) : null,
     }));
 };
 
@@ -68,8 +73,8 @@ export const duplicateListItems = async (originalListId: number, newListId: numb
     );
     for (const item of rows) {
         await pool.query(
-            'INSERT INTO ShoppingListItem (listId, productId, quantity, price, customName) VALUES (?, ?, ?, ?, ?)',
-            [newListId, item.productId, item.quantity, item.price, item.customName]
+            'INSERT INTO ShoppingListItem (listId, productId, storeProductId, quantity, price) VALUES (?, ?, ?, ?, ?)',
+            [newListId, item.productId, item.storeProductId, item.quantity, item.price]
         );
     }
 };

@@ -6,7 +6,7 @@ import { getBasketById } from '../models/basketModel';
 export const addBasketItem = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const { basketId, productId, quantity } = req.body;
-        if (!basketId || !productId || !quantity) {
+        if (!basketId || !productId || quantity === undefined || quantity === null) {
             res.status(400).json({ error: 'All fields are required' });
             return;
         }
@@ -26,18 +26,11 @@ export const addBasketItem = async (req: Request, res: Response, next: NextFunct
             res.status(404).json({ error: 'Product not found' });
             return;
         }
-        if (!product.isWeighable && !Number.isInteger(quantity)) {
-            res.status(400).json({ error: 'Quantity must be a whole number for packaged products' });
-            return;
-        }
 
         // Check if product already exists in basket
         const existingItem = await getBasketItemByBasketAndProduct(basketId, productId);
         if (existingItem) {
-            // Increment quantity instead of creating new row
-            const newQuantity = parseFloat(existingItem.quantity) + parseFloat(quantity);
-            await updateBasketItemQuantity(existingItem.id, newQuantity);
-            res.json({ id: existingItem.id, basketId, productId, quantity: newQuantity });
+            res.status(409).json({ error: 'Product already in basket' });
             return;
         }
 

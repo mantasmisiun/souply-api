@@ -7,15 +7,12 @@ export const createProduct = async (
     baseProductId: number | null,
     name: string,
     imageUrl: string | null,
-    isWeighable: boolean,
-    amount: number | null = null,
-    unit: string | null = null,
     conn?: Connection
 ) => {
     const db = conn || pool;
     const [result]: any = await db.query(
-        'INSERT INTO Product (categoryId, baseProductId, name, imageUrl, isWeighable, amount, unit) VALUES (?, ?, ?, ?, ?, ?, ?)',
-        [categoryId, baseProductId, name, imageUrl, isWeighable, amount, unit]
+        'INSERT INTO Product (categoryId, baseProductId, name, imageUrl) VALUES (?, ?, ?, ?)',
+        [categoryId, baseProductId, name, imageUrl]
     );
     return result.insertId;
 };
@@ -62,12 +59,45 @@ export const updateProductCategory = async (storeProductId: number, categoryId: 
     );
 };
 
-export const updateProductIsWeighable = async (storeProductId: number, isWeighable: boolean) => {
-    await pool.query(
-        `UPDATE Product p
-         JOIN StoreProduct sp ON sp.productId = p.id
-         SET p.isWeighable = ?
-         WHERE sp.id = ?`,
-        [isWeighable ? 1 : 0, storeProductId]
+export const getProductsByCategoryWithAmounts = async (categoryId: number) => {
+    const [products]: any = await pool.query(
+        `SELECT p.id, p.name, p.imageUrl, p.categoryId,
+            CAST(MIN(
+                CASE WHEN sp.unit = 'kg' THEN sp.amount * 1000 ELSE sp.amount END
+            ) AS UNSIGNED) as minAmount,
+            CAST(MAX(
+                CASE WHEN sp.unit = 'kg' THEN sp.amount * 1000 ELSE sp.amount END
+            ) AS UNSIGNED) as maxAmount,
+            'g' as unit,
+            MAX(sp.isWeighable) as hasWeighable
+        FROM Product p
+        LEFT JOIN StoreProduct sp ON sp.productId = p.id
+         WHERE p.categoryId = ?
+         GROUP BY p.id`,
+        [categoryId]
     );
+    return products;
+};
+
+export const getAllProductsByL2WithAmounts = async (l2CategoryId: number) => {
+    const [products]: any = await pool.query(
+        `SELECT p.id, p.name, p.imageUrl, p.categoryId,
+            CAST(MIN(
+                CASE WHEN sp.unit = 'kg' THEN sp.amount * 1000 ELSE sp.amount END
+            ) AS UNSIGNED) as minAmount,
+            CAST(MAX(
+                CASE WHEN sp.unit = 'kg' THEN sp.amount * 1000 ELSE sp.amount END
+            ) AS UNSIGNED) as maxAmount,
+            'g' as unit,
+            MAX(sp.isWeighable) as hasWeighable
+        FROM Product p
+        LEFT JOIN StoreProduct sp ON sp.productId = p.id
+         WHERE p.categoryId IN (
+             SELECT id FROM Category WHERE parentCategoryId = ?
+         )
+         OR p.categoryId = ?
+         GROUP BY p.id`,
+        [l2CategoryId, l2CategoryId]
+    );
+    return products;
 };

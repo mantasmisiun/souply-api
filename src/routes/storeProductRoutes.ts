@@ -27,17 +27,28 @@ const router = Router();
  *                 example: 1
  *               storeProductName:
  *                 type: string
- *                 example: Kava
+ *                 example: Smulkiavaisiai slyviniai pomidorai, 250 g
  *               brandName:
  *                 type: string
- *                 example: Nescafe
+ *                 nullable: true
+ *                 example: null
+ *               isWeighable:
+ *                 type: boolean
+ *                 example: false
+ *               amount:
+ *                 type: number
+ *                 nullable: true
+ *                 example: 250
+ *               unit:
+ *                 type: string
+ *                 nullable: true
+ *                 example: g
  *     responses:
  *       201:
  *         description: Store product created successfully
  *       400:
- *         description: Product ID, chain ID, or store product name is required
+ *         description: productId, chainId, and storeProductName are required
  */
-// POST /api/store-products - Create a new store product
 router.post('/store-products', addStoreProduct);
 
 /**

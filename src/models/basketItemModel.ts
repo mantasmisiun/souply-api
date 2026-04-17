@@ -22,7 +22,7 @@ export const getBasketItemById = async (id: number) => {
 
 export const getBasketItemsByBasketId = async (basketId: number) => {
     const [rows]: any = await pool.query(
-        `SELECT BasketItem.*, Product.name AS productName, Product.isWeighable, Product.imageUrl
+        `SELECT BasketItem.*, Product.name AS productName, Product.imageUrl
          FROM BasketItem 
          JOIN Product ON BasketItem.productId = Product.id
          WHERE BasketItem.basketId = ?`,

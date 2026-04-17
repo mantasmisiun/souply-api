@@ -56,7 +56,7 @@ export const deleteBasket = async (id: number) => {
 //For basket price comparison, to get productIds and their details for items in the basket
 export const getBasketProductIds = async (basketId: number) => {
     const [rows]: any = await pool.query(
-        `SELECT bi.productId, bi.quantity, p.name, p.isWeighable
+        `SELECT bi.productId, bi.quantity, p.name
          FROM BasketItem bi
          JOIN Product p ON bi.productId = p.id
          WHERE bi.basketId = ?`,

@@ -1,15 +1,16 @@
 import { Request, Response, NextFunction } from 'express';
 import { createStoreProduct, getStoreProductsByProductId, getStoreProductsByChainId, getStoreProductByName, getStoreProductByProductAndChain, searchStoreProductsByChain as searchByChain } from '../models/storeProductModel';
+import { getProductsByCategoryWithAmounts, getAllProductsByL2WithAmounts } from '../models/productModel';
 
 export const addStoreProduct = async (req: Request, res: Response, next: NextFunction) => {
     try {
-        const { productId, chainId, storeProductName, brandName } = req.body;
+        const { productId, chainId, storeProductName, brandName, isWeighable, amount, unit } = req.body;
         if (!productId || !chainId || !storeProductName) {
-            res.status(400).json({ error: 'All fields are required' });
+            res.status(400).json({ error: 'productId, chainId, and storeProductName are required' });
             return;
         }
-        const id = await createStoreProduct(productId, chainId, storeProductName, brandName || null);
-        res.status(201).json({ id, productId, chainId, storeProductName });
+        const id = await createStoreProduct(productId, chainId, storeProductName, brandName || null, isWeighable || false, amount || null, unit || null);
+        res.status(201).json({ id, productId, chainId, storeProductName, isWeighable, amount, unit });
     } catch (error) {
         next(error);
     }
@@ -93,3 +94,18 @@ export const searchStoreProductsByChain = async (req: Request, res: Response, ne
         next(error);
     }
 };
+
+export const fetchProductsByCategoryWithAmounts = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const categoryId = Number(req.params.categoryId);
+        if (isNaN(categoryId)) {
+            res.status(400).json({ error: 'Invalid category ID' });
+            return;
+        }
+        const products = await getProductsByCategoryWithAmounts(categoryId);
+        res.json(products);
+    } catch (error) {
+        next(error);
+    }
+};
+

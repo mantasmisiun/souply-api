@@ -45,7 +45,7 @@ export const processReceipt = async (receiptId: number, parsedData: any) => {
             let storeProduct = await getStoreProductByNameAndChain(item.name, chain.id, connection);
 
             if (!storeProduct) {
-                const productId = await createProduct(categoryId!, null, item.name, null, item.isWeighable, connection);
+                const productId = await createProduct(categoryId!, null, item.name, null, connection);
                 const storeProductId = await createStoreProduct(productId, chain.id, item.name, item.brandName || null, connection);
                 storeProduct = { id: storeProductId };
             }
@@ -129,7 +129,7 @@ export const processReceiptManual = async (receiptId: number, parsedData: any) =
             let storeProduct = await getStoreProductByNameAndChain(item.name, chain.id, connection);
 
             if (!storeProduct) {
-                const productId = await createProduct(categoryId, null, item.name, null, item.isWeighable, connection);
+                const productId = await createProduct(categoryId!, null, item.name, null, connection);
                 const storeProductId = await createStoreProduct(productId, chain.id, item.name, item.brandName || null, connection);
                 storeProduct = { id: storeProductId };
             }

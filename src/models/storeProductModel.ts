@@ -7,12 +7,15 @@ export const createStoreProduct = async (
     chainId: number,
     storeProductName: string,
     brandName: string | null,
+    isWeighable: boolean = false,
+    amount: number | null = null,
+    unit: string | null = null,
     conn?: Connection
 ) => {
     const db = conn || pool;
     const [result]: any = await db.query(
-        'INSERT INTO StoreProduct (productId, chainId, storeProductName, brandName) VALUES (?, ?, ?, ?)',
-        [productId, chainId, storeProductName, brandName]
+        'INSERT INTO StoreProduct (productId, chainId, storeProductName, brandName, isWeighable, amount, unit) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [productId, chainId, storeProductName, brandName, isWeighable, amount, unit]
     );
     return result.insertId;
 };
@@ -70,7 +73,7 @@ export const getStoreProductByProductAndChain = async (productId: number, chainI
 
 export const searchStoreProductsByChain = async (name: string, chainId: number) => {
     const [rows]: any = await pool.query(
-        `SELECT sp.*, p.isWeighable, p.imageUrl
+        `SELECT sp.*, p.imageUrl
          FROM StoreProduct sp
          JOIN Product p ON sp.productId = p.id
          WHERE sp.chainId = ?

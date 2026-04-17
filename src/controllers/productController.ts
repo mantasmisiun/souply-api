@@ -1,15 +1,15 @@
 import { Request, Response, NextFunction } from 'express';
-import { createProduct, searchProduct, getProductById, getProductsByCategory } from '../models/productModel';
+import { createProduct, searchProduct, getProductById, getProductsByCategory, getProductsByCategoryWithAmounts, getAllProductsByL2WithAmounts } from '../models/productModel';
 
 export const addProduct = async (req: Request, res: Response, next: NextFunction) => {
     try {
-        const { categoryId, baseProductId, name, imageUrl, isWeighable, amount, unit } = req.body;
+        const { categoryId, baseProductId, name, imageUrl} = req.body;
         if (!categoryId || !name) {
             res.status(400).json({ error: 'Category ID and name are required' });
             return;
         }
-        const id = await createProduct(categoryId, baseProductId || null, name, imageUrl || null, isWeighable || false, amount || null, unit || null);
-        res.status(201).json({ id, categoryId, baseProductId, name, imageUrl, isWeighable, amount, unit });
+        const id = await createProduct(categoryId, baseProductId || null, name, imageUrl || null);
+        res.status(201).json({ id, categoryId, baseProductId, name, imageUrl});
     } catch (error) {
         next(error);
     }
@@ -55,6 +55,34 @@ export const fetchProductsByCategory = async (req: Request, res: Response, next:
             return;
         }
         const products = await getProductsByCategory(categoryId);
+        res.json(products);
+    } catch (error) {
+        next(error);
+    }
+};
+
+export const fetchProductsByCategoryWithAmounts = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const categoryId = Number(req.params.categoryId);
+        if (isNaN(categoryId)) {
+            res.status(400).json({ error: 'Invalid category ID' });
+            return;
+        }
+        const products = await getProductsByCategoryWithAmounts(categoryId);
+        res.json(products);
+    } catch (error) {
+        next(error);
+    }
+};
+
+export const fetchAllProductsByL2WithAmounts = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const categoryId = Number(req.params.categoryId);
+        if (isNaN(categoryId)) {
+            res.status(400).json({ error: 'Invalid category ID' });
+            return;
+        }
+        const products = await getAllProductsByL2WithAmounts(categoryId);
         res.json(products);
     } catch (error) {
         next(error);

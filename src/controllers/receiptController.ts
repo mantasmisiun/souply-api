@@ -2,7 +2,7 @@ import { Request, Response, NextFunction } from "express";
 import { createReceipt, getReceiptsByUserId, getReceiptById, updateReceiptDetails, deleteReceipt, getReceiptItemsWithDetails, updateReceiptParsedDataItem } from "../models/receiptModel";
 import { updatePriceById, createPrice } from "../models/priceModel";
 import { updateStoreProductName, createStoreProduct } from "../models/storeProductModel";
-import { updateProductCategory, createProduct, updateProductIsWeighable } from "../models/productModel";
+import { updateProductCategory, createProduct } from "../models/productModel";
 import { getChainIdByStoreId } from "../models/storeModel";
 import { getPresignedUrl } from "../services/storageService";
 
@@ -145,7 +145,6 @@ export const updateReceiptItem = async (req: Request, res: Response, next: NextF
         await updatePriceById(priceId, price, promoPrice || null);
         await updateStoreProductName(storeProductId, name);
         await updateProductCategory(storeProductId, categoryId);
-        await updateProductIsWeighable(storeProductId, isWeighable || false);
         await updateReceiptParsedDataItem(receiptId, oldName, name, categoryId, price, promoPrice || null);
 
         // Propagate fallback prices
@@ -186,8 +185,8 @@ export const addReceiptItem = async (req: Request, res: Response, next: NextFunc
         }
 
         const chainId = await getChainIdByStoreId(receipt.storeId);
-        const productId = await createProduct(categoryId, null, name, null, isWeighable || false);
-        const storeProductId = await createStoreProduct(productId, chainId, name, brandName || null);
+        const productId = await createProduct(categoryId, null, name, null);
+        const storeProductId = await createStoreProduct(productId, chainId, name, brandName || null, isWeighable || false, null, null);
 
         await createPrice(
             storeProductId,

@@ -4,33 +4,9 @@ import { getProductById } from '../models/productModel';
 
 export const addListItem = async (req: Request, res: Response, next: NextFunction) => {
     try {
-        const { listId, productId, quantity, price, customName } = req.body;
-
-        if (!listId || !quantity) {
-            res.status(400).json({ error: 'listId and quantity are required' });
-            return;
-        }
-
-        // Custom item — no productId
-        if (!productId && customName) {
-            const id = await createListItem(listId, null, quantity, price || null, customName);
-            res.status(201).json({ id, listId, productId: null, quantity, customName });
-            return;
-        }
-
-        if (!productId) {
-            res.status(400).json({ error: 'Either productId or customName is required' });
-            return;
-        }
-
-        const product = await getProductById(productId);
-        if (!product) {
-            res.status(404).json({ error: 'Product not found' });
-            return;
-        }
-
-        if (!product.isWeighable && !Number.isInteger(Number(quantity))) {
-            res.status(400).json({ error: 'Quantity must be a whole number for packaged products' });
+        const { listId, productId, storeProductId, quantity, price } = req.body;
+        if (!listId || !productId || quantity === undefined || quantity === null) {
+            res.status(400).json({ error: 'listId, productId, and quantity are required' });
             return;
         }
 
@@ -42,9 +18,9 @@ export const addListItem = async (req: Request, res: Response, next: NextFunctio
             res.json({ id: existingItem.id, listId, productId, quantity: newQuantity });
             return;
         }
-
-        const id = await createListItem(listId, productId, quantity, price || null);
-        res.status(201).json({ id, listId, productId, quantity, price });
+        console.log('Creating list item:', { listId, productId, storeProductId, quantity, price });
+        const id = await createListItem(listId, productId, storeProductId || null, quantity, price || null);
+        res.status(201).json({ id, listId, productId, storeProductId, quantity, price });
     } catch (error) {
         next(error);
     }

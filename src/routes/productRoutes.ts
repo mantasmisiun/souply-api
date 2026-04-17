@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { addProduct, searchProducts, fetchProductById, fetchProductsByCategory  } from '../controllers/productController';
+import { addProduct, searchProducts, fetchProductById, fetchProductsByCategory, fetchProductsByCategoryWithAmounts, fetchAllProductsByL2WithAmounts } from '../controllers/productController';
 
 const router = Router();
 /**
@@ -31,9 +31,6 @@ const router = Router();
  *                 type: integer
  *                 nullable: true
  *                 example: null
- *               isWeighable:
- *                 type: boolean
- *                 example: false
  *     responses:
  *       201:
  *         description: Product created successfully
@@ -102,5 +99,9 @@ router.get('/products/:id', fetchProductById);
  */
 // GET /api/categories/:categoryId/products - Get products by category ID
 router.get('/categories/:categoryId/products', fetchProductsByCategory);
+
+router.get('/categories/:categoryId/products-with-amounts', fetchProductsByCategoryWithAmounts);
+
+router.get('/categories/:categoryId/all-products-with-amounts', fetchAllProductsByL2WithAmounts);
 
 export default router;
