@@ -110,3 +110,16 @@ export const updateFallbackPrice = async (id: number, price: number, promoPrice:
         [price, promoPrice, date, id]
     );
 };
+
+export const getPriceHistoryForStoreProductAllStores = async (storeProductId: number) => {
+    const [rows]: any = await pool.query(
+        `SELECT p.*, s.name as storeName
+         FROM Price p
+         JOIN Store s ON p.storeId = s.id
+         WHERE p.storeProductId = ?
+         AND p.isFallback = 0
+         ORDER BY p.date ASC`,
+        [storeProductId]
+    );
+    return rows;
+};

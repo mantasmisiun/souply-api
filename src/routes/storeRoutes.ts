@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { addStoreChain, addStore, fetchAllStores, fetchStoreById, fetchAllChains } from '../controllers/storeController';
+import { addStoreChain, addStore, fetchAllStores, fetchStoreById, fetchAllChains, fetchStoresByChainId } from '../controllers/storeController';
 
 const router = Router();
 
@@ -109,5 +109,7 @@ router.get('/stores', fetchAllStores);
 router.get('/stores/:id', fetchStoreById);
 
 router.get('/chains', fetchAllChains);
+
+router.get('/stores/chain/:chainId', fetchStoresByChainId);
 
 export default router;

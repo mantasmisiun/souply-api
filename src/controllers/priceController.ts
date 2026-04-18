@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { createPrice, getLatestPriceByStoreProduct, getLatestPricesAcrossStores, getActivePromoPrices, getPriceHistoryForStoreProduct } from '../models/priceModel';
+import { createPrice, getLatestPriceByStoreProduct, getLatestPricesAcrossStores, getActivePromoPrices, getPriceHistoryForStoreProduct, getPriceHistoryForStoreProductAllStores } from '../models/priceModel';
 import { getChainIdByStoreId } from '../models/storeModel';
 import { getChainIdByStoreProductId } from '../models/storeProductModel';
 
@@ -108,6 +108,20 @@ export const fetchPriceHistoryForStoreProduct = async (req: Request, res: Respon
         }
         const priceHistory = await getPriceHistoryForStoreProduct(storeProductId, storeId);
         res.json(priceHistory);
+    } catch (error) {
+        next(error);
+    }
+};
+
+export const fetchPriceHistoryAllStores = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const storeProductId = Number(req.params.storeProductId);
+        if (isNaN(storeProductId)) {
+            res.status(400).json({ error: 'Invalid store product ID' });
+            return;
+        }
+        const history = await getPriceHistoryForStoreProductAllStores(storeProductId);
+        res.json(history);
     } catch (error) {
         next(error);
     }

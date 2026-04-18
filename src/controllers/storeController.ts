@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { createStoreChain, getAllChains } from '../models/storeChainModel';
-import { createStore, getAllStores, getStoreById } from '../models/storeModel';
+import { createStore, getAllStores, getStoreById, getStoresByChainId } from '../models/storeModel';
 
 export const addStoreChain = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -62,6 +62,20 @@ export const fetchAllChains = async (req: Request, res: Response, next: NextFunc
         const { name } = req.query;
         const rows = await getAllChains(name as string | undefined);
         res.json(rows);
+    } catch (error) {
+        next(error);
+    }
+};
+
+export const fetchStoresByChainId = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const chainId = Number(req.params.chainId);
+        if (isNaN(chainId)) {
+            res.status(400).json({ error: 'Invalid chain ID' });
+            return;
+        }
+        const stores = await getStoresByChainId(chainId);
+        res.json(stores);
     } catch (error) {
         next(error);
     }

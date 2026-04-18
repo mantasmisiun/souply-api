@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { addPrice, fetchLatestPriceByStoreProduct, fetchLatestPricesAcrossStores, fetchActivePromoPrices, fetchPriceHistoryForStoreProduct } from '../controllers/priceController';
+import { addPrice, fetchLatestPriceByStoreProduct, fetchLatestPricesAcrossStores, fetchActivePromoPrices, fetchPriceHistoryForStoreProduct, fetchPriceHistoryAllStores } from '../controllers/priceController';
 
 const router = Router();
 
@@ -136,6 +136,9 @@ router.get('/prices/promos', fetchActivePromoPrices);
  *       200:
  *         description: The price history for the store product
  */
+
+
+router.get('/prices/store-product/:storeProductId/history', fetchPriceHistoryAllStores);
 
 // GET /api/prices/store-product/:storeProductId/store/:storeId/history
 router.get('/prices/store-product/:storeProductId/store/:storeId/history', fetchPriceHistoryForStoreProduct);
