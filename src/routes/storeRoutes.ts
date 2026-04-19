@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { addStoreChain, addStore, fetchAllStores, fetchStoreById, fetchAllChains, fetchStoresByChainId } from '../controllers/storeController';
+import { addStoreChain, addStore, fetchAllStores, fetchStoreById, fetchAllChains, fetchStoresByChainId, matchStoreByAddress } from '../controllers/storeController';
 
 const router = Router();
 
@@ -86,6 +86,30 @@ router.post('/stores', addStore);
  *         description: List of all stores
  */
 router.get('/stores', fetchAllStores);
+
+/**
+ * @swagger
+ * /api/stores/match:
+ *   get:
+ *     summary: Find the best store match for an OCR'd address within a chain
+ *     tags: [Store]
+ *     parameters:
+ *       - in: query
+ *         name: chainId
+ *         required: true
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: address
+ *         required: true
+ *         schema: { type: string }
+ *         example: "Gequžių g. 30, Ši auli ai"
+ *     responses:
+ *       200:
+ *         description: Best match (or null if no match within threshold)
+ *       400:
+ *         description: Missing chainId or address
+ */
+router.get('/stores/match', matchStoreByAddress);
 
 /**
  * @swagger

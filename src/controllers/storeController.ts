@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { createStoreChain, getAllChains } from '../models/storeChainModel';
 import { createStore, getAllStores, getStoreById, getStoresByChainId } from '../models/storeModel';
+import { findBestStoreMatch } from '../utils/addressMatcher';
 
 export const addStoreChain = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -52,6 +53,47 @@ export const fetchStoreById = async (req: Request, res: Response, next: NextFunc
             return;
         }
         res.json(store);
+    } catch (error) {
+        next(error);
+    }
+};
+interface StoreRow {
+    id: number;
+    chainId: number;
+    name: string;
+    address: string;
+    latitude: string;   // DECIMAL from MySQL comes as string
+    longitude: string;
+}
+
+export const matchStoreByAddress = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const chainId = Number(req.query.chainId);
+        const address = req.query.address as string;
+
+        if (isNaN(chainId) || !address) {
+            res.status(400).json({ error: 'chainId and address query params are required' });
+            return;
+        }
+
+        const stores = (await getStoresByChainId(chainId)) as StoreRow[];
+        const best = findBestStoreMatch<StoreRow>(address, stores);
+
+        if (!best) {
+            res.json({ match: null });
+            return;
+        }
+
+        res.json({
+            match: {
+                storeId: best.store.id,
+                storeName: best.store.name,
+                address: best.store.address,
+                latitude: parseFloat(best.store.latitude),
+                longitude: parseFloat(best.store.longitude),
+                confidence: Math.round(best.confidence * 100) / 100,
+            },
+        });
     } catch (error) {
         next(error);
     }
