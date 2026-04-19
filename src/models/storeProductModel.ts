@@ -100,12 +100,11 @@ export const getChainIdByStoreProductId = async (storeProductId: number) => {
     return rows[0]?.chainId || null;
 };
 
-// At the end of storeProductModel.ts
 export const getStoreProductsByChainWithProductData = async (chainId: number) => {
     const [rows]: any = await pool.query(
         `SELECT sp.id, sp.productId, sp.storeProductName, sp.brandName,
                 sp.isWeighable, sp.amount, sp.unit,
-                p.imageUrl
+                p.imageUrl, p.categoryId
          FROM StoreProduct sp
          JOIN Product p ON sp.productId = p.id
          WHERE sp.chainId = ?`,

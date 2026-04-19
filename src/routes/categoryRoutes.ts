@@ -1,5 +1,9 @@
 import { Router } from 'express';
-import { addCategory, fetchAllCategories, fetchSubCategories, fetchCategoryById, fetchCategoryPath, fetchAllProductsByParentCategory } from '../controllers/categoryController';
+import { 
+    addCategory, fetchAllCategories, fetchSubCategories, fetchCategoryById, 
+    fetchCategoryPath, fetchAllProductsByParentCategory,
+    fetchCategoryAncestors, fetchStoreProductsByCategory
+} from '../controllers/categoryController';
 
 const router = Router();
 /**
@@ -66,6 +70,9 @@ router.get('/categories', fetchAllCategories);
  */
 // GET /api/categories/:id/subcategories - Get subcategories of a category
 router.get('/categories/:id/subcategories', fetchSubCategories);
+
+router.get('/categories/:id/ancestors', fetchCategoryAncestors);
+router.get('/categories/:id/store-products', fetchStoreProductsByCategory);
 
 router.get('/categories/:id', fetchCategoryById);
 

@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { createCategory, getTopLevelCategories, getSubCategories, getCategoryById, getCategoryPath, getAllProductsByParentCategory } from '../models/categoryModel';
+import { createCategory, getTopLevelCategories, getSubCategories, getCategoryById, getCategoryPath, getCategoryAncestors, getStoreProductsByCategoryAndChain, getAllProductsByParentCategory } from '../models/categoryModel';
 
 export const addCategory = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -82,6 +82,35 @@ export const fetchAllProductsByParentCategory = async (req: Request, res: Respon
             return;
         }
         const products = await getAllProductsByParentCategory(categoryId);
+        res.json(products);
+    } catch (error) {
+        next(error);
+    }
+};
+
+export const fetchCategoryAncestors = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const id = Number(req.params.id);
+        if (isNaN(id)) {
+            res.status(400).json({ error: 'Invalid category ID' });
+            return;
+        }
+        const ancestors = await getCategoryAncestors(id);
+        res.json(ancestors);
+    } catch (error) {
+        next(error);
+    }
+};
+
+export const fetchStoreProductsByCategory = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const id = Number(req.params.id);
+        const chainId = Number(req.query.chainId);
+        if (isNaN(id) || isNaN(chainId)) {
+            res.status(400).json({ error: 'Valid category ID and chainId required' });
+            return;
+        }
+        const products = await getStoreProductsByCategoryAndChain(id, chainId);
         res.json(products);
     } catch (error) {
         next(error);

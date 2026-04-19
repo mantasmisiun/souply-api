@@ -72,3 +72,59 @@ export const getAllProductsByParentCategory = async (parentCategoryId: number) =
     );
     return rows;
 };
+
+export const getCategoryAncestors = async (id: number) => {
+    const chain: any[] = [];
+    let currentId: number | null = id;
+    while (currentId !== null) {
+        const [rows]: any = await pool.query(
+            'SELECT id, name, parentCategoryId FROM Category WHERE id = ?',
+            [currentId]
+        );
+        if (!rows[0]) break;
+        chain.unshift(rows[0]);
+        currentId = rows[0].parentCategoryId;
+    }
+    return {
+        l1: chain[0] ? { id: chain[0].id, name: chain[0].name } : null,
+        l2: chain[1] ? { id: chain[1].id, name: chain[1].name } : null,
+        l3: chain[2] ? { id: chain[2].id, name: chain[2].name } : null,
+    };
+};
+
+export const getStoreProductsByCategoryAndChain = async (
+    categoryId: number,
+    chainId: number,
+    includeSubcategories: boolean = true
+) => {
+    // categoryId may be L1, L2, or L3. If includeSubcategories, match any descendant.
+    const [rows]: any = includeSubcategories
+        ? await pool.query(
+            `SELECT sp.id, sp.productId, sp.storeProductName, sp.brandName,
+                    sp.isWeighable, sp.amount, sp.unit,
+                    p.imageUrl, p.name AS productName
+             FROM StoreProduct sp
+             JOIN Product p ON sp.productId = p.id
+             JOIN Category c ON p.categoryId = c.id
+             WHERE sp.chainId = ?
+               AND (c.id = ? OR c.parentCategoryId = ? OR c.parentCategoryId IN
+                    (SELECT id FROM Category WHERE parentCategoryId = ?))
+             ORDER BY sp.storeProductName`,
+            [chainId, categoryId, categoryId, categoryId]
+        )
+        : await pool.query(
+            `SELECT sp.id, sp.productId, sp.storeProductName, sp.brandName,
+                    sp.isWeighable, sp.amount, sp.unit,
+                    p.imageUrl, p.name AS productName
+             FROM StoreProduct sp
+             JOIN Product p ON sp.productId = p.id
+             WHERE sp.chainId = ? AND p.categoryId = ?
+             ORDER BY sp.storeProductName`,
+            [chainId, categoryId]
+        );
+    return rows.map((r: any) => ({
+        ...r,
+        isWeighable: !!r.isWeighable,
+        amount: r.amount !== null ? parseFloat(r.amount) : null,
+    }));
+};

@@ -41,6 +41,7 @@ function bestTokenMatch(queryToken: string, candidateTokens: string[]): number {
 export interface MatchCandidate {
     id: number;
     productId: number;
+    categoryId: number;
     storeProductName: string;
     brandName: string | null;
     amount: number | null;
@@ -52,6 +53,7 @@ export interface MatchCandidate {
 export interface ProductMatch {
     storeProductId: number;
     productId: number;
+    categoryId: number;
     name: string;
     brandName: string | null;
     amount: number | null;
@@ -132,6 +134,7 @@ export function findBestProductMatches(
     return scored.slice(0, topN).map(({ cand, confidence }) => ({
         storeProductId: cand.id,
         productId: cand.productId,
+        categoryId: cand.categoryId,
         name: cand.storeProductName,
         brandName: cand.brandName,
         amount: cand.amount,
