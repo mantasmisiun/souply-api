@@ -1,6 +1,8 @@
 import { Request, Response, NextFunction } from 'express';
 import { createStoreProduct, getStoreProductsByProductId, getStoreProductsByChainId, getStoreProductByName, getStoreProductByProductAndChain, searchStoreProductsByChain as searchByChain } from '../models/storeProductModel';
 import { getProductsByCategoryWithAmounts, getAllProductsByL2WithAmounts } from '../models/productModel';
+import { getStoreProductsByChainWithProductData } from '../models/storeProductModel';
+import { findBestProductMatches } from '../utils/productMatcher';
 
 export const addStoreProduct = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -109,3 +111,37 @@ export const fetchProductsByCategoryWithAmounts = async (req: Request, res: Resp
     }
 };
 
+export const matchStoreProductByName = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const chainId = Number(req.query.chainId);
+        const name = req.query.name as string;
+        const amountRaw = req.query.amount as string | undefined;
+        const unit = (req.query.unit as string) || null;
+
+        if (isNaN(chainId) || !name) {
+            res.status(400).json({ error: 'chainId and name query params are required' });
+            return;
+        }
+
+        const amount = amountRaw !== undefined && amountRaw !== '' ? parseFloat(amountRaw) : null;
+
+        const candidates = await getStoreProductsByChainWithProductData(chainId);
+        
+        console.log('=== MATCH REQUEST ===');
+        console.log(`chainId=${chainId}, name="${name}", amount=${amount}, unit=${unit}`);
+        console.log(`Candidates fetched: ${candidates.length}`);
+        if (candidates.length > 0) {
+            console.log('First candidate:', JSON.stringify(candidates[0]));
+            const alpro = candidates.filter((c: any) => c.storeProductName.toLowerCase().includes('alpro'));
+            console.log(`ALPRO candidates: ${alpro.length}`);
+            if (alpro.length > 0) console.log('First ALPRO:', JSON.stringify(alpro[0]));
+        }
+        
+        const matches = findBestProductMatches(name, amount, unit, candidates);
+        console.log(`Matches above threshold: ${matches.length}`);
+
+        res.json({ matches });
+    } catch (error) {
+        next(error);
+    }
+};

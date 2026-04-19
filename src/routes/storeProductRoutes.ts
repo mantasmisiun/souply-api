@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { addStoreProduct, fetchStoreProductsByProductId, fetchStoreProductsByChainId, fetchStoreProductByName, fetchStoreProductByProductAndChain, searchStoreProductsByChain } from '../controllers/storeProductController';
+import { addStoreProduct, fetchStoreProductsByProductId, fetchStoreProductsByChainId, fetchStoreProductByName, fetchStoreProductByProductAndChain, searchStoreProductsByChain, matchStoreProductByName } from '../controllers/storeProductController';
 
 const router = Router();
 /**
@@ -112,5 +112,36 @@ router.get('/store-products/chain/:chainId', fetchStoreProductsByChainId);
 router.get('/store-products/search', searchStoreProductsByChain);
 
 router.get('/store-products/by-product-chain', fetchStoreProductByProductAndChain);
+
+
+/**
+ * @swagger
+ * /api/store-products/match:
+ *   get:
+ *     summary: Find top product matches by fuzzy name for a chain
+ *     tags: [StoreProduct]
+ *     parameters:
+ *       - in: query
+ *         name: chainId
+ *         required: true
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: name
+ *         required: true
+ *         schema: { type: string }
+ *         example: "Bananai Cavendish 20+cm"
+ *       - in: query
+ *         name: amount
+ *         required: false
+ *         schema: { type: number }
+ *       - in: query
+ *         name: unit
+ *         required: false
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Up to 3 match candidates with confidence, sorted highest first
+ */
+router.get('/store-products/match', matchStoreProductByName);
 
 export default router;
