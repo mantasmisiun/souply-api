@@ -51,3 +51,18 @@ export const deleteReceiptImage = async (fileUrl: string): Promise<void> => {
     const key = fileUrl.split(`/${BUCKET}/`)[1];
     await client.removeObject(BUCKET, key);
 };
+
+/**
+ * Generate a presigned PUT URL so mobile clients can upload directly to MinIO
+ * without streaming through the backend.
+ */
+export const getPresignedUploadUrl = async (
+    filename: string,
+    mimeType: string
+): Promise<{ uploadUrl: string; filePath: string }> => {
+    const client = getClient();
+    const objectName = `${Date.now()}-${filename.replace(/[^\w.-]/g, '_')}`;
+    const uploadUrl = await client.presignedPutObject(BUCKET, objectName, 60 * 15); // 15 min
+    const filePath = `http://${process.env.MINIO_ENDPOINT}:${process.env.MINIO_PORT}/${BUCKET}/${objectName}`;
+    return { uploadUrl, filePath };
+};

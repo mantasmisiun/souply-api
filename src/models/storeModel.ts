@@ -89,3 +89,55 @@ export const getClosestStores = async (lat: number, lng: number, limit: number =
     );
     return rows;
 };
+
+export interface ClosestChainStore {
+    storeId: number;
+    storeName: string;
+    storeAddress: string;
+    chainId: number;
+    chainName: string;
+    chainLogoUrl: string | null;
+    distance: number;
+}
+
+export const getClosestStorePerChainToStore = async (anchorStoreId: number): Promise<ClosestChainStore[]> => {
+    const [anchorRows]: any = await pool.query(
+        'SELECT id, latitude, longitude FROM Store WHERE id = ?',
+        [anchorStoreId]
+    );
+    const anchor = anchorRows[0];
+    if (!anchor) return [];
+
+    const anchorLat = parseFloat(anchor.latitude);
+    const anchorLng = parseFloat(anchor.longitude);
+
+    const [rows]: any = await pool.query(
+        `SELECT s.id, s.name, s.address, s.chainId, sc.name AS chainName, sc.logoUrl,
+                (6371 * ACOS(
+                    COS(RADIANS(?)) * COS(RADIANS(s.latitude)) *
+                    COS(RADIANS(s.longitude) - RADIANS(?)) +
+                    SIN(RADIANS(?)) * SIN(RADIANS(s.latitude))
+                )) AS distance
+         FROM Store s
+         JOIN StoreChain sc ON s.chainId = sc.id
+         ORDER BY s.chainId ASC, distance ASC`,
+        [anchorLat, anchorLng, anchorLat]
+    );
+
+    const perChain = new Map<number, ClosestChainStore>();
+    for (const row of rows) {
+        if (!perChain.has(row.chainId)) {
+            perChain.set(row.chainId, {
+                storeId: row.id,
+                storeName: row.name,
+                storeAddress: row.address,
+                chainId: row.chainId,
+                chainName: row.chainName,
+                chainLogoUrl: row.logoUrl || null,
+                distance: parseFloat(Number(row.distance).toFixed(2)),
+            });
+        }
+    }
+
+    return Array.from(perChain.values());
+};

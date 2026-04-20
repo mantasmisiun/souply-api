@@ -43,7 +43,7 @@ export const parseReceiptTextWithOllama = async (text: string): Promise<any> => 
     "chainName": "full legal company name e.g. UAB RIMI LIETUVA",
     "storeName": "store code/branch name e.g. T703",
     "storeAddress": "full address",
-    "receiptNo": "receipt number found after Kvito Nr. or Kvito numeris",
+    "receiptNo": "receipt number found after Kvito Nr. or Kvito numeris (exclude cash register info like 'Kasa 0035')",
     "date": "YYYY-MM-DD HH:mm:ss",
     "items": [
         {

@@ -123,3 +123,45 @@ export const getPriceHistoryForStoreProductAllStores = async (storeProductId: nu
     );
     return rows;
 };
+
+/**
+ * Average of the last N verified, non-fallback prices for a (storeProduct, store) pair.
+ * Returns null if fewer than 2 baseline prices exist — not enough data to judge clearance.
+ */
+export const getBaselinePriceAverage = async (
+    storeProductId: number,
+    storeId: number,
+    windowSize: number = 5,
+    conn?: Connection
+): Promise<number | null> => {
+    const db = conn || pool;
+    const [rows]: any = await db.query(
+        `SELECT price FROM Price
+         WHERE storeProductId = ? AND storeId = ? AND priceVerified = 1 AND isFallback = 0
+         ORDER BY date DESC LIMIT ?`,
+        [storeProductId, storeId, windowSize]
+    );
+    if (rows.length < 2) return null;
+    const sum = rows.reduce((acc: number, r: any) => acc + parseFloat(r.price), 0);
+    return sum / rows.length;
+};
+
+/**
+ * Fetch the most recent Price row for a (storeProduct, store, receipt) triple.
+ * Used to dedupe no-op saves when a user edits a receipt without changing values.
+ */
+export const getLatestPriceForReceiptItem = async (
+    storeProductId: number,
+    storeId: number,
+    receiptId: number,
+    conn?: Connection
+) => {
+    const db = conn || pool;
+    const [rows]: any = await db.query(
+        `SELECT price, promoPrice FROM Price
+         WHERE storeProductId = ? AND storeId = ? AND receiptId = ?
+         ORDER BY date DESC LIMIT 1`,
+        [storeProductId, storeId, receiptId]
+    );
+    return rows[0] || null;
+};

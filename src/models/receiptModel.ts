@@ -38,7 +38,7 @@ export const getReceiptById = async (id: number) => {
 export const updateReceiptDetails = async (
     id: number,
     receiptNo: string | null,
-    receiptDate: Date | null,
+    receiptDate: Date | string | null,
     processingStatus: string,
     parsedData?: any,
     conn?: Connection
@@ -134,4 +134,10 @@ export const updateReceiptParsedDataItem = async (
         'UPDATE Receipt SET parsedData = ? WHERE id = ?',
         [JSON.stringify(parsedData), receiptId]
     );
+};
+
+ //Update Receipt.filePath after mobile finishes MinIO upload.
+export const updateReceiptFilePath = async (id: number, filePath: string, conn?: Connection) => {
+    const db = conn || pool;
+    await db.query('UPDATE Receipt SET filePath = ? WHERE id = ?', [filePath, id]);
 };

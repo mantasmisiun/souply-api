@@ -8,9 +8,16 @@ import { getAllCategories } from '../models/categoryModel';
 import { assignCategoriesToProducts } from './ocrService';
 import { propagateFallbackPrices } from './priceService';
 import pool from '../config/db';
+import { normalizeReceiptDateForStorage, normalizeReceiptNo } from '../utils/receiptMetadata';
 
 export const processReceipt = async (receiptId: number, parsedData: any) => {
     const connection = await (pool as any).getConnection();
+    const normalizedReceiptNo = normalizeReceiptNo(parsedData?.receiptNo, parsedData?.footer?.rawText);
+    const normalizedReceiptDate = normalizeReceiptDateForStorage(parsedData?.date);
+    const priceDate = new Date(normalizedReceiptDate.replace(' ', 'T'));
+
+    parsedData.receiptNo = normalizedReceiptNo;
+    parsedData.date = normalizedReceiptDate;
 
     try {
         await connection.beginTransaction();
@@ -58,7 +65,7 @@ export const processReceipt = async (receiptId: number, parsedData: any) => {
                     item.promoPrice || null,
                     null,
                     false,
-                    new Date(parsedData.date),
+                    priceDate,
                     true,
                     receiptId,
                     connection
@@ -76,12 +83,12 @@ export const processReceipt = async (receiptId: number, parsedData: any) => {
                 chain.id,
                 item.price,
                 item.promoPrice || null,
-                new Date(parsedData.date)
+                priceDate
             );
         }
 
         // Step 5 — Update receipt
-        await updateReceiptDetails(receiptId, parsedData.receiptNo, new Date(parsedData.date), 'completed', undefined, connection);
+        await updateReceiptDetails(receiptId, normalizedReceiptNo, normalizedReceiptDate, 'completed', undefined, connection);
         await updateReceiptStore(receiptId, store.id, connection);
 
         await connection.commit();
@@ -97,6 +104,12 @@ export const processReceipt = async (receiptId: number, parsedData: any) => {
 
 export const processReceiptManual = async (receiptId: number, parsedData: any) => {
     const connection = await (pool as any).getConnection();
+    const normalizedReceiptNo = normalizeReceiptNo(parsedData?.receiptNo, parsedData?.footer?.rawText);
+    const normalizedReceiptDate = normalizeReceiptDateForStorage(parsedData?.date);
+    const priceDate = new Date(normalizedReceiptDate.replace(' ', 'T'));
+
+    parsedData.receiptNo = normalizedReceiptNo;
+    parsedData.date = normalizedReceiptDate;
 
     try {
         await connection.beginTransaction();
@@ -142,7 +155,7 @@ export const processReceiptManual = async (receiptId: number, parsedData: any) =
                     item.promoPrice || null,
                     null,
                     false,
-                    new Date(parsedData.date),
+                    priceDate,
                     true,
                     receiptId,
                     connection
@@ -160,15 +173,15 @@ export const processReceiptManual = async (receiptId: number, parsedData: any) =
                 chain.id,
                 item.price,
                 item.promoPrice || null,
-                new Date(parsedData.date)
+                priceDate
             );
         }
 
         // Step 4 — Update receipt
         await updateReceiptDetails(
             receiptId,
-            parsedData.receiptNo,
-            new Date(parsedData.date),
+            normalizedReceiptNo,
+            normalizedReceiptDate,
             'completed',
             parsedData,
             connection
