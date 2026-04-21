@@ -18,7 +18,10 @@ export const getListItemsByShoppingListId = async (listId: number) => {
     const [rows]: any = await pool.query(
         `SELECT sli.*,
                 COALESCE(sp.storeProductName, p.name) AS productName,
-                p.imageUrl,
+                (SELECT JSON_ARRAYAGG(spi.imageUrl)
+                 FROM StoreProduct spi
+                 WHERE spi.productId = COALESCE(sp.productId, sli.productId, p.id)
+                   AND spi.imageUrl IS NOT NULL) AS imageUrls,
                 sp.unit,
                 sp.amount,
                 sp.isWeighable

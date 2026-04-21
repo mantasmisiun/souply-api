@@ -22,8 +22,11 @@ export const getBasketItemById = async (id: number) => {
 
 export const getBasketItemsByBasketId = async (basketId: number) => {
     const [rows]: any = await pool.query(
-        `SELECT BasketItem.*, Product.name AS productName, Product.imageUrl
-         FROM BasketItem 
+        `SELECT BasketItem.*, Product.name AS productName,
+                (SELECT JSON_ARRAYAGG(spi.imageUrl)
+                 FROM StoreProduct spi
+                 WHERE spi.productId = Product.id AND spi.imageUrl IS NOT NULL) AS imageUrls
+         FROM BasketItem
          JOIN Product ON BasketItem.productId = Product.id
          WHERE BasketItem.basketId = ?`,
         [basketId]

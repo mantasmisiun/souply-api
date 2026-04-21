@@ -102,7 +102,7 @@ export const getStoreProductsByCategoryAndChain = async (
         ? await pool.query(
             `SELECT sp.id, sp.productId, sp.storeProductName, sp.brandName,
                     sp.isWeighable, sp.amount, sp.unit,
-                    p.imageUrl, p.name AS productName
+                    sp.imageUrl, p.name AS productName
              FROM StoreProduct sp
              JOIN Product p ON sp.productId = p.id
              JOIN Category c ON p.categoryId = c.id
@@ -115,7 +115,7 @@ export const getStoreProductsByCategoryAndChain = async (
         : await pool.query(
             `SELECT sp.id, sp.productId, sp.storeProductName, sp.brandName,
                     sp.isWeighable, sp.amount, sp.unit,
-                    p.imageUrl, p.name AS productName
+                    sp.imageUrl, p.name AS productName
              FROM StoreProduct sp
              JOIN Product p ON sp.productId = p.id
              WHERE sp.chainId = ? AND p.categoryId = ?

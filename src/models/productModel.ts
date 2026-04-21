@@ -6,20 +6,26 @@ export const createProduct = async (
     categoryId: number,
     baseProductId: number | null,
     name: string,
-    imageUrl: string | null,
     conn?: Connection
 ) => {
     const db = conn || pool;
     const [result]: any = await db.query(
-        'INSERT INTO Product (categoryId, baseProductId, name, imageUrl) VALUES (?, ?, ?, ?)',
-        [categoryId, baseProductId, name, imageUrl]
+        'INSERT INTO Product (categoryId, baseProductId, name) VALUES (?, ?, ?)',
+        [categoryId, baseProductId, name]
     );
     return result.insertId;
 };
 
+const PRODUCT_WITH_IMAGES_SELECT = `
+    p.id, p.categoryId, p.baseProductId, p.name,
+    (SELECT JSON_ARRAYAGG(spi.imageUrl)
+     FROM StoreProduct spi
+     WHERE spi.productId = p.id AND spi.imageUrl IS NOT NULL) AS imageUrls
+`;
+
 export const searchProduct = async (query: string) => {
     const [products]: any = await pool.query(
-        'SELECT * FROM Product WHERE name LIKE ?',
+        `SELECT ${PRODUCT_WITH_IMAGES_SELECT} FROM Product p WHERE p.name LIKE ?`,
         [`%${query}%`]
     );
     return products;
@@ -27,7 +33,7 @@ export const searchProduct = async (query: string) => {
 
 export const getProductById = async (id: number) => {
     const [products]: any = await pool.query(
-        'SELECT * FROM Product WHERE id = ?',
+        `SELECT ${PRODUCT_WITH_IMAGES_SELECT} FROM Product p WHERE p.id = ?`,
         [id]
     );
     return products[0] || null;
@@ -35,7 +41,7 @@ export const getProductById = async (id: number) => {
 
 export const getProductsByCategory = async (categoryId: number) => {
     const [products]: any = await pool.query(
-        'SELECT * FROM Product WHERE categoryId = ?',
+        `SELECT ${PRODUCT_WITH_IMAGES_SELECT} FROM Product p WHERE p.categoryId = ?`,
         [categoryId]
     );
     return products;
@@ -43,7 +49,7 @@ export const getProductsByCategory = async (categoryId: number) => {
 
 export const getProductByName = async (name: string) => {
     const [rows]: any = await pool.query(
-        'SELECT * FROM Product WHERE name = ?',
+        `SELECT ${PRODUCT_WITH_IMAGES_SELECT} FROM Product p WHERE p.name = ?`,
         [name]
     );
     return rows[0] || null;
@@ -61,7 +67,10 @@ export const updateProductCategory = async (storeProductId: number, categoryId: 
 
 export const getProductsByCategoryWithAmounts = async (categoryId: number) => {
     const [products]: any = await pool.query(
-        `SELECT p.id, p.name, p.imageUrl, p.categoryId,
+        `SELECT p.id, p.name, p.categoryId,
+            (SELECT JSON_ARRAYAGG(spi.imageUrl)
+             FROM StoreProduct spi
+             WHERE spi.productId = p.id AND spi.imageUrl IS NOT NULL) AS imageUrls,
             CAST(MIN(
                 CASE WHEN sp.unit = 'kg' THEN sp.amount * 1000 ELSE sp.amount END
             ) AS UNSIGNED) as minAmount,
@@ -81,7 +90,10 @@ export const getProductsByCategoryWithAmounts = async (categoryId: number) => {
 
 export const getAllProductsByL2WithAmounts = async (l2CategoryId: number) => {
     const [products]: any = await pool.query(
-        `SELECT p.id, p.name, p.imageUrl, p.categoryId,
+        `SELECT p.id, p.name, p.categoryId,
+            (SELECT JSON_ARRAYAGG(spi.imageUrl)
+             FROM StoreProduct spi
+             WHERE spi.productId = p.id AND spi.imageUrl IS NOT NULL) AS imageUrls,
             CAST(MIN(
                 CASE WHEN sp.unit = 'kg' THEN sp.amount * 1000 ELSE sp.amount END
             ) AS UNSIGNED) as minAmount,

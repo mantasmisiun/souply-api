@@ -74,9 +74,8 @@ export const getStoreProductByProductAndChain = async (productId: number, chainI
 
 export const searchStoreProductsByChain = async (name: string, chainId: number) => {
     const [rows]: any = await pool.query(
-        `SELECT sp.*, p.imageUrl
+        `SELECT sp.*
          FROM StoreProduct sp
-         JOIN Product p ON sp.productId = p.id
          WHERE sp.chainId = ?
          AND sp.storeProductName LIKE ?
          LIMIT 5`,
@@ -105,7 +104,7 @@ export const getStoreProductsByChainWithProductData = async (chainId: number) =>
     const [rows]: any = await pool.query(
         `SELECT sp.id, sp.productId, sp.storeProductName, sp.brandName,
                 sp.isWeighable, sp.amount, sp.unit,
-                p.imageUrl, p.categoryId
+                sp.imageUrl, p.categoryId
          FROM StoreProduct sp
          JOIN Product p ON sp.productId = p.id
          WHERE sp.chainId = ?`,
@@ -155,7 +154,7 @@ export const searchUnifiedProductsByChain = async (
 
     const [localRows]: any = await pool.query(
         `SELECT sp.id, sp.productId, sp.storeProductName, sp.amount, sp.unit,
-                COALESCE(sp.imageUrl, p.imageUrl) AS imageUrl,
+                sp.imageUrl,
                 sc.id AS chainId, sc.name AS chainName, sc.logoUrl AS chainLogoUrl
          FROM StoreProduct sp
          JOIN Product p ON p.id = sp.productId
@@ -199,7 +198,12 @@ export const searchUnifiedProductsByChain = async (
     }
 
     const [otherRows]: any = await pool.query(
-        `SELECT p.id AS productId, p.name AS productName, p.categoryId, p.imageUrl,
+        `SELECT p.id AS productId, p.name AS productName, p.categoryId,
+                (SELECT JSON_ARRAYAGG(spi.imageUrl)
+                 FROM StoreProduct spi
+                 WHERE spi.productId = p.id
+                   AND spi.chainId <> ?
+                   AND spi.imageUrl IS NOT NULL) AS imageUrls,
                 (
                     SELECT sc.logoUrl
                     FROM StoreProduct spx
@@ -212,7 +216,7 @@ export const searchUnifiedProductsByChain = async (
          WHERE ${otherWhere.join(' AND ')}
          ORDER BY p.name
          LIMIT 40`,
-        [chainId, ...otherParams]
+        [chainId, chainId, ...otherParams]
     );
 
     return {

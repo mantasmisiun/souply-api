@@ -3,13 +3,13 @@ import { createProduct, searchProduct, getProductById, getProductsByCategory, ge
 
 export const addProduct = async (req: Request, res: Response, next: NextFunction) => {
     try {
-        const { categoryId, baseProductId, name, imageUrl} = req.body;
+        const { categoryId, baseProductId, name } = req.body;
         if (!categoryId || !name) {
             res.status(400).json({ error: 'Category ID and name are required' });
             return;
         }
-        const id = await createProduct(categoryId, baseProductId || null, name, imageUrl || null);
-        res.status(201).json({ id, categoryId, baseProductId, name, imageUrl});
+        const id = await createProduct(categoryId, baseProductId || null, name);
+        res.status(201).json({ id, categoryId, baseProductId, name });
     } catch (error) {
         next(error);
     }
