@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { addListItem, fetchListItemsByShoppingListId, updateListItem, toggleListItemChecked, removeListItem } from '../controllers/shoppingListItemController';
+import { addListItem, fetchListItemsByShoppingListId, updateListItem, toggleListItemChecked, removeListItem } from '../controllers/shoppingListItemController.js';
 
 const router = Router();
 

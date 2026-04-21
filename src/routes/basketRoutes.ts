@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { addBasket, fetchBasketsByUserId, fetchBasketById, updateBasket, changeBasketStatus, removeBasket, renameBasket, calculateBasket } from '../controllers/basketController';
+import { addBasket, fetchBasketsByUserId, fetchBasketById, updateBasket, changeBasketStatus, removeBasket, renameBasket, calculateBasket } from '../controllers/basketController.js';
 
 const router = Router();
 /**

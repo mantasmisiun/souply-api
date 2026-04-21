@@ -1,6 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { createListItem, getListItemsByShoppingListId, updateListItemQuantity, toggleListItem, deleteListItem, getListItemByListAndProduct } from '../models/shoppingListItemModel';
-import { getProductById } from '../models/productModel';
+import { createListItem, getListItemsByShoppingListId, updateListItemQuantity, toggleListItem, deleteListItem, getListItemByListAndProduct } from '../models/shoppingListItemModel.js';
 
 export const addListItem = async (req: Request, res: Response, next: NextFunction) => {
     try {

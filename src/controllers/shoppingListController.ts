@@ -1,6 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { createShoppingList, getShoppingListById, getShoppingListsByUserId, deleteShoppingList, updateShoppingListStatus, updateShoppingListBasket } from '../models/shoppingListModel';
-import { checkAllItemsByListId } from '../models/shoppingListItemModel';
+import { createShoppingList, getShoppingListById, getShoppingListsByUserId, deleteShoppingList, updateShoppingListStatus, updateShoppingListBasket } from '../models/shoppingListModel.js';
 
 export const addShoppingList = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -13,7 +12,7 @@ export const addShoppingList = async (req: Request, res: Response, next: NextFun
 
         // Update basket status to active
         if (basketId) {
-            const { updateBasketStatus } = await import('../models/basketModel');
+            const { updateBasketStatus } = await import('../models/basketModel.js');
             await updateBasketStatus(basketId, 'active');
         }
 
@@ -67,22 +66,22 @@ export const changeShoppingListStatus = async (req: Request, res: Response, next
         await updateShoppingListStatus(id, status);
 
         if (status === 'completed') {
-            const { checkAllItemsByListId } = await import('../models/shoppingListItemModel');
+            const { checkAllItemsByListId } = await import('../models/shoppingListItemModel.js');
             await checkAllItemsByListId(id);
 
-            const { getBasketIdByListId } = await import('../models/shoppingListModel');
+            const { getBasketIdByListId } = await import('../models/shoppingListModel.js');
             const basketId = await getBasketIdByListId(id);
             if (basketId) {
-                const { updateBasketStatus } = await import('../models/basketModel');
+                const { updateBasketStatus } = await import('../models/basketModel.js');
                 await updateBasketStatus(basketId, 'completed');
             }
         }
         // Update basket status if list is completed
         if (status === 'completed') {
-            const { getBasketIdByListId } = await import('../models/shoppingListModel');
+            const { getBasketIdByListId } = await import('../models/shoppingListModel.js');
             const basketId = await getBasketIdByListId(id);
             if (basketId) {
-                const { updateBasketStatus } = await import('../models/basketModel');
+                const { updateBasketStatus } = await import('../models/basketModel.js');
                 await updateBasketStatus(basketId, 'completed');
             }
         }
@@ -102,14 +101,14 @@ export const removeShoppingList = async (req: Request, res: Response, next: Next
         }
 
         // Get basketId before deleting
-        const { getBasketIdByListId } = await import('../models/shoppingListModel');
+        const { getBasketIdByListId } = await import('../models/shoppingListModel.js');
         const basketId = await getBasketIdByListId(id);
 
         await deleteShoppingList(id);
 
         // Revert basket to compared if it was active
         if (basketId) {
-            const { updateBasketStatus, getBasketById } = await import('../models/basketModel');
+            const { updateBasketStatus, getBasketById } = await import('../models/basketModel.js');
             const basket = await getBasketById(basketId);
             if (basket && basket.status === 'active') {
                 await updateBasketStatus(basketId, 'compared');
@@ -130,9 +129,9 @@ export const duplicateList = async (req: Request, res: Response, next: NextFunct
             res.status(400).json({ error: 'Invalid ID or missing userId' });
             return;
         }
-        const { duplicateShoppingList } = await import('../models/shoppingListModel');
-        const { duplicateListItems } = await import('../models/shoppingListItemModel');
-        const { getBasketIdByListId } = await import('../models/shoppingListModel');
+        const { duplicateShoppingList } = await import('../models/shoppingListModel.js');
+        const { duplicateListItems } = await import('../models/shoppingListItemModel.js');
+        const { getBasketIdByListId } = await import('../models/shoppingListModel.js');
 
         const basketId = await getBasketIdByListId(id);
         const newId = await duplicateShoppingList(id, userId);
@@ -141,7 +140,7 @@ export const duplicateList = async (req: Request, res: Response, next: NextFunct
         // Link to same basket and set it back to active
         if (basketId) {
             await updateShoppingListBasket(newId, basketId);
-            const { updateBasketStatus } = await import('../models/basketModel');
+            const { updateBasketStatus } = await import('../models/basketModel.js');
             await updateBasketStatus(basketId, 'active');
         }
 

@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { addPrice, fetchLatestPriceByStoreProduct, fetchLatestPricesAcrossStores, fetchActivePromoPrices, fetchPriceHistoryForStoreProduct, fetchPriceHistoryAllStores } from '../controllers/priceController';
+import { addPrice, fetchLatestPriceByStoreProduct, fetchLatestPricesAcrossStores, fetchActivePromoPrices, fetchPriceHistoryForStoreProduct, fetchPriceHistoryAllStores } from '../controllers/priceController.js';
 
 const router = Router();
 

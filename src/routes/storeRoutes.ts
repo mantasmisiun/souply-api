@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { addStoreChain, addStore, fetchAllStores, fetchStoreById, fetchAllChains, fetchStoresByChainId, matchStoreByAddress } from '../controllers/storeController';
+import { addStoreChain, addStore, fetchAllStores, fetchStoreById, fetchAllChains, fetchStoresByChainId, matchStoreByAddress } from '../controllers/storeController.js';
 
 const router = Router();
 

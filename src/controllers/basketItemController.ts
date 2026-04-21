@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
-import { createBasketItem, getBasketItemById, getBasketItemsByBasketId, updateBasketItemQuantity, deleteBasketItem, getBasketItemByBasketAndProduct } from '../models/basketItemModel';
-import { getProductById } from '../models/productModel';
-import { getBasketById } from '../models/basketModel';
+import { createBasketItem, getBasketItemById, getBasketItemsByBasketId, updateBasketItemQuantity, deleteBasketItem, getBasketItemByBasketAndProduct } from '../models/basketItemModel.js';
+import { getProductById } from '../models/productModel.js';
+import { getBasketById } from '../models/basketModel.js';
 
 export const addBasketItem = async (req: Request, res: Response, next: NextFunction) => {
     try {

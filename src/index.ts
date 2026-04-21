@@ -1,22 +1,24 @@
 import express from 'express';
 import dotenv from 'dotenv';
-import pool from './config/db';
-import storeRoutes from './routes/storeRoutes';
-import productRoutes from './routes/productRoutes';
-import categoryRoutes from './routes/categoryRoutes';
-import storeProductRoutes from './routes/storeProductRoutes';
-import priceRoutes from './routes/priceRoutes';
-import { errorHandler } from './middleware/errorHandler';
-import userRoutes from './routes/userRoutes';
-import basketRoutes from './routes/basketRoutes';
-import basketItemRoutes from './routes/basketItemRoutes';
-import shoppingListRoutes from './routes/shoppingListRoutes';
-import shoppingListItemRoutes from './routes/shoppingListItemRoutes';
-import receiptRoutes from './routes/receiptRoutes';
+import pool from './config/db.js';
+import storeRoutes from './routes/storeRoutes.js';
+import productRoutes from './routes/productRoutes.js';
+import categoryRoutes from './routes/categoryRoutes.js';
+import storeProductRoutes from './routes/storeProductRoutes.js';
+import priceRoutes from './routes/priceRoutes.js';
+import { errorHandler } from './middleware/errorHandler.js';
+import userRoutes from './routes/userRoutes.js';
+import basketRoutes from './routes/basketRoutes.js';
+import basketItemRoutes from './routes/basketItemRoutes.js';
+import shoppingListRoutes from './routes/shoppingListRoutes.js';
+import shoppingListItemRoutes from './routes/shoppingListItemRoutes.js';
+import receiptRoutes from './routes/receiptRoutes.js';
 import swaggerUi from 'swagger-ui-express';
-import swaggerSpec from './config/swagger';
+import swaggerSpec from './config/swagger.js';
 
-dotenv.config();
+dotenv.config({
+    path: process.env.NODE_ENV === 'test' ? '.env.test' : '.env'
+});
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -50,7 +52,9 @@ app.get('/health', async (req, res) => {
         res.status(500).json({ status: 'error', database: 'disconnected' });
     }
 });
-
-app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-});
+export default app;
+if (process.env.NODE_ENV !== 'test') {
+    app.listen(PORT, () => {
+        console.log(`Server running on port ${PORT}`);
+    });
+}

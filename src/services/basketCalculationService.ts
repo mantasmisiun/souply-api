@@ -1,6 +1,6 @@
-import { getClosestStores } from '../models/storeModel';
-import { getBasketProductIds } from '../models/basketModel';
-import pool from '../config/db';
+import { getClosestStores } from '../models/storeModel.js';
+import { getBasketProductIds } from '../models/basketModel.js';
+import pool from '../config/db.js';
 
 const USER_LAT = 55.91130643124872;
 const USER_LNG = 23.24787565545356;

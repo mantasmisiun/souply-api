@@ -2,11 +2,11 @@ import {
     createPrice,
     getBaselinePriceAverage,
     getLatestPriceForReceiptItem,
-} from '../models/priceModel';
-import { updateReceiptDetails, updateReceiptStore } from '../models/receiptModel';
-import { propagateFallbackPrices } from './priceService';
-import pool from '../config/db';
-import { normalizeReceiptDateForStorage, normalizeReceiptNo } from '../utils/receiptMetadata';
+} from '../models/priceModel.js';
+import { updateReceiptDetails, updateReceiptStore } from '../models/receiptModel.js';
+import { propagateFallbackPrices } from './priceService.js';
+import pool from '../config/db.js';
+import { normalizeReceiptDateForStorage, normalizeReceiptNo } from '../utils/receiptMetadata.js';
 
 interface ParsedReceiptInput {
     chainId: number;
@@ -19,6 +19,7 @@ interface ParsedReceiptInput {
 interface ParsedProductInput {
     storeProductId: number | null;
     matchConfirmed: boolean;
+    priceVerified: boolean;
     price: number;
     promoPrice: number | null;
     quantity: number;
@@ -41,7 +42,7 @@ export interface SaveResult {
  * - For each confirmed match: creates a new Price row (dated now) unless:
  *     (a) the price looks like clearance (<50% of baseline), OR
  *     (b) values are unchanged from the last Price for this (sp, store, receipt)
- * - New Price rows get priceVerified=0 (pending admin review)
+ * - New Price rows get priceVerified=1 only for explicitly verified rows from parsedData
  * - Propagates fallback prices to other stores in the chain AFTER commit
  */
 export const persistReceiptPrices = async (
@@ -157,7 +158,7 @@ export const persistReceiptPrices = async (
                 null,
                 false,
                 writeDate,
-                false, // priceVerified=0 — pending review
+                item.priceVerified === true,
                 receiptId,
                 connection
             );

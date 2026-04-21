@@ -2,8 +2,8 @@ import { Router } from 'express';
 import { 
     addCategory, fetchAllCategories, fetchSubCategories, fetchCategoryById, 
     fetchCategoryPath, fetchAllProductsByParentCategory,
-    fetchCategoryAncestors, fetchStoreProductsByCategory
-} from '../controllers/categoryController';
+    fetchCategoryAncestors, fetchStoreProductsByCategory, fetchL3CategorySearch
+} from '../controllers/categoryController.js';
 
 const router = Router();
 /**
@@ -50,7 +50,7 @@ router.post('/categories', addCategory);
  */
 // GET /api/categories - Get all top-level categories
 router.get('/categories', fetchAllCategories);
-
+router.get('/categories/l3/search', fetchL3CategorySearch);
 /**
  * @swagger
  * /api/categories/{id}/subcategories:

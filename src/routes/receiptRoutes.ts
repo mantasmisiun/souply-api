@@ -9,7 +9,7 @@ import {
     getReceiptUploadUrl,
     setReceiptFilePath,
     fetchReceiptComparison,
-} from '../controllers/receiptController';
+} from '../controllers/receiptController.js';
 
 const router = Router();
 

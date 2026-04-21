@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { createCategory, getTopLevelCategories, getSubCategories, getCategoryById, getCategoryPath, getCategoryAncestors, getStoreProductsByCategoryAndChain, getAllProductsByParentCategory } from '../models/categoryModel';
+import { createCategory, getTopLevelCategories, getSubCategories, getCategoryById, getCategoryPath, getCategoryAncestors, getStoreProductsByCategoryAndChain, getAllProductsByParentCategory, searchL3CategoriesByName } from '../models/categoryModel.js';
 
 export const addCategory = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -112,6 +112,20 @@ export const fetchStoreProductsByCategory = async (req: Request, res: Response, 
         }
         const products = await getStoreProductsByCategoryAndChain(id, chainId);
         res.json(products);
+    } catch (error) {
+        next(error);
+    }
+};
+
+export const fetchL3CategorySearch = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+        if (!q) {
+            res.status(400).json({ error: 'q is required' });
+            return;
+        }
+        const rows = await searchL3CategoriesByName(q);
+        res.json(rows);
     } catch (error) {
         next(error);
     }

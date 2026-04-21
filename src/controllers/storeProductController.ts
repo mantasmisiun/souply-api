@@ -1,18 +1,32 @@
 import { Request, Response, NextFunction } from 'express';
-import { createStoreProduct, getStoreProductsByProductId, getStoreProductsByChainId, getStoreProductByName, getStoreProductByProductAndChain, searchStoreProductsByChain as searchByChain } from '../models/storeProductModel';
-import { getProductsByCategoryWithAmounts, getAllProductsByL2WithAmounts } from '../models/productModel';
-import { getStoreProductsByChainWithProductData } from '../models/storeProductModel';
-import { findBestProductMatches } from '../utils/productMatcher';
+import {
+  createStoreProduct, getStoreProductsByProductId, getStoreProductsByChainId,
+  getStoreProductByName, getStoreProductByProductAndChain,
+  searchStoreProductsByChain as searchByChain,
+  searchUnifiedProductsByChain as searchUnifiedByChain
+} from '../models/storeProductModel.js';
+import { getProductsByCategoryWithAmounts, getAllProductsByL2WithAmounts } from '../models/productModel.js';
+import { getStoreProductsByChainWithProductData } from '../models/storeProductModel.js';
+import { findBestProductMatches } from '../utils/productMatcher.js';
 
 export const addStoreProduct = async (req: Request, res: Response, next: NextFunction) => {
     try {
-        const { productId, chainId, storeProductName, brandName, isWeighable, amount, unit } = req.body;
+        const { productId, chainId, storeProductName, brandName, isWeighable, amount, unit, imageUrl } = req.body;
         if (!productId || !chainId || !storeProductName) {
             res.status(400).json({ error: 'productId, chainId, and storeProductName are required' });
             return;
         }
-        const id = await createStoreProduct(productId, chainId, storeProductName, brandName || null, isWeighable || false, amount || null, unit || null);
-        res.status(201).json({ id, productId, chainId, storeProductName, isWeighable, amount, unit });
+        const id = await createStoreProduct(
+            productId,
+            chainId,
+            storeProductName,
+            brandName || null,
+            isWeighable || false,
+            amount || null,
+            unit || null,
+            imageUrl || null
+        );
+        res.status(201).json({ id, productId, chainId, storeProductName, isWeighable, amount, unit, imageUrl: imageUrl || null });
     } catch (error) {
         next(error);
     }
@@ -144,4 +158,49 @@ export const matchStoreProductByName = async (req: Request, res: Response, next:
     } catch (error) {
         next(error);
     }
+};
+export const searchUnifiedStoreProductsByChain = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const chainId = Number(req.query.chainId);
+        const name = typeof req.query.name === 'string' ? req.query.name : '';
+        const categoryIdRaw = req.query.categoryId;
+        const categoryId =
+            typeof categoryIdRaw === 'string' && categoryIdRaw.trim().length > 0
+                ? Number(categoryIdRaw)
+                : null;
+
+        if (isNaN(chainId)) {
+            res.status(400).json({ error: 'chainId is required' });
+            return;
+        }
+
+        if (!name.trim() && !Number.isFinite(categoryId)) {
+            res.status(400).json({ error: 'name or categoryId is required' });
+            return;
+        }
+
+        const result = await searchUnifiedByChain(chainId, name, categoryId);
+        res.json(result);
+    } catch (error) {
+        next(error);
+    }
+};
+
+export const getStoreProductUploadUrl = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { filename, mimeType } = req.body;
+    if (!filename) {
+      res.status(400).json({ error: 'filename is required' });
+      return;
+    }
+
+    const { getPresignedProductImageUploadUrl } = await import('../services/storageService.js');
+    const { uploadUrl, filePath } = await getPresignedProductImageUploadUrl(
+      filename,
+      mimeType || 'image/jpeg'
+    );
+    res.json({ uploadUrl, filePath });
+  } catch (error) {
+    next(error);
+  }
 };

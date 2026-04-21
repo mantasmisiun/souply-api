@@ -1,4 +1,4 @@
-import pool from '../config/db';
+import pool from '../config/db.js';
 
 //Create a new category
 export const createCategory = async (
@@ -126,5 +126,25 @@ export const getStoreProductsByCategoryAndChain = async (
         ...r,
         isWeighable: !!r.isWeighable,
         amount: r.amount !== null ? parseFloat(r.amount) : null,
+    }));
+};
+export const searchL3CategoriesByName = async (query: string) => {
+    const [rows]: any = await pool.query(
+        `SELECT c3.id, c3.name,
+                c2.name AS l2Name,
+                c1.name AS l1Name
+         FROM Category c3
+         JOIN Category c2 ON c2.id = c3.parentCategoryId
+         JOIN Category c1 ON c1.id = c2.parentCategoryId
+         WHERE c3.name LIKE ?
+         ORDER BY c3.name
+         LIMIT 20`,
+        [`%${query}%`]
+    );
+
+    return rows.map((r: any) => ({
+        id: r.id,
+        name: r.name,
+        path: `${r.l1Name} > ${r.l2Name} > ${r.name}`,
     }));
 };

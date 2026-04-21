@@ -1,5 +1,5 @@
 import { Queue, Worker, Job } from 'bullmq';
-import { normalizeReceiptDateForStorage, normalizeReceiptNo } from '../utils/receiptMetadata';
+import { normalizeReceiptDateForStorage, normalizeReceiptNo } from '../utils/receiptMetadata.js';
 
 const connection = {
     host: process.env.REDIS_HOST || '192.168.1.212',
@@ -17,9 +17,9 @@ export const startWorker = () => {
         parsedData.receiptNo = normalizedReceiptNo;
         parsedData.date = normalizedReceiptDate;
 
-        const { updateReceiptDetails, updateReceiptStore, getReceiptById, getReceiptByReceiptNoAndUser, deleteReceipt } = await import('../models/receiptModel');
-        const { deleteReceiptImage } = await import('../services/storageService');
-        const { processReceipt } = await import('./receiptProcessingService');
+        const { updateReceiptDetails, updateReceiptStore, getReceiptById, getReceiptByReceiptNoAndUser, deleteReceipt } = await import('../models/receiptModel.js');
+        const { deleteReceiptImage } = await import('../services/storageService.js');
+        const { processReceipt } = await import('./receiptProcessingService.js');
 
         try {
             await updateReceiptDetails(receiptId, null, null, 'processing', parsedData);

@@ -1,4 +1,4 @@
-import pool from '../config/db';
+import pool from '../config/db.js';
 
 export const createShoppingList = async (userId: string, storeId: number, basketId?: number) => {
     const [result]: any = await pool.query(

@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { addShoppingList, fetchShoppingListsByUserId, fetchShoppingListById, removeShoppingList, changeShoppingListStatus, duplicateList } from '../controllers/shoppingListController';
+import { addShoppingList, fetchShoppingListsByUserId, fetchShoppingListById, removeShoppingList, changeShoppingListStatus, duplicateList } from '../controllers/shoppingListController.js';
 
 const router = Router();
 

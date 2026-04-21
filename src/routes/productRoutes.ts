@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { addProduct, searchProducts, fetchProductById, fetchProductsByCategory, fetchProductsByCategoryWithAmounts, fetchAllProductsByL2WithAmounts } from '../controllers/productController';
+import { addProduct, searchProducts, fetchProductById, fetchProductsByCategory, fetchProductsByCategoryWithAmounts, fetchAllProductsByL2WithAmounts } from '../controllers/productController.js';
 
 const router = Router();
 /**

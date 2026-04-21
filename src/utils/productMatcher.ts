@@ -8,7 +8,7 @@
  *   - Amount/unit as a soft boost/penalty
  */
 
-import { levenshtein } from './addressMatcher';
+import { levenshtein } from './addressMatcher.js';
 
 export function normalizeProductName(name: string): string {
     if (!name) return '';

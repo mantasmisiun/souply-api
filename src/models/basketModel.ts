@@ -1,4 +1,4 @@
-import pool from '../config/db';
+import pool from '../config/db.js';
 
 export const createBasket = async (userId: string) => {
     const [result]: any = await pool.query(

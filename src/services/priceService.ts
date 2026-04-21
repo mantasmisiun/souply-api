@@ -1,5 +1,5 @@
-import { createPrice, getPriceByStoreProductAndStore, updateFallbackPrice } from '../models/priceModel';
-import { getStoresByChainId } from '../models/storeModel';
+import { createPrice, getPriceByStoreProductAndStore, updateFallbackPrice } from '../models/priceModel.js';
+import { getStoresByChainId } from '../models/storeModel.js';
 
 export const propagateFallbackPrices = async (
     storeProductId: number,

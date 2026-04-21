@@ -1,4 +1,4 @@
-import pool from '../config/db';
+import pool from '../config/db.js';
 
 export const createUser = async (id: string) => {
     await pool.query('INSERT INTO User (id) VALUES (?)', [id]);

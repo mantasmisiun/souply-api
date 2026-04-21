@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
-import { createUser, getUserById, updateLastActive } from '../models/userModel';
+import { createUser, getUserById, updateLastActive } from '../models/userModel.js';
 
 export const addUser = async (req: Request, res: Response, next: NextFunction) => {
     try {

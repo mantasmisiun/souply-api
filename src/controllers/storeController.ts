@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
-import { createStoreChain, getAllChains } from '../models/storeChainModel';
-import { createStore, getAllStores, getStoreById, getStoresByChainId } from '../models/storeModel';
-import { findBestStoreMatch } from '../utils/addressMatcher';
+import { createStoreChain, getAllChains } from '../models/storeChainModel.js';
+import { createStore, getAllStores, getStoreById, getStoresByChainId } from '../models/storeModel.js';
+import { findBestStoreMatch } from '../utils/addressMatcher.js';
 
 export const addStoreChain = async (req: Request, res: Response, next: NextFunction) => {
     try {

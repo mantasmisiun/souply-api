@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { createBasket, getBasketsByUserId, getBasketById, updateBasketUpdatedAt, updateBasketStatus, deleteBasket, updateBasketName } from '../models/basketModel';
+import { createBasket, getBasketsByUserId, getBasketById, updateBasketUpdatedAt, updateBasketStatus, deleteBasket, updateBasketName } from '../models/basketModel.js';
 
 export const addBasket = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -143,7 +143,7 @@ export const calculateBasket = async (req: Request, res: Response, next: NextFun
             res.status(404).json({ error: 'Basket not found' });
             return;
         }
-        const { calculateBasketForStores } = await import('../services/basketCalculationService');
+        const { calculateBasketForStores } = await import('../services/basketCalculationService.js');
         const results = await calculateBasketForStores(id);
         await updateBasketStatus(id, 'compared');
         res.json(results);

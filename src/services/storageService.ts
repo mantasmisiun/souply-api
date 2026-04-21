@@ -66,3 +66,15 @@ export const getPresignedUploadUrl = async (
     const filePath = `http://${process.env.MINIO_ENDPOINT}:${process.env.MINIO_PORT}/${BUCKET}/${objectName}`;
     return { uploadUrl, filePath };
 };
+const PRODUCT_IMAGES_BUCKET = process.env.MINIO_PRODUCT_IMAGES_BUCKET || 'product-images';
+
+export const getPresignedProductImageUploadUrl = async (
+  filename: string,
+  mimeType: string
+): Promise<{ uploadUrl: string; filePath: string }> => {
+  const client = getClient();
+  const objectName = `${Date.now()}-${filename.replace(/[^\w.-]/g, '_')}`;
+  const uploadUrl = await client.presignedPutObject(PRODUCT_IMAGES_BUCKET, objectName, 60 * 15);
+  const filePath = `http://${process.env.MINIO_ENDPOINT}:${process.env.MINIO_PORT}/${PRODUCT_IMAGES_BUCKET}/${objectName}`;
+  return { uploadUrl, filePath };
+};

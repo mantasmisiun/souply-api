@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { addStoreProduct, fetchStoreProductsByProductId, fetchStoreProductsByChainId, fetchStoreProductByName, fetchStoreProductByProductAndChain, searchStoreProductsByChain, matchStoreProductByName } from '../controllers/storeProductController';
+import { addStoreProduct, fetchStoreProductsByProductId, fetchStoreProductsByChainId, fetchStoreProductByProductAndChain, searchStoreProductsByChain, matchStoreProductByName, searchUnifiedStoreProductsByChain, getStoreProductUploadUrl } from '../controllers/storeProductController.js';
 
 const router = Router();
 /**
@@ -143,5 +143,7 @@ router.get('/store-products/by-product-chain', fetchStoreProductByProductAndChai
  *         description: Up to 3 match candidates with confidence, sorted highest first
  */
 router.get('/store-products/match', matchStoreProductByName);
+router.get('/store-products/search-unified', searchUnifiedStoreProductsByChain);
+router.post('/store-products/upload-url', getStoreProductUploadUrl);
 
 export default router;

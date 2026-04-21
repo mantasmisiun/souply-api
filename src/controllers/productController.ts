@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { createProduct, searchProduct, getProductById, getProductsByCategory, getProductsByCategoryWithAmounts, getAllProductsByL2WithAmounts } from '../models/productModel';
+import { createProduct, searchProduct, getProductById, getProductsByCategory, getProductsByCategoryWithAmounts, getAllProductsByL2WithAmounts } from '../models/productModel.js';
 
 export const addProduct = async (req: Request, res: Response, next: NextFunction) => {
     try {

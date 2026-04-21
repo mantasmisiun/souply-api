@@ -1,8 +1,8 @@
 import { Request, Response, NextFunction } from "express";
-import { createReceipt, getReceiptsByUserId, getReceiptById, deleteReceipt, getReceiptItemsWithDetails, updateReceiptFilePath } from "../models/receiptModel";
-import { getPresignedUrl } from "../services/storageService";
-import { persistReceiptPrices } from '../services/receiptSaveService';
-import { getReceiptComparison } from '../services/receiptComparisonService';
+import { createReceipt, getReceiptsByUserId, getReceiptById, deleteReceipt, getReceiptItemsWithDetails, updateReceiptFilePath } from "../models/receiptModel.js";
+import { getPresignedUrl } from "../services/storageService.js";
+import { persistReceiptPrices } from '../services/receiptSaveService.js';
+import { getReceiptComparison } from '../services/receiptComparisonService.js';
 
 export const fetchReceiptsByUserId = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -94,7 +94,6 @@ export const createReceiptFromOcr = async (req: Request, res: Response, next: Ne
         // Receipt.storeId is resolved from parsedData later; initial insert can use null
         const storeId = parsedData.header?.storeId ?? null;
         const receiptId = await createReceipt(userId, storeId, filePath || '', fileType || 'image/jpeg');
-
         const result = await persistReceiptPrices(receiptId, userId, parsedData, {
             chainId: parsedData.header?.chainId,
             storeId,
@@ -103,13 +102,13 @@ export const createReceiptFromOcr = async (req: Request, res: Response, next: Ne
             products: (parsedData.products || []).map((p: any) => ({
                 storeProductId: p.storeProductId ?? null,
                 matchConfirmed: !!p.matchConfirmed,
+                priceVerified: !!p.priceVerified,
                 price: p.price,
                 promoPrice: p.promoPrice,
                 quantity: p.quantity,
                 unit: p.unit,
             })),
         });
-
         res.status(201).json({ id: receiptId, ...result });
     } catch (error) {
         next(error);
@@ -138,6 +137,7 @@ export const updateReceiptFromOcr = async (req: Request, res: Response, next: Ne
             products: (parsedData.products || []).map((p: any) => ({
                 storeProductId: p.storeProductId ?? null,
                 matchConfirmed: !!p.matchConfirmed,
+                priceVerified: !!p.priceVerified,
                 price: p.price,
                 promoPrice: p.promoPrice,
                 quantity: p.quantity,
@@ -163,7 +163,7 @@ export const getReceiptUploadUrl = async (req: Request, res: Response, next: Nex
             res.status(400).json({ error: 'filename is required' });
             return;
         }
-        const { getPresignedUploadUrl } = await import('../services/storageService');
+        const { getPresignedUploadUrl } = await import('../services/storageService.js');
         const { uploadUrl, filePath } = await getPresignedUploadUrl(filename, mimeType || 'image/jpeg');
         res.json({ uploadUrl, filePath });
     } catch (error) {

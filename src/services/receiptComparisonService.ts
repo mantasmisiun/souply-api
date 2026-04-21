@@ -1,6 +1,6 @@
-import pool from '../config/db';
-import { getReceiptById } from '../models/receiptModel';
-import { getStoreById, getClosestStorePerChainToStore, ClosestChainStore } from '../models/storeModel';
+import pool from '../config/db.js';
+import { getReceiptById } from '../models/receiptModel.js';
+import { getStoreById, getClosestStorePerChainToStore, ClosestChainStore } from '../models/storeModel.js';
 
 interface RecognizedReceiptItem {
     storeProductId: number;

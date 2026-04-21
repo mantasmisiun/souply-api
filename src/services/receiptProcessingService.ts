@@ -1,14 +1,14 @@
-import { getStoreChainByName, createStoreChain } from '../models/storeChainModel';
-import { getStoreByNameAndAddress, createStore } from '../models/storeModel';
-import { getStoreProductByNameAndChain, createStoreProduct } from '../models/storeProductModel';
-import { createProduct } from '../models/productModel';
-import { createPrice } from '../models/priceModel';
-import { updateReceiptDetails, updateReceiptStore } from '../models/receiptModel';
-import { getAllCategories } from '../models/categoryModel';
-import { assignCategoriesToProducts } from './ocrService';
-import { propagateFallbackPrices } from './priceService';
-import pool from '../config/db';
-import { normalizeReceiptDateForStorage, normalizeReceiptNo } from '../utils/receiptMetadata';
+import { getStoreChainByName, createStoreChain } from '../models/storeChainModel.js';
+import { getStoreByNameAndAddress, createStore } from '../models/storeModel.js';
+import { getStoreProductByNameAndChain, createStoreProduct } from '../models/storeProductModel.js';
+import { createProduct } from '../models/productModel.js';
+import { createPrice } from '../models/priceModel.js';
+import { updateReceiptDetails, updateReceiptStore } from '../models/receiptModel.js';
+import { getAllCategories } from '../models/categoryModel.js';
+import { assignCategoriesToProducts } from './ocrService.js';
+import { propagateFallbackPrices } from './priceService.js';
+import pool from '../config/db.js';
+import { normalizeReceiptDateForStorage, normalizeReceiptNo } from '../utils/receiptMetadata.js';
 
 export const processReceipt = async (receiptId: number, parsedData: any) => {
     const connection = await (pool as any).getConnection();

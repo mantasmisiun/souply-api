@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
-import { createPrice, getLatestPriceByStoreProduct, getLatestPricesAcrossStores, getActivePromoPrices, getPriceHistoryForStoreProduct, getPriceHistoryForStoreProductAllStores } from '../models/priceModel';
-import { getChainIdByStoreId } from '../models/storeModel';
-import { getChainIdByStoreProductId } from '../models/storeProductModel';
+import { createPrice, getLatestPriceByStoreProduct, getLatestPricesAcrossStores, getActivePromoPrices, getPriceHistoryForStoreProduct, getPriceHistoryForStoreProductAllStores } from '../models/priceModel.js';
+import { getChainIdByStoreId } from '../models/storeModel.js';
+import { getChainIdByStoreProductId } from '../models/storeProductModel.js';
 
 export const addPrice = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -35,7 +35,7 @@ export const addPrice = async (req: Request, res: Response, next: NextFunction) 
             if (!isFallback) {
                 const chainId = await getChainIdByStoreId(storeId);
                 if (chainId) {
-                    const { propagateFallbackPrices } = await import('../services/priceService');
+                    const { propagateFallbackPrices } = await import('../services/priceService.js');
                     await propagateFallbackPrices(storeProductId, storeId, chainId, price, promoPrice || null, new Date(date));
                 }
             }

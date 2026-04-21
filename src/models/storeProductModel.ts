@@ -1,4 +1,4 @@
-import pool from '../config/db';
+import pool from '../config/db.js';
 
 type Connection = typeof pool | any;
 
@@ -10,12 +10,13 @@ export const createStoreProduct = async (
     isWeighable: boolean = false,
     amount: number | null = null,
     unit: string | null = null,
+    imageUrl: string | null = null,
     conn?: Connection
-) => {
+    ) => {
     const db = conn || pool;
     const [result]: any = await db.query(
-        'INSERT INTO StoreProduct (productId, chainId, storeProductName, brandName, isWeighable, amount, unit) VALUES (?, ?, ?, ?, ?, ?, ?)',
-        [productId, chainId, storeProductName, brandName, isWeighable, amount, unit]
+        'INSERT INTO StoreProduct (productId, chainId, storeProductName, brandName, isWeighable, amount, unit, imageUrl) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        [productId, chainId, storeProductName, brandName, isWeighable, amount, unit, imageUrl]
     );
     return result.insertId;
 };
@@ -115,4 +116,110 @@ export const getStoreProductsByChainWithProductData = async (chainId: number) =>
         isWeighable: !!r.isWeighable,
         amount: r.amount !== null ? parseFloat(r.amount) : null,
     }));
+};
+export const searchUnifiedProductsByChain = async (
+    chainId: number,
+    name: string,
+    categoryId?: number | null,
+) => {
+    const term = name.trim();
+    const hasTerm = term.length > 0;
+    const hasCategory = Number.isFinite(categoryId) && Number(categoryId) > 0;
+
+    if (!hasTerm && !hasCategory) {
+        return { localStoreProducts: [], otherChainProducts: [] };
+    }
+
+    const localWhere: string[] = ['sp.chainId = ?'];
+    const localParams: any[] = [chainId];
+
+    if (hasTerm) {
+        localWhere.push('sp.storeProductName LIKE ?');
+        localParams.push(`%${term}%`);
+    }
+    if (hasCategory) {
+        localWhere.push(`(
+            p.categoryId = ?
+            OR p.categoryId IN (
+                SELECT c.id FROM Category c WHERE c.parentCategoryId = ?
+            )
+            OR p.categoryId IN (
+                SELECT c2.id
+                FROM Category c1
+                JOIN Category c2 ON c2.parentCategoryId = c1.id
+                WHERE c1.parentCategoryId = ?
+            )
+        )`);
+        localParams.push(Number(categoryId), Number(categoryId), Number(categoryId));
+    }
+
+    const [localRows]: any = await pool.query(
+        `SELECT sp.id, sp.productId, sp.storeProductName, sp.amount, sp.unit,
+                COALESCE(sp.imageUrl, p.imageUrl) AS imageUrl,
+                sc.id AS chainId, sc.name AS chainName, sc.logoUrl AS chainLogoUrl
+         FROM StoreProduct sp
+         JOIN Product p ON p.id = sp.productId
+         JOIN StoreChain sc ON sc.id = sp.chainId
+         WHERE ${localWhere.join(' AND ')}
+         ORDER BY sp.storeProductName
+         LIMIT 40`,
+        localParams
+    );
+
+    const otherWhere: string[] = [
+        `NOT EXISTS (
+            SELECT 1 FROM StoreProduct spc
+            WHERE spc.productId = p.id AND spc.chainId = ?
+        )`,
+        `EXISTS (
+            SELECT 1 FROM StoreProduct spo
+            WHERE spo.productId = p.id AND spo.chainId <> ?
+        )`
+    ];
+    const otherParams: any[] = [chainId, chainId];
+
+    if (hasTerm) {
+        otherWhere.push('p.name LIKE ?');
+        otherParams.push(`%${term}%`);
+    }
+    if (hasCategory) {
+        otherWhere.push(`(
+            p.categoryId = ?
+            OR p.categoryId IN (
+                SELECT c.id FROM Category c WHERE c.parentCategoryId = ?
+            )
+            OR p.categoryId IN (
+                SELECT c2.id
+                FROM Category c1
+                JOIN Category c2 ON c2.parentCategoryId = c1.id
+                WHERE c1.parentCategoryId = ?
+            )
+        )`);
+        otherParams.push(Number(categoryId), Number(categoryId), Number(categoryId));
+    }
+
+    const [otherRows]: any = await pool.query(
+        `SELECT p.id AS productId, p.name AS productName, p.categoryId, p.imageUrl,
+                (
+                    SELECT sc.logoUrl
+                    FROM StoreProduct spx
+                    JOIN StoreChain sc ON sc.id = spx.chainId
+                    WHERE spx.productId = p.id AND spx.chainId <> ?
+                    ORDER BY sc.id
+                    LIMIT 1
+                ) AS sourceChainLogoUrl
+         FROM Product p
+         WHERE ${otherWhere.join(' AND ')}
+         ORDER BY p.name
+         LIMIT 40`,
+        [chainId, ...otherParams]
+    );
+
+    return {
+        localStoreProducts: localRows.map((r: any) => ({
+            ...r,
+            amount: r.amount !== null ? Number(r.amount) : null,
+        })),
+        otherChainProducts: otherRows,
+    };
 };
