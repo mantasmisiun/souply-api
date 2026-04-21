@@ -38,18 +38,27 @@ export const uploadReceiptImage = async (
     return `http://${process.env.MINIO_ENDPOINT}:${process.env.MINIO_PORT}/${BUCKET}/${objectName}`;
 };
 
-export const getPresignedUrl = async (objectName: string): Promise<string> => {
-    const client = getClient();
-    // Extract just the object name from the full URL
-    const key = objectName.split(`/${BUCKET}/`)[1];
-    // Generate presigned URL valid for 1 hour
-    return await client.presignedGetObject(BUCKET, key, 60 * 60);
+const extractObjectKey = (filePathOrKey: string | null | undefined): string | null => {
+    if (!filePathOrKey) return null;
+    const marker = `/${BUCKET}/`;
+    const idx = filePathOrKey.indexOf(marker);
+    return idx >= 0 ? filePathOrKey.slice(idx + marker.length) : filePathOrKey;
 };
 
-export const deleteReceiptImage = async (fileUrl: string): Promise<void> => {
-    const client = getClient();
-    const key = fileUrl.split(`/${BUCKET}/`)[1];
-    await client.removeObject(BUCKET, key);
+export const getPresignedUrl = async (objectName: string | null | undefined): Promise<string> => {
+    const key = extractObjectKey(objectName);
+    if (!key) {
+        const err = new Error('Receipt image is missing');
+        (err as any).statusCode = 404;
+        throw err;
+    }
+    return await getClient().presignedGetObject(BUCKET, key, 60 * 60);
+};
+
+export const deleteReceiptImage = async (fileUrl: string | null | undefined): Promise<void> => {
+    const key = extractObjectKey(fileUrl);
+    if (!key) return;
+    await getClient().removeObject(BUCKET, key);
 };
 
 /**

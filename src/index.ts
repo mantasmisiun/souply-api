@@ -1,5 +1,5 @@
+import './config/env.js'; 
 import express from 'express';
-import dotenv from 'dotenv';
 import pool from './config/db.js';
 import storeRoutes from './routes/storeRoutes.js';
 import productRoutes from './routes/productRoutes.js';
@@ -15,10 +15,6 @@ import shoppingListItemRoutes from './routes/shoppingListItemRoutes.js';
 import receiptRoutes from './routes/receiptRoutes.js';
 import swaggerUi from 'swagger-ui-express';
 import swaggerSpec from './config/swagger.js';
-
-dotenv.config({
-    path: process.env.NODE_ENV === 'test' ? '.env.test' : '.env'
-});
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -37,13 +33,7 @@ app.use('/api', shoppingListRoutes);
 app.use('/api', shoppingListItemRoutes);
 app.use('/api', receiptRoutes);
 app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
-// 404 handler for unknown routes
-app.use((req, res) => {
-    res.status(404).json({ error: `Route ${req.method} ${req.path} not found` });
-});
 
-// Error handler must be last
-app.use(errorHandler);
 app.get('/health', async (req, res) => {
     try {
         await pool.query('SELECT 1');
@@ -52,6 +42,15 @@ app.get('/health', async (req, res) => {
         res.status(500).json({ status: 'error', database: 'disconnected' });
     }
 });
+
+// 404 handler for unknown routes
+app.use((req, res) => {
+    res.status(404).json({ error: `Route ${req.method} ${req.path} not found` });
+});
+
+// Error handler must be last
+app.use(errorHandler);
+
 export default app;
 if (process.env.NODE_ENV !== 'test') {
     app.listen(PORT, () => {

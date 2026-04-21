@@ -60,7 +60,11 @@ export const fetchReceiptImage = async (req: Request, res: Response, next: NextF
         }
         const url = await getPresignedUrl(receipt.filePath);
         res.json({ url });
-    } catch (error) {
+    } catch (error: any) {
+        if (error?.statusCode === 404) {
+            res.status(404).json({ error: error.message });
+            return;
+        }
         next(error);
     }
 };
