@@ -103,11 +103,18 @@ export const getPriceByStoreProductAndStore = async (storeProductId: number, sto
     );
     return rows[0] || null;
 };
-// For fallback price
-export const updateFallbackPrice = async (id: number, price: number, promoPrice: number | null, date: Date) => {
+// For fallback price. Refresh price/promo/date and re-link to the source receipt,
+// always keeping priceVerified=0 since a fallback is never a user-verified row.
+export const updateFallbackPrice = async (
+    id: number,
+    price: number,
+    promoPrice: number | null,
+    date: Date,
+    receiptId: number | null
+) => {
     await pool.query(
-        'UPDATE Price SET price = ?, promoPrice = ?, date = ? WHERE id = ?',
-        [price, promoPrice, date, id]
+        'UPDATE Price SET price = ?, promoPrice = ?, date = ?, receiptId = ?, priceVerified = 0 WHERE id = ?',
+        [price, promoPrice, date, receiptId, id]
     );
 };
 

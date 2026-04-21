@@ -36,7 +36,15 @@ export const addPrice = async (req: Request, res: Response, next: NextFunction) 
                 const chainId = await getChainIdByStoreId(storeId);
                 if (chainId) {
                     const { propagateFallbackPrices } = await import('../services/priceService.js');
-                    await propagateFallbackPrices(storeProductId, storeId, chainId, price, promoPrice || null, new Date(date));
+                    await propagateFallbackPrices(
+                        storeProductId,
+                        storeId,
+                        chainId,
+                        price,
+                        promoPrice || null,
+                        new Date(date),
+                        receiptId || null
+                    );
                 }
             }
 

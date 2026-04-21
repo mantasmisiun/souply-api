@@ -7,7 +7,8 @@ export const propagateFallbackPrices = async (
     chainId: number,
     price: number,
     promoPrice: number | null,
-    date: Date
+    date: Date,
+    receiptId: number | null = null
 ): Promise<void> => {
     // Get all other stores in the same chain
     const stores = await getStoresByChainId(chainId);
@@ -17,7 +18,7 @@ export const propagateFallbackPrices = async (
         const existingPrice = await getPriceByStoreProductAndStore(storeProductId, store.id);
 
         if (!existingPrice) {
-            // No price exists — insert fallback
+            // No price exists — insert fallback linked to the source receipt
             await createPrice(
                 storeProductId,
                 store.id,
@@ -27,11 +28,11 @@ export const propagateFallbackPrices = async (
                 true,
                 date,
                 false,
-                null
+                receiptId
             );
         } else if (existingPrice.isFallback === 1) {
-            // Existing fallback price — update it
-            await updateFallbackPrice(existingPrice.id, price, promoPrice, date);
+            // Existing fallback price — refresh values and re-link to source receipt
+            await updateFallbackPrice(existingPrice.id, price, promoPrice, date, receiptId);
         }
         // isFallback === 0 → skip
     }

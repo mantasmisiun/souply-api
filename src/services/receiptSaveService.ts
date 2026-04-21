@@ -107,7 +107,15 @@ export const persistReceiptPrices = async (
             return result;
         }
 
-        const writeDate = new Date();
+        // Prices inherit the receipt's OCR date, not "now", so history lines up
+        // with when the user actually paid. Fall back to now only if normalization failed.
+        const parsedReceiptDate = normalizedReceiptDate
+            ? new Date(normalizedReceiptDate.replace(' ', 'T'))
+            : null;
+        const writeDate =
+            parsedReceiptDate && !Number.isNaN(parsedReceiptDate.getTime())
+                ? parsedReceiptDate
+                : new Date();
 
         for (const item of input.products) {
             if (!item.matchConfirmed || !item.storeProductId) {
@@ -190,7 +198,8 @@ export const persistReceiptPrices = async (
                 p.chainId,
                 p.price,
                 p.promoPrice,
-                p.date
+                p.date,
+                receiptId
             );
         } catch (e) {
             console.warn(`Fallback propagation failed for sp=${p.storeProductId}:`, e);
