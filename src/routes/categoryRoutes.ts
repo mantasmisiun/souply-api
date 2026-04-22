@@ -1,8 +1,9 @@
 import { Router } from 'express';
-import { 
-    addCategory, fetchAllCategories, fetchSubCategories, fetchCategoryById, 
+import {
+    addCategory, fetchAllCategories, fetchSubCategories, fetchCategoryById,
     fetchCategoryPath, fetchAllProductsByParentCategory,
-    fetchCategoryAncestors, fetchStoreProductsByCategory, fetchL3CategorySearch
+    fetchCategoryAncestors, fetchStoreProductsByCategory, fetchL3CategorySearch,
+    resolveCategoryPathHandler
 } from '../controllers/categoryController.js';
 
 const router = Router();
@@ -37,6 +38,7 @@ const router = Router();
 
 // POST /api/categories - Create a new category
 router.post('/categories', addCategory);
+router.post('/categories/resolve-path', resolveCategoryPathHandler);
 
 /**
  * @swagger

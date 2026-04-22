@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { addStoreProduct, fetchStoreProductsByProductId, fetchStoreProductsByChainId, fetchStoreProductByProductAndChain, searchStoreProductsByChain, matchStoreProductByName, searchUnifiedStoreProductsByChain, getStoreProductUploadUrl } from '../controllers/storeProductController.js';
+import { addStoreProduct, fetchStoreProductsByProductId, fetchStoreProductsByChainId, fetchStoreProductByProductAndChain, searchStoreProductsByChain, matchStoreProductByName, searchUnifiedStoreProductsByChain, getStoreProductUploadUrl, setStoreProductImage } from '../controllers/storeProductController.js';
 
 const router = Router();
 /**
@@ -145,5 +145,6 @@ router.get('/store-products/by-product-chain', fetchStoreProductByProductAndChai
 router.get('/store-products/match', matchStoreProductByName);
 router.get('/store-products/search-unified', searchUnifiedStoreProductsByChain);
 router.post('/store-products/upload-url', getStoreProductUploadUrl);
+router.patch('/store-products/:id/image', setStoreProductImage);
 
 export default router;

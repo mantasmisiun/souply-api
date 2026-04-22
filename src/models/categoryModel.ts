@@ -39,6 +39,68 @@ export const getAllCategories = async () => {
     return categories;
 };
 
+/** Case/diacritic/punctuation-insensitive name comparison for category lookup. */
+function normalizeCategoryName(name: string): string {
+    if (!name) return '';
+    return name
+        .toLowerCase()
+        .normalize('NFD').replace(/[̀-ͯ]/g, '')
+        .replace(/[^a-z0-9]+/g, ' ')
+        .trim()
+        .replace(/\s+/g, ' ');
+}
+
+/**
+ * Resolve a hierarchical path (scraper breadcrumb) to a Category id. Tries
+ * strict top-down walk first: each segment is matched against its parent's
+ * children (normalized). If that fails — e.g. caller passed only a leaf
+ * name like ["Grybai"] which isn't a root — falls back to a flat search
+ * on the LAST segment across the whole tree. Returns null when even the
+ * flat fallback finds nothing.
+ *
+ *   resolveCategoryByPath(['Mėsa ir paukštiena', 'Dešros', 'Vytintos dešros'])
+ *   resolveCategoryByPath(['Grybai'])  // flat fallback matches as L2
+ */
+export const resolveCategoryByPath = async (
+    segments: string[]
+): Promise<number | null> => {
+    if (!Array.isArray(segments) || segments.length === 0) return null;
+
+    // 1. Strict top-down walk.
+    let parentId: number | null = null;
+    let matchedId: number | null = null;
+    for (const seg of segments) {
+        const target = normalizeCategoryName(seg);
+        if (!target) break;
+        const [rows]: any = await pool.query(
+            parentId === null
+                ? `SELECT id, name FROM Category WHERE parentCategoryId IS NULL AND isHidden = 0`
+                : `SELECT id, name FROM Category WHERE parentCategoryId = ? AND isHidden = 0`,
+            parentId === null ? [] : [parentId]
+        );
+        const hit = (rows as any[]).find(
+            (r: any) => normalizeCategoryName(r.name) === target
+        );
+        if (!hit) break;
+        matchedId = hit.id;
+        parentId = hit.id;
+    }
+    if (matchedId !== null) return matchedId;
+
+    // 2. Flat fallback: search the whole tree for the last segment by name.
+    //    Scrapers often pass just a leaf name; this lets that work as long
+    //    as the name is unique enough to land once.
+    const lastTarget = normalizeCategoryName(segments[segments.length - 1]);
+    if (!lastTarget) return null;
+    const [flat]: any = await pool.query(
+        'SELECT id, name FROM Category WHERE isHidden = 0'
+    );
+    const flatHit = (flat as any[]).find(
+        (r: any) => normalizeCategoryName(r.name) === lastTarget
+    );
+    return flatHit ? flatHit.id : null;
+};
+
 export const getCategoryById = async (id: number) => {
     const [rows]: any = await pool.query(
         'SELECT * FROM Category WHERE id = ?',

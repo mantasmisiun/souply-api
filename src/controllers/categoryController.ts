@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { createCategory, getTopLevelCategories, getSubCategories, getCategoryById, getCategoryPath, getCategoryAncestors, getStoreProductsByCategoryAndChain, getAllProductsByParentCategory, searchL3CategoriesByName } from '../models/categoryModel.js';
+import { createCategory, getTopLevelCategories, getSubCategories, getCategoryById, getCategoryPath, getCategoryAncestors, getStoreProductsByCategoryAndChain, getAllProductsByParentCategory, searchL3CategoriesByName, resolveCategoryByPath } from '../models/categoryModel.js';
 
 export const addCategory = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -126,6 +126,29 @@ export const fetchL3CategorySearch = async (req: Request, res: Response, next: N
         }
         const rows = await searchL3CategoriesByName(q);
         res.json(rows);
+    } catch (error) {
+        next(error);
+    }
+};
+
+/**
+ * POST /api/categories/resolve-path
+ * Body: { path: string[] }  // e.g. ["Mėsa ir paukštiena", "Dešros", ...]
+ *
+ * Returns the deepest matching Category id (or null) for a hierarchical
+ * path. Used by scrapers to map their chain's category tree onto ours.
+ */
+export const resolveCategoryPathHandler = async (
+    req: Request, res: Response, next: NextFunction
+) => {
+    try {
+        const { path } = req.body ?? {};
+        if (!Array.isArray(path) || path.some((s: any) => typeof s !== 'string')) {
+            res.status(400).json({ error: 'path must be an array of strings' });
+            return;
+        }
+        const id = await resolveCategoryByPath(path);
+        res.json({ id });
     } catch (error) {
         next(error);
     }

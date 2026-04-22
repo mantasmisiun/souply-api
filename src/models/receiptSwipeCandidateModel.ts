@@ -98,3 +98,42 @@ export const getSwipeCandidatesWithDetails = async (receiptId: number) => {
     );
     return rows;
 };
+
+/**
+ * All cross-SP pair-votes the given user has cast on this receipt. Returned
+ * as a Set of "min-max" strings for O(1) lookup by the queue filter.
+ */
+export const getVotedPairKeysForUserReceipt = async (
+    userId: string,
+    receiptId: number
+): Promise<Set<string>> => {
+    const [rows]: any = await pool.query(
+        `SELECT spIdA, spIdB
+           FROM StoreProductMatchVote
+          WHERE userId = ? AND receiptId = ?`,
+        [userId, receiptId]
+    );
+    const s = new Set<string>();
+    for (const r of rows) s.add(`${r.spIdA}-${r.spIdB}`);
+    return s;
+};
+
+/**
+ * Store-products for which this receipt has a verified primary Price row.
+ * Used by the queue filter to drop self-pair cards the user has already
+ * confirmed via identical-swipe (which flips Price.priceVerified in-DB but
+ * doesn't propagate into Receipt.parsedData — so JSON alone is stale).
+ */
+export const getVerifiedStoreProductIdsForReceipt = async (
+    receiptId: number
+): Promise<Set<number>> => {
+    const [rows]: any = await pool.query(
+        `SELECT DISTINCT storeProductId
+           FROM Price
+          WHERE receiptId = ? AND isFallback = 0 AND priceVerified = 1`,
+        [receiptId]
+    );
+    const s = new Set<number>();
+    for (const r of rows) s.add(Number(r.storeProductId));
+    return s;
+};

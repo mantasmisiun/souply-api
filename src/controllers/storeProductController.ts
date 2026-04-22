@@ -3,7 +3,8 @@ import {
   createStoreProduct, getStoreProductsByProductId, getStoreProductsByChainId,
   getStoreProductByName, getStoreProductByProductAndChain,
   searchStoreProductsByChain as searchByChain,
-  searchUnifiedProductsByChain as searchUnifiedByChain
+  searchUnifiedProductsByChain as searchUnifiedByChain,
+  updateStoreProductImageUrl,
 } from '../models/storeProductModel.js';
 import { getProductsByCategoryWithAmounts, getAllProductsByL2WithAmounts } from '../models/productModel.js';
 import { getStoreProductsByChainWithProductData } from '../models/storeProductModel.js';
@@ -200,6 +201,34 @@ export const getStoreProductUploadUrl = async (req: Request, res: Response, next
       mimeType || 'image/jpeg'
     );
     res.json({ uploadUrl, filePath });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * PATCH /api/store-products/:id/image
+ * Body: { filePath }  // MinIO path returned by the upload-url helper.
+ *
+ * Sets StoreProduct.imageUrl to the public URL corresponding to that path
+ * and returns it so the mobile can update its thumbnail immediately.
+ */
+export const setStoreProductImage = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const id = Number(req.params.id);
+    if (isNaN(id)) {
+      res.status(400).json({ error: 'Invalid store product ID' });
+      return;
+    }
+    const { filePath } = req.body ?? {};
+    if (!filePath || typeof filePath !== 'string') {
+      res.status(400).json({ error: 'filePath is required' });
+      return;
+    }
+    // getPresignedProductImageUploadUrl already returns the full public URL
+    // as `filePath` — we just persist it verbatim.
+    await updateStoreProductImageUrl(id, filePath);
+    res.json({ id, imageUrl: filePath });
   } catch (error) {
     next(error);
   }

@@ -1,6 +1,15 @@
 import { Request, Response, NextFunction } from "express";
 import { createReceipt, getReceiptsByUserId, getReceiptById, deleteReceipt, getReceiptItemsWithDetails, updateReceiptFilePath, getReceiptByReceiptNoAndUser } from "../models/receiptModel.js";
-import { getSwipeCandidatesWithDetails } from "../models/receiptSwipeCandidateModel.js";
+import {
+    getSwipeCandidatesWithDetails,
+    getVerifiedStoreProductIdsForReceipt,
+    getVotedPairKeysForUserReceipt,
+} from "../models/receiptSwipeCandidateModel.js";
+import {
+    unverifyReceiptLinePrice,
+    upsertReceiptLineIssue,
+    type IssueFlags,
+} from "../models/receiptLineIssueModel.js";
 import { getPresignedUrl } from "../services/storageService.js";
 import { persistReceiptPrices } from '../services/receiptSaveService.js';
 import { getReceiptComparison } from '../services/receiptComparisonService.js';
@@ -281,6 +290,7 @@ export const fetchReceiptSwipeQueue = async (req: Request, res: Response, next: 
             res.status(400).json({ error: 'Invalid receipt ID' });
             return;
         }
+        const userId = typeof req.query.userId === 'string' ? req.query.userId : null;
 
         const receipt = await getReceiptById(id);
         if (!receipt) {
@@ -298,11 +308,47 @@ export const fetchReceiptSwipeQueue = async (req: Request, res: Response, next: 
 
         const flat = await getSwipeCandidatesWithDetails(id);
 
-        // Group flat rows by receiptLineIdx; build the response item shape.
+        // Cards the user has already acted on shouldn't appear again.
+        //  - Cross-SP pairs (line.SP ≠ candidate.SP): skip when a
+        //    StoreProductMatchVote exists for (userId, sortedPair).
+        //  - Self-pairs (line.SP = candidate.SP): read the live
+        //    Price.priceVerified from the DB — the parsed JSON isn't the
+        //    source of truth once swipes start flipping the Price column.
+        const votedPairs = userId
+            ? await getVotedPairKeysForUserReceipt(userId, id)
+            : new Set<string>();
+        const verifiedSpIds = userId
+            ? await getVerifiedStoreProductIdsForReceipt(id)
+            : new Set<number>();
+
         const byLine = new Map<number, any>();
         for (const r of flat) {
+            const line = parsedProducts[r.receiptLineIdx] ?? {};
+            const lineSpId = Number.isFinite(line.storeProductId)
+                ? Number(line.storeProductId)
+                : null;
+            const candidateSpId = Number(r.storeProductId);
+
+            // Lines without a storeProductId can't form a pair vote, so the
+            // swipe UI can't do anything meaningful with them. Pre-C2a
+            // receipts hit this path because SP resolution was only added in
+            // that phase. Skip these cards — the whole line drops out of the
+            // queue since no candidates survive.
+            if (lineSpId === null) continue;
+
+            if (userId) {
+                if (candidateSpId === lineSpId) {
+                    // Self-pair: the DB Price row is the source of truth
+                    // (parsedData.priceVerified can go stale after swipes).
+                    if (verifiedSpIds.has(candidateSpId)) continue;
+                } else {
+                    const a = Math.min(lineSpId, candidateSpId);
+                    const b = Math.max(lineSpId, candidateSpId);
+                    if (votedPairs.has(`${a}-${b}`)) continue;
+                }
+            }
+
             if (!byLine.has(r.receiptLineIdx)) {
-                const line = parsedProducts[r.receiptLineIdx] ?? {};
                 byLine.set(r.receiptLineIdx, {
                     receiptLineIdx: r.receiptLineIdx,
                     ocrName: line.name ?? null,
@@ -310,15 +356,13 @@ export const fetchReceiptSwipeQueue = async (req: Request, res: Response, next: 
                     ocrUnit: line.unit ?? null,
                     ocrPrice: line.price ?? null,
                     ocrPromoPrice: line.promoPrice ?? null,
-                    lineStoreProductId: Number.isFinite(line.storeProductId)
-                        ? Number(line.storeProductId)
-                        : null,
+                    lineStoreProductId: lineSpId,
                     candidates: [],
                 });
             }
             byLine.get(r.receiptLineIdx).candidates.push({
                 rankPos: r.rankPos,
-                storeProductId: r.storeProductId,
+                storeProductId: candidateSpId,
                 name: r.name,
                 brandName: r.brandName,
                 amount: r.amount,
@@ -341,6 +385,77 @@ export const fetchReceiptSwipeQueue = async (req: Request, res: Response, next: 
         });
 
         res.json({ receiptId: id, items });
+    } catch (error) {
+        next(error);
+    }
+};
+
+/**
+ * POST /api/receipts/:id/lines/:idx/report-issue
+ * Body: { userId, flags: {name, price, amount, discount}, note? }
+ *
+ * User-facing flag for a suspect receipt line. Writes / updates a row in
+ * ReceiptLineIssue and marks the line's Price as unverified so it stops
+ * feeding trusted totals until admin resolves.
+ */
+export const reportReceiptLineIssue = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const receiptId = Number(req.params.id);
+        const lineIdx = Number(req.params.idx);
+        if (isNaN(receiptId) || isNaN(lineIdx) || lineIdx < 0) {
+            res.status(400).json({ error: 'Invalid receipt id or line index' });
+            return;
+        }
+        const { userId, flags, note } = req.body ?? {};
+        if (!userId || typeof userId !== 'string') {
+            res.status(400).json({ error: 'userId is required' });
+            return;
+        }
+        if (!flags || typeof flags !== 'object') {
+            res.status(400).json({ error: 'flags object is required' });
+            return;
+        }
+        const parsedFlags: IssueFlags = {
+            name: !!flags.name,
+            price: !!flags.price,
+            amount: !!flags.amount,
+            discount: !!flags.discount,
+            image: !!flags.image,
+        };
+        if (
+            !parsedFlags.name &&
+            !parsedFlags.price &&
+            !parsedFlags.amount &&
+            !parsedFlags.discount &&
+            !parsedFlags.image
+        ) {
+            res.status(400).json({ error: 'At least one flag must be true' });
+            return;
+        }
+
+        const flaggedCount = await upsertReceiptLineIssue(
+            receiptId,
+            lineIdx,
+            userId,
+            parsedFlags,
+            typeof note === 'string' ? note.slice(0, 500) : null
+        );
+
+        // Resolve the line's storeProductId from parsedData so we can flip
+        // priceVerified. Silent-no-op if there's no resolved SP (pre-C2a or
+        // chain-unrecognized receipt).
+        const receipt = await getReceiptById(receiptId);
+        const parsedData =
+            receipt && typeof receipt.parsedData === 'string'
+                ? JSON.parse(receipt.parsedData)
+                : receipt?.parsedData;
+        const linePRaw = parsedData?.products?.[lineIdx]?.storeProductId;
+        const lineSpId = Number.isFinite(linePRaw) ? Number(linePRaw) : null;
+        if (lineSpId !== null) {
+            await unverifyReceiptLinePrice(receiptId, lineSpId);
+        }
+
+        res.json({ ok: true, flaggedCount });
     } catch (error) {
         next(error);
     }

@@ -17,7 +17,16 @@ export const createReceipt = async (
 
 export const getReceiptsByUserId = async (userId: string) => {
     const [rows]: any = await pool.query(
-        'SELECT * FROM Receipt WHERE userId = ?',
+        `SELECT r.*,
+                sc.name    AS chainName,
+                sc.logoUrl AS chainLogoUrl,
+                s.name     AS storeName,
+                s.address  AS storeAddress
+           FROM Receipt r
+      LEFT JOIN Store      s  ON s.id        = r.storeId
+      LEFT JOIN StoreChain sc ON sc.id       = s.chainId
+          WHERE r.userId = ?
+          ORDER BY r.id DESC`,
         [userId]
     );
     return rows;

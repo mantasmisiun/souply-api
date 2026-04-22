@@ -91,11 +91,16 @@ export const castSwipeVote = async (
         return { ok: true, effect: 'no-candidate' };
     }
 
-    // Self-pair (candidate already is the line's SP): no cross-SP signal to
-    // record. Fall back to the C1-era side-effect: flip Price.isVerified on
-    // identical, flip it off on different.
+    // Self-pair (candidate already is the line's SP): the vote has no
+    // cross-SP signal, so it's just an acknowledgement that the user has
+    // seen this auto-match card. Flip priceVerified=1 for ANY direction so
+    // the queue filter catches it on re-entry — otherwise self-pair
+    // different/similar swipes leave no trace and the card would keep
+    // showing. We lose nuance on self-pair different (user signalling
+    // "auto-match was wrong"), but self-pair cards only exist for >=0.90-
+    // confidence auto-matches where different is rare.
     if (input.candidateStoreProductId === lineSpId) {
-        return await applyLinePriceEffect(input, lineSpId);
+        return await acknowledgeSelfPair(input, lineSpId);
     }
 
     // Pair vote. Sort, write, update aggregate, re-evaluate promote/demote.
@@ -313,6 +318,31 @@ async function reevaluateMerge(
  * per (receipt, storeProduct)" semantics as C1. `identical` flips on,
  * `different` flips off, `similar` leaves it alone.
  */
+/**
+ * Acknowledge a self-pair swipe — flip priceVerified=1 unconditionally so
+ * the queue filter drops the card on next fetch, regardless of which
+ * direction the user swiped.
+ */
+async function acknowledgeSelfPair(
+    input: CastSwipeVoteInput,
+    lineSpId: number
+): Promise<CastSwipeVoteResult> {
+    const [rows]: any = await pool.query(
+        `SELECT id, priceVerified FROM Price
+          WHERE receiptId = ? AND storeProductId = ? AND isFallback = 0
+          LIMIT 1`,
+        [input.receiptId, lineSpId]
+    );
+    if (rows.length === 0) {
+        return { ok: true, effect: 'no-price-row' };
+    }
+    if (rows[0].priceVerified) {
+        return { ok: true, effect: 'price-already-verified' };
+    }
+    await pool.query(`UPDATE Price SET priceVerified = 1 WHERE id = ?`, [rows[0].id]);
+    return { ok: true, effect: 'price-verified' };
+}
+
 async function applyLinePriceEffect(
     input: CastSwipeVoteInput,
     lineSpId: number,

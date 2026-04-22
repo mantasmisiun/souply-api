@@ -112,6 +112,18 @@ export const searchStoreProductsByChain = async (name: string, chainId: number) 
     return rows;
 };
 
+/** Swap a StoreProduct's imageUrl. Used by the user-supplied-photo flow in
+ *  receipt detail (three-dots menu → Pridėti nuotrauką). */
+export const updateStoreProductImageUrl = async (
+    id: number,
+    imageUrl: string | null
+): Promise<void> => {
+    await pool.query(
+        'UPDATE StoreProduct SET imageUrl = ? WHERE id = ?',
+        [imageUrl, id]
+    );
+};
+
 export const updateStoreProductName = async (id: number, storeProductName: string) => {
     await pool.query(
         'UPDATE StoreProduct SET storeProductName = ? WHERE id = ?',

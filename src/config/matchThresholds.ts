@@ -38,8 +38,11 @@ export const MatchThresholds = {
         maxWilsonLower: 0.40,
     },
 
-    /** Burst filter: votes with shorter dwell are silently discarded. */
-    minDwellMs: 500,
+    /** Burst filter: votes with shorter dwell are silently discarded.
+     *  Lowered from 500 → 100 — users legitimately swipe fast once muscle
+     *  memory kicks in, and the original threshold was silently killing
+     *  real votes. 100ms still filters genuinely accidental thumb bumps. */
+    minDwellMs: 100,
 
     /** Max pair-votes a single user can cast per minute — defence against
      *  accidental rapid re-swiping through the queue. */
