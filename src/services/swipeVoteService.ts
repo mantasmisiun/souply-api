@@ -1,5 +1,6 @@
 import pool from '../config/db.js';
 import { MatchThresholds } from '../config/matchThresholds.js';
+import { applyBaseProductLinkDelta } from '../models/baseProductLinkModel.js';
 import {
     applyAggregateDelta,
     countRecentVotes,
@@ -11,6 +12,7 @@ import {
 } from '../models/storeProductMatchModel.js';
 import {
     demoteMergeByProductIds,
+    getEffectiveBaseProductIdForStoreProduct,
     getProductIdForStoreProduct,
     promoteMergeByProductIds,
     type MergeDecision,
@@ -118,6 +120,18 @@ export const castSwipeVote = async (
             await applyAggregateDelta(pair.spIdA, pair.spIdB, input.vote, +1, connection);
         }
 
+        // Phase C3: maintain cross-baseProduct similarity link tallies. A
+        // swipe that crosses a baseProduct boundary with vote='similar'
+        // increments BaseProductLink.similarVoteCount; moving away from
+        // similar decrements.
+        await applyBaseProductLinkForVote(
+            pair.spIdA,
+            pair.spIdB,
+            previousVote,
+            input.vote,
+            connection
+        );
+
         const agg = await getMatchAggregate(pair.spIdA, pair.spIdB, connection);
         const merge = await reevaluateMerge(pair.spIdA, pair.spIdB, agg, connection);
 
@@ -185,6 +199,15 @@ export const undoSwipeVote = async (
         );
         if (deletedVote !== null) {
             await applyAggregateDelta(pair.spIdA, pair.spIdB, deletedVote, -1, connection);
+            // Also reverse any BaseProductLink increment the vote caused.
+            // Passing newVote=null here — deletion is the terminal state.
+            await applyBaseProductLinkForVote(
+                pair.spIdA,
+                pair.spIdB,
+                deletedVote,
+                null,
+                connection
+            );
         }
         const agg = await getMatchAggregate(pair.spIdA, pair.spIdB, connection);
         const merge = await reevaluateMerge(pair.spIdA, pair.spIdB, agg, connection);
@@ -209,6 +232,36 @@ export const undoSwipeVote = async (
 };
 
 // ───────────────── internals ─────────────────
+
+/**
+ * Maintain the cross-baseProduct similarity tally (BaseProductLink).
+ *
+ * Mapping: only "similar" votes feed the link counter. The delta = 1 when
+ * the vote transitions TO similar (from any other state, including unvoted);
+ * -1 when it transitions AWAY from similar (including deletion, which
+ * passes newVote = null); 0 otherwise. Self-links (both SPs in the same
+ * baseProduct, which happens after a merge) are silently skipped by
+ * applyBaseProductLinkDelta.
+ */
+async function applyBaseProductLinkForVote(
+    spIdA: number,
+    spIdB: number,
+    previousVote: MatchVote | null,
+    newVote: MatchVote | null,
+    conn: Connection
+): Promise<void> {
+    const prevSimilar = previousVote === 'similar' ? 1 : 0;
+    const newSimilar = newVote === 'similar' ? 1 : 0;
+    const delta = newSimilar - prevSimilar;
+    if (delta === 0) return;
+
+    const bpA = await getEffectiveBaseProductIdForStoreProduct(spIdA, conn);
+    const bpB = await getEffectiveBaseProductIdForStoreProduct(spIdB, conn);
+    if (bpA === null || bpB === null) return;
+    if (bpA === bpB) return;
+
+    await applyBaseProductLinkDelta(bpA, bpB, delta, conn);
+}
 
 /**
  * Decide whether the current aggregate state crosses a promote or demote

@@ -139,3 +139,28 @@ export const getProductIdForStoreProduct = async (
     );
     return rows[0]?.productId ?? null;
 };
+
+/**
+ * The baseProduct a StoreProduct effectively belongs to after walking through
+ * the mergedIntoId chain (identical merges) and then reading baseProductId
+ * (similarity grouping from Phase 0). Returns the baseProduct's own id when
+ * the effective Product is itself a root (baseProductId IS NULL).
+ *
+ * Used by Phase C3 to decide whether a swipe vote crosses a baseProduct
+ * boundary and should tally into BaseProductLink.
+ */
+export const getEffectiveBaseProductIdForStoreProduct = async (
+    storeProductId: number,
+    conn?: Connection
+): Promise<number | null> => {
+    const productId = await getProductIdForStoreProduct(storeProductId, conn);
+    if (productId === null) return null;
+    const effectiveProductId = await resolveEffectiveProductId(productId, conn);
+    const db = conn || pool;
+    const [rows]: any = await db.query(
+        `SELECT baseProductId FROM Product WHERE id = ? LIMIT 1`,
+        [effectiveProductId]
+    );
+    if (rows.length === 0) return null;
+    return rows[0].baseProductId ?? effectiveProductId;
+};
