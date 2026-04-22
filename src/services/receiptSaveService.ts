@@ -4,9 +4,15 @@ import {
     getLatestPriceForReceiptItem,
 } from '../models/priceModel.js';
 import { updateReceiptDetails, updateReceiptStore } from '../models/receiptModel.js';
+import {
+    replaceSwipeCandidates,
+    type SwipeCandidate,
+} from '../models/receiptSwipeCandidateModel.js';
 import { propagateFallbackPrices } from './priceService.js';
 import pool from '../config/db.js';
 import { normalizeReceiptDateForStorage, normalizeReceiptNo } from '../utils/receiptMetadata.js';
+
+const MAX_CANDIDATES_PER_LINE = 5;
 
 interface ParsedReceiptInput {
     chainId: number;
@@ -101,7 +107,30 @@ export const persistReceiptPrices = async (
             await updateReceiptStore(receiptId, input.storeId, connection);
         }
 
-        // No resolved store → can't attach prices, but parsedData is still saved
+        // Swipe candidates must be written whether or not a store matched —
+        // Phase C's swipe UI still wants to offer validation for unmatched
+        // receipts, and the candidate rows reference StoreProduct, not
+        // Store.  Doing this BEFORE the no-storeId early return.
+        const candidatesByLine: SwipeCandidate[][] = (parsedData?.products ?? []).map(
+            (line: any) => {
+                const alt = Array.isArray(line?.altMatches) ? line.altMatches : [];
+                const lineSpId = Number.isFinite(line?.storeProductId)
+                    ? Number(line.storeProductId)
+                    : null;
+                const verified = !!line?.priceVerified;
+                return alt.slice(0, MAX_CANDIDATES_PER_LINE).map((am: any): SwipeCandidate => ({
+                    storeProductId: Number(am.storeProductId),
+                    matchScore: Number.isFinite(am.confidence) ? Number(am.confidence) : 0,
+                    autoMatched:
+                        verified &&
+                        lineSpId !== null &&
+                        Number(am.storeProductId) === lineSpId,
+                }));
+            }
+        );
+        await replaceSwipeCandidates(receiptId, candidatesByLine, connection);
+
+        // No resolved store → can't attach prices, but parsedData + candidates were saved.
         if (!input.storeId) {
             await connection.commit();
             return result;
