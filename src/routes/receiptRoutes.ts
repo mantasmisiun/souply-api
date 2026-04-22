@@ -9,6 +9,7 @@ import {
     getReceiptUploadUrl,
     setReceiptFilePath,
     fetchReceiptComparison,
+    convertPdfToImage,
 } from '../controllers/receiptController.js';
 
 const router = Router();
@@ -22,6 +23,7 @@ router.put('/receipts/:id', updateReceiptFromOcr);
 // Upload helpers
 router.post('/receipts/upload-url', getReceiptUploadUrl);
 router.patch('/receipts/:id/file-path', setReceiptFilePath);
+router.post('/receipts/pdf-to-image', convertPdfToImage);
 
 router.get('/users/:userId/receipts', fetchReceiptsByUserId);
 router.get('/receipts/:id', fetchReceiptById);

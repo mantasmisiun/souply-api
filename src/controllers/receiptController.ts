@@ -175,6 +175,42 @@ export const getReceiptUploadUrl = async (req: Request, res: Response, next: Nex
     }
 };
 
+/**
+ * Convert a PDF (base64) to one JPEG per page (each base64) — used by the
+ * mobile app when the user uploads a downloaded Rimi/Maxima receipt PDF.
+ * The client OCRs each page separately and merges the line lists.
+ *
+ * Returning per-page images instead of a stitched one: ML Kit accuracy
+ * drops sharply on very large images, and Android's Image decoder may
+ * downsample-scramble giant stitched receipts. Per-page avoids both.
+ *
+ * Body:     { pdfBase64: string }
+ * Response: { images: string[] (base64 JPEGs, one per page), mimeType: 'image/jpeg' }
+ */
+export const convertPdfToImage = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const { pdfBase64 } = req.body;
+        if (!pdfBase64 || typeof pdfBase64 !== 'string') {
+            res.status(400).json({ error: 'pdfBase64 is required' });
+            return;
+        }
+        const pdfBuffer = Buffer.from(pdfBase64, 'base64');
+        if (pdfBuffer.length === 0) {
+            res.status(400).json({ error: 'pdfBase64 decoded to an empty buffer' });
+            return;
+        }
+        const { convertPdfBufferToJpegPages } = await import('../services/pdfService.js');
+        const pages = await convertPdfBufferToJpegPages(pdfBuffer);
+        res.json({
+            images: pages.map((b) => b.toString('base64')),
+            mimeType: 'image/jpeg',
+        });
+    } catch (error: any) {
+        console.error('PDF → JPEG conversion failed:', error?.message ?? error);
+        next(error);
+    }
+};
+
  //Set Receipt.filePath after mobile finishes MinIO upload.
 export const setReceiptFilePath = async (req: Request, res: Response, next: NextFunction) => {
     try {
