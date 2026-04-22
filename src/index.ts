@@ -13,6 +13,7 @@ import basketItemRoutes from './routes/basketItemRoutes.js';
 import shoppingListRoutes from './routes/shoppingListRoutes.js';
 import shoppingListItemRoutes from './routes/shoppingListItemRoutes.js';
 import receiptRoutes from './routes/receiptRoutes.js';
+import swipeVoteRoutes from './routes/swipeVoteRoutes.js';
 import swaggerUi from 'swagger-ui-express';
 import swaggerSpec from './config/swagger.js';
 
@@ -32,6 +33,7 @@ app.use('/api', basketItemRoutes);
 app.use('/api', shoppingListRoutes);
 app.use('/api', shoppingListItemRoutes);
 app.use('/api', receiptRoutes);
+app.use('/api', swipeVoteRoutes);
 app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
 app.get('/health', async (req, res) => {

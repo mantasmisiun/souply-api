@@ -66,3 +66,35 @@ export const getSwipeCandidatesByReceipt = async (receiptId: number) => {
     );
     return rows;
 };
+
+/**
+ * Fetch candidates joined with StoreProduct + StoreChain details, ready for
+ * the swipe UI. Returns flat rows; the controller groups by receiptLineIdx.
+ */
+export const getSwipeCandidatesWithDetails = async (receiptId: number) => {
+    const [rows]: any = await pool.query(
+        `SELECT
+            rsc.receiptLineIdx,
+            rsc.rankPos,
+            rsc.storeProductId,
+            rsc.matchScore,
+            rsc.autoMatched,
+            sp.storeProductName AS name,
+            sp.brandName,
+            sp.amount,
+            sp.unit,
+            sp.isWeighable,
+            sp.imageUrl,
+            sp.productId,
+            sc.id          AS chainId,
+            sc.name        AS chainName,
+            sc.logoUrl     AS chainLogoUrl
+         FROM ReceiptSwipeCandidate rsc
+         JOIN StoreProduct sp ON sp.id = rsc.storeProductId
+         JOIN StoreChain   sc ON sc.id = sp.chainId
+         WHERE rsc.receiptId = ?
+         ORDER BY rsc.receiptLineIdx ASC, rsc.rankPos ASC`,
+        [receiptId]
+    );
+    return rows;
+};

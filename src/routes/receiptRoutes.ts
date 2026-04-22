@@ -9,6 +9,7 @@ import {
     getReceiptUploadUrl,
     setReceiptFilePath,
     fetchReceiptComparison,
+    fetchReceiptSwipeQueue,
     convertPdfToImage,
 } from '../controllers/receiptController.js';
 
@@ -29,5 +30,6 @@ router.get('/users/:userId/receipts', fetchReceiptsByUserId);
 router.get('/receipts/:id', fetchReceiptById);
 router.get('/receipts/:id/image', fetchReceiptImage);
 router.get('/receipts/:id/comparison', fetchReceiptComparison);
+router.get('/receipts/:id/swipe-queue', fetchReceiptSwipeQueue);
 
 export default router;

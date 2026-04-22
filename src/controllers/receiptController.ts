@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from "express";
 import { createReceipt, getReceiptsByUserId, getReceiptById, deleteReceipt, getReceiptItemsWithDetails, updateReceiptFilePath, getReceiptByReceiptNoAndUser } from "../models/receiptModel.js";
+import { getSwipeCandidatesWithDetails } from "../models/receiptSwipeCandidateModel.js";
 import { getPresignedUrl } from "../services/storageService.js";
 import { persistReceiptPrices } from '../services/receiptSaveService.js';
 import { getReceiptComparison } from '../services/receiptComparisonService.js';
@@ -262,6 +263,85 @@ export const fetchReceiptComparison = async (req: Request, res: Response, next: 
             res.status(400).json({ error: error.message });
             return;
         }
+        next(error);
+    }
+};
+
+/**
+ * Build the swipe queue for a receipt: for each line that has at least one
+ * candidate, pair the OCR-side info (pulled from parsedData) with the matcher
+ * candidates (joined with StoreProduct + StoreChain). Items are ordered by
+ * ascending top-candidate matchScore so the user sees the lowest-confidence
+ * pairs first — that's where their judgement matters most.
+ */
+export const fetchReceiptSwipeQueue = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const id = Number(req.params.id);
+        if (isNaN(id)) {
+            res.status(400).json({ error: 'Invalid receipt ID' });
+            return;
+        }
+
+        const receipt = await getReceiptById(id);
+        if (!receipt) {
+            res.status(404).json({ error: 'Receipt not found' });
+            return;
+        }
+
+        const parsedData =
+            typeof receipt.parsedData === 'string'
+                ? JSON.parse(receipt.parsedData)
+                : receipt.parsedData;
+        const parsedProducts: any[] = Array.isArray(parsedData?.products)
+            ? parsedData.products
+            : [];
+
+        const flat = await getSwipeCandidatesWithDetails(id);
+
+        // Group flat rows by receiptLineIdx; build the response item shape.
+        const byLine = new Map<number, any>();
+        for (const r of flat) {
+            if (!byLine.has(r.receiptLineIdx)) {
+                const line = parsedProducts[r.receiptLineIdx] ?? {};
+                byLine.set(r.receiptLineIdx, {
+                    receiptLineIdx: r.receiptLineIdx,
+                    ocrName: line.name ?? null,
+                    ocrAmount: line.amount ?? null,
+                    ocrUnit: line.unit ?? null,
+                    ocrPrice: line.price ?? null,
+                    ocrPromoPrice: line.promoPrice ?? null,
+                    lineStoreProductId: Number.isFinite(line.storeProductId)
+                        ? Number(line.storeProductId)
+                        : null,
+                    candidates: [],
+                });
+            }
+            byLine.get(r.receiptLineIdx).candidates.push({
+                rankPos: r.rankPos,
+                storeProductId: r.storeProductId,
+                name: r.name,
+                brandName: r.brandName,
+                amount: r.amount,
+                unit: r.unit,
+                isWeighable: !!r.isWeighable,
+                imageUrl: r.imageUrl,
+                productId: r.productId,
+                chainId: r.chainId,
+                chainName: r.chainName,
+                chainLogoUrl: r.chainLogoUrl,
+                matchScore: Number(r.matchScore),
+                autoMatched: !!r.autoMatched,
+            });
+        }
+
+        const items = Array.from(byLine.values()).sort((a, b) => {
+            const aTop = a.candidates[0]?.matchScore ?? 0;
+            const bTop = b.candidates[0]?.matchScore ?? 0;
+            return aTop - bTop; // ascending: lowest-confidence first
+        });
+
+        res.json({ receiptId: id, items });
+    } catch (error) {
         next(error);
     }
 };

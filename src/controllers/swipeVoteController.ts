@@ -1,0 +1,52 @@
+import { Request, Response, NextFunction } from 'express';
+import { castSwipeVote, SwipeVote } from '../services/swipeVoteService.js';
+
+const VALID_VOTES: SwipeVote[] = ['identical', 'similar', 'different'];
+
+export const submitSwipeVote = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const {
+            userId,
+            receiptId,
+            receiptLineIdx,
+            candidateStoreProductId,
+            vote,
+            dwellMs,
+        } = req.body ?? {};
+
+        if (!userId || typeof userId !== 'string') {
+            res.status(400).json({ error: 'userId is required' });
+            return;
+        }
+        if (!Number.isFinite(receiptId)) {
+            res.status(400).json({ error: 'receiptId is required' });
+            return;
+        }
+        if (!Number.isFinite(receiptLineIdx) || receiptLineIdx < 0) {
+            res.status(400).json({ error: 'receiptLineIdx must be a non-negative integer' });
+            return;
+        }
+        if (!Number.isFinite(candidateStoreProductId)) {
+            res.status(400).json({ error: 'candidateStoreProductId is required' });
+            return;
+        }
+        if (!VALID_VOTES.includes(vote)) {
+            res.status(400).json({ error: 'vote must be identical, similar, or different' });
+            return;
+        }
+        const dwell = Number.isFinite(dwellMs) ? Number(dwellMs) : 0;
+
+        const result = await castSwipeVote({
+            userId: String(userId),
+            receiptId: Number(receiptId),
+            receiptLineIdx: Number(receiptLineIdx),
+            candidateStoreProductId: Number(candidateStoreProductId),
+            vote,
+            dwellMs: dwell,
+        });
+
+        res.json(result);
+    } catch (error) {
+        next(error);
+    }
+};
