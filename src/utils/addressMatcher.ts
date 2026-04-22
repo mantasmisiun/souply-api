@@ -67,6 +67,13 @@ export interface AddressMatch<T> {
  * Find the best store match for an OCR'd address.
  * Returns null if no store is within the acceptable distance ratio.
  *
+ * Tries both full and street-only (part before first comma) normalizations on
+ * each side. IKI's in-app receipt view surfaces only the street ("LYROS G. 5A")
+ * with no city, while the stored DB address usually includes the city
+ * ("Lyros g. 5A, Šiauliai"). Matching street-to-street recovers from that
+ * mismatch, while the full-to-full pairing still wins for Rimi/Maxima where
+ * the OCR captures both parts.
+ *
  * @param maxRatio - Maximum allowed (distance / maxLen) ratio. 0.3 = allow ~30% edit.
  */
 export function findBestStoreMatch<T extends { address: string }>(
@@ -74,22 +81,51 @@ export function findBestStoreMatch<T extends { address: string }>(
     stores: T[],
     maxRatio: number = 0.3
 ): AddressMatch<T> | null {
-    const normalizedOcr = normalizeAddress(ocrAddress);
-    if (!normalizedOcr) return null;
+    const ocrVariants = Array.from(
+        new Set(
+            [
+                normalizeAddress(ocrAddress),
+                normalizeAddress(ocrAddress.split(',')[0]),
+            ].filter((s) => s.length > 0)
+        )
+    );
+    if (ocrVariants.length === 0) return null;
 
     let best: AddressMatch<T> | null = null;
 
     for (const store of stores) {
-        const normalizedStore = normalizeAddress(store.address);
-        if (!normalizedStore) continue;
+        const storeVariants = Array.from(
+            new Set(
+                [
+                    normalizeAddress(store.address),
+                    normalizeAddress(store.address.split(',')[0]),
+                ].filter((s) => s.length > 0)
+            )
+        );
+        if (storeVariants.length === 0) continue;
 
-        const distance = levenshtein(normalizedOcr, normalizedStore);
-        const maxLen = Math.max(normalizedOcr.length, normalizedStore.length);
-        const ratio = distance / maxLen;
-        const confidence = 1 - ratio;
+        // Pick the variant pairing with the smallest ratio. Using ratio (not
+        // raw distance) so short-vs-short matches aren't unfairly disqualified
+        // by longer alternatives scoring the same absolute distance.
+        let bestRatio = Infinity;
+        let bestDistance = Infinity;
+        for (const o of ocrVariants) {
+            for (const s of storeVariants) {
+                const d = levenshtein(o, s);
+                const r = d / Math.max(o.length, s.length);
+                if (r < bestRatio) {
+                    bestRatio = r;
+                    bestDistance = d;
+                }
+            }
+        }
 
-        if (ratio <= maxRatio && (!best || distance < best.distance)) {
-            best = { store, distance, confidence };
+        const confidence = 1 - bestRatio;
+        if (
+            bestRatio <= maxRatio &&
+            (!best || bestDistance < best.distance)
+        ) {
+            best = { store, distance: bestDistance, confidence };
         }
     }
 

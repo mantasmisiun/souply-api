@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from "express";
-import { createReceipt, getReceiptsByUserId, getReceiptById, deleteReceipt, getReceiptItemsWithDetails, updateReceiptFilePath } from "../models/receiptModel.js";
+import { createReceipt, getReceiptsByUserId, getReceiptById, deleteReceipt, getReceiptItemsWithDetails, updateReceiptFilePath, getReceiptByReceiptNoAndUser } from "../models/receiptModel.js";
 import { getPresignedUrl } from "../services/storageService.js";
 import { persistReceiptPrices } from '../services/receiptSaveService.js';
 import { getReceiptComparison } from '../services/receiptComparisonService.js';
@@ -94,6 +94,22 @@ export const createReceiptFromOcr = async (req: Request, res: Response, next: Ne
         if (!userId || !parsedData) {
             res.status(400).json({ error: 'userId and parsedData are required' });
             return;
+        }
+        // Reject duplicates early so re-photographing the same receipt doesn't
+        // create parallel records. IKI synthesizes a `{date}-{time}-{cents}-iki-receipt`
+        // number specifically so this check works when the receipt format has no
+        // natural unique ID.
+        const candidateReceiptNo = parsedData.footer?.receiptNo ?? null;
+        if (candidateReceiptNo) {
+            const existing = await getReceiptByReceiptNoAndUser(candidateReceiptNo, String(userId));
+            if (existing) {
+                res.status(409).json({
+                    error: 'duplicate',
+                    message: 'Receipt already uploaded',
+                    existingReceiptId: existing.id,
+                });
+                return;
+            }
         }
         // Receipt.storeId is resolved from parsedData later; initial insert can use null
         const storeId = parsedData.header?.storeId ?? null;
