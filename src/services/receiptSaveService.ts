@@ -8,6 +8,7 @@ import {
     replaceSwipeCandidates,
     type SwipeCandidate,
 } from '../models/receiptSwipeCandidateModel.js';
+import { resolveReceiptLineStoreProduct } from './receiptLineResolver.js';
 import { propagateFallbackPrices } from './priceService.js';
 import pool from '../config/db.js';
 import { normalizeReceiptDateForStorage, normalizeReceiptNo } from '../utils/receiptMetadata.js';
@@ -92,6 +93,57 @@ export const persistReceiptPrices = async (
             if (parsedData.footer && typeof parsedData.footer === 'object') {
                 parsedData.footer.receiptNo = normalizedReceiptNo;
                 parsedData.footer.date = normalizedReceiptDate;
+            }
+        }
+
+        // Rule 1: resolve a concrete storeProductId for every receipt line
+        // before we save. Lines already matched by mobile are left alone.
+        // Unmatched lines get a dedup lookup first (same chain + exact name +
+        // amount + unit); if nothing hits, we create a fresh Product + SP
+        // (inheriting the top alt-match's category when available, else
+        // falling back to the hidden Nepriskirta bucket). The new SP flows
+        // into parsedData AND the filtered `input.products` so the downstream
+        // Price-write loop sees it.
+        if (Number.isFinite(input.chainId) && Array.isArray(parsedData?.products)) {
+            for (let i = 0; i < parsedData.products.length; i++) {
+                const line = parsedData.products[i];
+                if (Number.isFinite(line?.storeProductId) && Number(line.storeProductId) > 0) {
+                    continue; // mobile matched this one
+                }
+                if (!line?.name || typeof line.name !== 'string' || !line.name.trim()) {
+                    continue; // empty/garbage OCR line
+                }
+                try {
+                    const res = await resolveReceiptLineStoreProduct(
+                        input.chainId,
+                        {
+                            storeProductId: null,
+                            name: line.name,
+                            brandName: typeof line.brandName === 'string' ? line.brandName : null,
+                            amount: Number.isFinite(line.amount) ? Number(line.amount) : null,
+                            unit: typeof line.unit === 'string' ? line.unit : null,
+                            isWeighable: !!line.isWeighable,
+                            imageUrl: typeof line.imageUrl === 'string' ? line.imageUrl : null,
+                            altMatchProductId:
+                                Array.isArray(line.altMatches) && line.altMatches[0]?.productId
+                                    ? Number(line.altMatches[0].productId)
+                                    : null,
+                        },
+                        connection
+                    );
+                    line.storeProductId = res.storeProductId;
+                    line.matchConfirmed = true;
+                    if (line.priceVerified === undefined || line.priceVerified === null) {
+                        line.priceVerified = false;
+                    }
+                    if (input.products[i]) {
+                        input.products[i].storeProductId = res.storeProductId;
+                        input.products[i].matchConfirmed = true;
+                        input.products[i].priceVerified = !!line.priceVerified;
+                    }
+                } catch (e) {
+                    console.warn(`Failed to resolve receipt line ${i}:`, e);
+                }
             }
         }
 
@@ -201,14 +253,24 @@ export const persistReceiptPrices = async (
             );
             result.saved++;
 
-            toPropagate.push({
-                storeProductId: item.storeProductId,
-                storeId: input.storeId,
-                chainId: input.chainId,
-                price: item.price,
-                promoPrice: item.promoPrice,
-                date: writeDate,
-            });
+            // Only queue fallback propagation for prices the user has
+            // already confirmed. Propagating unverified prices (newly
+            // auto-created SPs that the user hasn't swiped yet) would fan
+            // out ~50 fallback rows per item to every store in the chain
+            // for data that may turn out to be garbage OCR. Swipe-identical
+            // flips priceVerified later, which is where we'd re-trigger
+            // propagation (future enhancement — for now, verified-at-save
+            // only).
+            if (item.priceVerified === true) {
+                toPropagate.push({
+                    storeProductId: item.storeProductId,
+                    storeId: input.storeId,
+                    chainId: input.chainId,
+                    price: item.price,
+                    promoPrice: item.promoPrice,
+                    date: writeDate,
+                });
+            }
         }
 
         await connection.commit();
@@ -219,21 +281,29 @@ export const persistReceiptPrices = async (
         connection.release();
     }
 
-    for (const p of toPropagate) {
-        try {
-            await propagateFallbackPrices(
-                p.storeProductId,
-                p.storeId,
-                p.chainId,
-                p.price,
-                p.promoPrice,
-                p.date,
-                receiptId
-            );
-        } catch (e) {
-            console.warn(`Fallback propagation failed for sp=${p.storeProductId}:`, e);
+    // Fallback propagation runs fire-and-forget AFTER the HTTP response
+    // would have returned. For a 20-product Maxima receipt, propagation is
+    // ~1,000 INSERTs across the whole chain — previously this blocked the
+    // mobile client for ~10–30 s before it saw the receipt saved. Detaching
+    // it means the UI unlocks in under a second; propagation races to
+    // completion in the background. Errors still log but never surface.
+    void (async () => {
+        for (const p of toPropagate) {
+            try {
+                await propagateFallbackPrices(
+                    p.storeProductId,
+                    p.storeId,
+                    p.chainId,
+                    p.price,
+                    p.promoPrice,
+                    p.date,
+                    receiptId
+                );
+            } catch (e) {
+                console.warn(`Fallback propagation failed for sp=${p.storeProductId}:`, e);
+            }
         }
-    }
+    })();
 
     return result;
 };

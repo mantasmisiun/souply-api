@@ -2,6 +2,34 @@ import pool from '../config/db.js';
 
 type Connection = typeof pool | any;
 
+/**
+ * Find an existing StoreProduct in the same chain with an exactly matching
+ * name + amount + unit (case-insensitive on name). Used by the receipt-save
+ * dedup pre-pass so we don't create parallel SP rows for the same SKU when
+ * mobile's fuzzy matcher missed a trivial match (e.g., after a transient API
+ * error). Stricter than fuzzy matching on purpose — the fuzzy path is
+ * already the mobile /api/store-products/match endpoint.
+ */
+export const findExactMatchingStoreProduct = async (
+    chainId: number,
+    name: string,
+    amount: number | null,
+    unit: string | null,
+    conn?: Connection
+): Promise<number | null> => {
+    const db = conn || pool;
+    const [rows]: any = await db.query(
+        `SELECT id FROM StoreProduct
+          WHERE chainId = ?
+            AND LOWER(storeProductName) = LOWER(?)
+            AND ((amount IS NULL AND ? IS NULL) OR amount = ?)
+            AND ((unit   IS NULL AND ? IS NULL) OR unit   = ?)
+          LIMIT 1`,
+        [chainId, name, amount, amount, unit, unit]
+    );
+    return rows[0]?.id ?? null;
+};
+
 export const createStoreProduct = async (
     productId: number,
     chainId: number,

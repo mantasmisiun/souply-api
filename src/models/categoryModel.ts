@@ -12,27 +12,29 @@ export const createCategory = async (
     return result.insertId;
 };
 
-//Get all top level categories
+// User-facing category queries exclude hidden rows (e.g., the Nepriskirta
+// orphan bucket used by receipt-save when it creates a Product with no
+// confident category match). Admin/internal queries that need to see hidden
+// rows should bypass these helpers and query Category directly.
+
 export const getTopLevelCategories = async () => {
     const [categories]: any = await pool.query(
-        'SELECT * FROM Category WHERE parentCategoryId IS NULL'
+        'SELECT * FROM Category WHERE parentCategoryId IS NULL AND isHidden = 0'
     );
     return categories;
 };
 
-//Get subcategories for based on parent categoryId
 export const getSubCategories = async (parentCategoryId: number) => {
     const [categories]: any = await pool.query(
-        'SELECT * FROM Category WHERE parentCategoryId = ?',
+        'SELECT * FROM Category WHERE parentCategoryId = ? AND isHidden = 0',
         [parentCategoryId]
     );
     return categories;
 };
 
-//Get all categories for category assignment
 export const getAllCategories = async () => {
     const [categories]: any = await pool.query(
-        'SELECT id, parentCategoryId, name FROM Category'
+        'SELECT id, parentCategoryId, name FROM Category WHERE isHidden = 0'
     );
     return categories;
 };
@@ -137,6 +139,7 @@ export const searchL3CategoriesByName = async (query: string) => {
          JOIN Category c2 ON c2.id = c3.parentCategoryId
          JOIN Category c1 ON c1.id = c2.parentCategoryId
          WHERE c3.name LIKE ?
+           AND c3.isHidden = 0 AND c2.isHidden = 0 AND c1.isHidden = 0
          ORDER BY c3.name
          LIMIT 20`,
         [`%${query}%`]
