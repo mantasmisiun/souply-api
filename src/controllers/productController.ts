@@ -9,7 +9,10 @@ export const addProduct = async (req: Request, res: Response, next: NextFunction
             return;
         }
         const id = await createProduct(categoryId, baseProductId || null, name);
-        res.status(201).json({ id, categoryId, baseProductId, name });
+        // Re-read so the response reflects any baseProductId the model
+        // auto-assigned when the caller passed null.
+        const created = await getProductById(id);
+        res.status(201).json(created);
     } catch (error) {
         next(error);
     }
