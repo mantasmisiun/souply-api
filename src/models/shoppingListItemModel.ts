@@ -1,20 +1,64 @@
 import pool from '../config/db.js';
+import type { Connection } from 'mysql2/promise';
 
 export const createListItem = async (
     listId: number,
-    productId: number,
+    productId: number | null,
     storeProductId: number | null,
     quantity: number,
-    price: number | null = null
+    price: number | null = null,
+    conn?: Connection
 ) => {
-    const [result]: any = await pool.query(
+    const db = (conn ?? pool) as any;
+    const [result]: any = await db.query(
         'INSERT INTO ShoppingListItem (listId, productId, storeProductId, quantity, price) VALUES (?, ?, ?, ?, ?)',
         [listId, productId, storeProductId, quantity, price]
     );
     return result.insertId;
 };
 
+/**
+ * Batch insert. Used by the atomic-create endpoint and the duplicate-list
+ * path to avoid N+1 INSERTs over HTTP. Runs inside the caller's transaction
+ * if one is provided; otherwise opens its own.
+ */
+export const createListItemsBatch = async (
+    listId: number,
+    items: Array<{
+        productId: number | null;
+        storeProductId: number | null;
+        quantity: number;
+        price: number | null;
+    }>,
+    conn?: Connection
+): Promise<number> => {
+    if (items.length === 0) return 0;
+    const db = (conn ?? pool) as any;
+    const values = items.map(it => [
+        listId,
+        it.productId,
+        it.storeProductId,
+        it.quantity,
+        it.price,
+    ]);
+    const [res]: any = await db.query(
+        `INSERT INTO ShoppingListItem
+            (listId, productId, storeProductId, quantity, price)
+         VALUES ?`,
+        [values]
+    );
+    return res.affectedRows as number;
+};
+
 export const getListItemsByShoppingListId = async (listId: number) => {
+    // Ordering:
+    //   1. unchecked first (isChecked ASC)
+    //   2. alphabetically by resolved name within each bucket — stable
+    //      for manual (null productId) items too, which previously sat
+    //      wherever their insertion id placed them.
+    //
+    // Category chain joined in for the future group-by-aisle feature —
+    // frontend can ignore these fields today.
     const [rows]: any = await pool.query(
         `SELECT sli.*,
                 COALESCE(sp.storeProductName, p.name) AS productName,
@@ -24,12 +68,20 @@ export const getListItemsByShoppingListId = async (listId: number) => {
                    AND spi.imageUrl IS NOT NULL) AS imageUrls,
                 sp.unit,
                 sp.amount,
-                sp.isWeighable
+                sp.isWeighable,
+                c3.id   AS l3CategoryId,
+                c3.name AS l3CategoryName,
+                c2.id   AS l2CategoryId,
+                c2.name AS l2CategoryName
          FROM ShoppingListItem sli
          LEFT JOIN Product p ON sli.productId = p.id
          LEFT JOIN StoreProduct sp ON sli.storeProductId = sp.id
+         LEFT JOIN Category c3 ON p.categoryId = c3.id
+         LEFT JOIN Category c2 ON c3.parentCategoryId = c2.id
          WHERE sli.listId = ?
-         ORDER BY sli.isChecked ASC, sli.id ASC`,
+         ORDER BY sli.isChecked ASC,
+                  COALESCE(sp.storeProductName, p.name, '') ASC,
+                  sli.id ASC`,
         [listId]
     );
     return rows.map((row: any) => ({
@@ -71,15 +123,11 @@ export const getListItemByListAndProduct = async (listId: number, productId: num
 
 export const duplicateListItems = async (originalListId: number, newListId: number): Promise<void> => {
     const [rows]: any = await pool.query(
-        'SELECT * FROM ShoppingListItem WHERE listId = ?',
+        'SELECT productId, storeProductId, quantity, price FROM ShoppingListItem WHERE listId = ?',
         [originalListId]
     );
-    for (const item of rows) {
-        await pool.query(
-            'INSERT INTO ShoppingListItem (listId, productId, storeProductId, quantity, price) VALUES (?, ?, ?, ?, ?)',
-            [newListId, item.productId, item.storeProductId, item.quantity, item.price]
-        );
-    }
+    if (rows.length === 0) return;
+    await createListItemsBatch(newListId, rows);
 };
 
 export const checkAllItemsByListId = async (listId: number) => {

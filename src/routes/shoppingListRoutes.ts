@@ -1,5 +1,15 @@
 import { Router } from 'express';
-import { addShoppingList, fetchShoppingListsByUserId, fetchShoppingListById, removeShoppingList, changeShoppingListStatus, duplicateList } from '../controllers/shoppingListController.js';
+import {
+    addShoppingList,
+    fetchShoppingListsByUserId,
+    fetchShoppingListById,
+    removeShoppingList,
+    changeShoppingListStatus,
+    duplicateList,
+    createListShareToken,
+    getShareTokenStatus,
+    claimShareToken,
+} from '../controllers/shoppingListController.js';
 
 const router = Router();
 
@@ -97,4 +107,12 @@ router.delete('/shopping-lists/:id', removeShoppingList);
 router.patch('/shopping-lists/:id/status', changeShoppingListStatus);
 
 router.post('/shopping-lists/:id/duplicate', duplicateList);
+
+// Sharing: creator mints a token, scanner claims it. The /status route
+// is polled by the creator-side QR modal (~1.5s cadence) to detect a
+// scan without needing a persistent socket.
+router.post('/shopping-lists/:id/share', createListShareToken);
+router.get('/shopping-lists/share/:token/status', getShareTokenStatus);
+router.post('/shopping-lists/share/:token/claim', claimShareToken);
+
 export default router;

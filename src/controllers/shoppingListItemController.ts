@@ -4,22 +4,36 @@ import { createListItem, getListItemsByShoppingListId, updateListItemQuantity, t
 export const addListItem = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const { listId, productId, storeProductId, quantity, price } = req.body;
-        if (!listId || !productId || quantity === undefined || quantity === null) {
-            res.status(400).json({ error: 'listId, productId, and quantity are required' });
+        // productId is OPTIONAL — null is valid for custom/manual items
+        // added via the inline quick-add input. Only listId and quantity
+        // are truly required.
+        if (!listId || quantity === undefined || quantity === null) {
+            res.status(400).json({ error: 'listId and quantity are required' });
             return;
         }
 
-        // Check if product already exists in list
-        const existingItem = await getListItemByListAndProduct(listId, productId);
-        if (existingItem) {
-            const newQuantity = parseFloat(existingItem.quantity) + parseFloat(quantity);
-            await updateListItemQuantity(existingItem.id, newQuantity);
-            res.json({ id: existingItem.id, listId, productId, quantity: newQuantity });
-            return;
+        // Catalog-sourced items (productId !== null) dedup by productId
+        // on the same list: adding the same product twice bumps the
+        // existing row's quantity. Custom items (productId === null) are
+        // always treated as distinct inserts — their only identity is
+        // the row id, so we can't merge them sensibly.
+        if (productId !== null && productId !== undefined) {
+            const existingItem = await getListItemByListAndProduct(listId, productId);
+            if (existingItem) {
+                const newQuantity = parseFloat(existingItem.quantity) + parseFloat(quantity);
+                await updateListItemQuantity(existingItem.id, newQuantity);
+                res.json({ id: existingItem.id, listId, productId, quantity: newQuantity });
+                return;
+            }
         }
-        console.log('Creating list item:', { listId, productId, storeProductId, quantity, price });
-        const id = await createListItem(listId, productId, storeProductId || null, quantity, price || null);
-        res.status(201).json({ id, listId, productId, storeProductId, quantity, price });
+        const id = await createListItem(
+            listId,
+            productId ?? null,
+            storeProductId ?? null,
+            quantity,
+            price ?? null
+        );
+        res.status(201).json({ id, listId, productId: productId ?? null, storeProductId: storeProductId ?? null, quantity, price: price ?? null });
     } catch (error) {
         next(error);
     }

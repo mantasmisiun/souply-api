@@ -1,4 +1,5 @@
 import pool from '../config/db.js';
+import type { Connection } from 'mysql2/promise';
 
 export const createBasket = async (userId: string) => {
     const [result]: any = await pool.query(
@@ -54,8 +55,15 @@ export const updateBasketUpdatedAt = async (id: number) => {
     await pool.query('UPDATE Basket SET updatedAt = NOW() WHERE id = ?', [id]);
 };
 
-export const updateBasketStatus = async (id: number, status: string) => {
-    await pool.query(
+export const updateBasketStatus = async (id: number, status: string, conn?: Connection) => {
+    // Caller may pass an open connection to keep the UPDATE inside their
+    // transaction. Without this, the atomic shopping-list creation path
+    // would insert a ShoppingList row (holding an FK shared lock on the
+    // referenced Basket), then the separate pool.query UPDATE on the
+    // same Basket row would wait forever for the original transaction to
+    // release — a cross-connection deadlock that times out at 50s.
+    const db = (conn ?? pool) as any;
+    await db.query(
         'UPDATE Basket SET status = ? WHERE id = ?',
         [status, id]
     );
