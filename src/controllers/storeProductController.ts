@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import {
-  createStoreProduct, getStoreProductsByProductId, getStoreProductsByChainId,
+  createStoreProduct, getStoreProductsByProductId, getStoreProductsForCluster, getStoreProductsByChainId,
   getStoreProductByName, getStoreProductByProductAndChain,
   searchStoreProductsByChain as searchByChain,
   searchUnifiedProductsByChain as searchUnifiedByChain,
@@ -40,7 +40,13 @@ export const fetchStoreProductsByProductId = async (req: Request, res: Response,
             res.status(400).json({ error: 'Invalid product ID' });
             return;
         }
-        const storeProducts = await getStoreProductsByProductId(productId);
+        // ?mode=base expands the query to the whole BaseProduct cluster
+        // (head + variants) for the detail view. Default 'sku' keeps the
+        // original single-Product behavior for old clients.
+        const mode = req.query.mode === 'base' ? 'base' : 'sku';
+        const storeProducts = mode === 'base'
+            ? await getStoreProductsForCluster(productId)
+            : await getStoreProductsByProductId(productId);
         res.json(storeProducts);
     } catch (error) {
         next(error);

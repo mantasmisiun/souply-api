@@ -64,6 +64,8 @@ export const fetchProductsByCategory = async (req: Request, res: Response, next:
     }
 };
 
+const parseMode = (raw: unknown): 'base' | 'sku' => (raw === 'sku' ? 'sku' : 'base');
+
 export const fetchProductsByCategoryWithAmounts = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const categoryId = Number(req.params.categoryId);
@@ -71,7 +73,8 @@ export const fetchProductsByCategoryWithAmounts = async (req: Request, res: Resp
             res.status(400).json({ error: 'Invalid category ID' });
             return;
         }
-        const products = await getProductsByCategoryWithAmounts(categoryId);
+        const mode = parseMode(req.query.mode);
+        const products = await getProductsByCategoryWithAmounts(categoryId, mode);
         res.json(products);
     } catch (error) {
         next(error);
@@ -85,7 +88,8 @@ export const fetchAllProductsByL2WithAmounts = async (req: Request, res: Respons
             res.status(400).json({ error: 'Invalid category ID' });
             return;
         }
-        const products = await getAllProductsByL2WithAmounts(categoryId);
+        const mode = parseMode(req.query.mode);
+        const products = await getAllProductsByL2WithAmounts(categoryId, mode);
         res.json(products);
     } catch (error) {
         next(error);

@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { addBasketItem, fetchBasketItemsByBasketId, updateBasketItem, removeBasketItem } from '../controllers/basketItemController.js';
+import { addBasketItem, fetchBasketItemsByBasketId, updateBasketItem, removeBasketItem, convertBasketMode } from '../controllers/basketItemController.js';
 
 const router = Router();
 
@@ -55,6 +55,10 @@ router.post('/basket-items', addBasketItem);
  */
 // GET /api/baskets/:basketId/items - Get all items in a basket
 router.get('/baskets/:basketId/items', fetchBasketItemsByBasketId);
+
+// POST /api/baskets/:basketId/convert-mode - flip all items in a basket
+// between 'sku' and 'base'. Sums quantities on sku→base cluster collisions.
+router.post('/baskets/:basketId/convert-mode', convertBasketMode);
 
 /**
  * @swagger

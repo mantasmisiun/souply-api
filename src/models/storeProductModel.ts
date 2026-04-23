@@ -53,9 +53,39 @@ export const getStoreProductsByProductId = async (productId: number) => {
     const [rows]: any = await pool.query(
         `SELECT StoreProduct.*, StoreChain.name AS chainName, StoreChain.logoUrl
          FROM StoreProduct
-         JOIN StoreChain ON StoreProduct.chainId = StoreChain.id 
+         JOIN StoreChain ON StoreProduct.chainId = StoreChain.id
          WHERE StoreProduct.productId = ?`,
         [productId]
+    );
+    return rows;
+};
+
+/**
+ * 'base' mode for the product detail view: resolve the given productId to
+ * its BaseProduct cluster head, then return all StoreProducts for every
+ * cluster member (head + variants). The detail page can then show every
+ * variant side-by-side with its own chart, giving the user "all yogurts of
+ * this base" at a glance.
+ */
+export const getStoreProductsForCluster = async (productId: number) => {
+    const [headRows]: any = await pool.query(
+        `SELECT COALESCE(baseProductId, id) AS headId
+           FROM Product
+          WHERE id = ? AND mergedIntoId IS NULL
+          LIMIT 1`,
+        [productId]
+    );
+    if (!headRows[0]) return [];
+    const headId = Number(headRows[0].headId);
+
+    const [rows]: any = await pool.query(
+        `SELECT sp.*, sc.name AS chainName, sc.logoUrl
+           FROM StoreProduct sp
+           JOIN StoreChain sc ON sc.id = sp.chainId
+           JOIN Product p ON p.id = sp.productId
+          WHERE (p.id = ? OR p.baseProductId = ?)
+            AND p.mergedIntoId IS NULL`,
+        [headId, headId]
     );
     return rows;
 };

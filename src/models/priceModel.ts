@@ -136,16 +136,32 @@ export const updateFallbackPrice = async (
 };
 
 export const getPriceHistoryForStoreProductAllStores = async (storeProductId: number) => {
+    // Prefer real-receipt history (isFallback=0). When the StoreProduct
+    // has never had a verified observation (everything is scraped
+    // fallback), fall back to those so the chart isn't empty.
+    //
+    // DEDUP NOTE: scrape fanout creates one identical Price row per store
+    // in the chain (same date, price, promoPrice — differing only in
+    // storeId). For the "all stores" timeline we want ONE point per
+    // distinct (date, price, promoPrice, isFallback) tuple. Per-store
+    // variation on the same date (rare — stores mostly track chain price)
+    // still surfaces as separate points because the tuple differs.
     const [rows]: any = await pool.query(
-        `SELECT p.*, s.name as storeName
-         FROM Price p
-         JOIN Store s ON p.storeId = s.id
-         WHERE p.storeProductId = ?
-         AND p.isFallback = 0
-         ORDER BY p.date ASC`,
+        `SELECT MIN(p.id) AS id,
+                p.storeProductId,
+                p.date,
+                CAST(p.price AS DECIMAL(10,4))      AS price,
+                CAST(p.promoPrice AS DECIMAL(10,4)) AS promoPrice,
+                p.isFallback,
+                p.priceVerified
+           FROM Price p
+          WHERE p.storeProductId = ?
+          GROUP BY p.date, p.price, p.promoPrice, p.isFallback, p.priceVerified, p.storeProductId
+          ORDER BY p.date ASC`,
         [storeProductId]
     );
-    return rows;
+    const nonFallback = rows.filter((r: any) => r.isFallback !== 1);
+    return nonFallback.length > 0 ? nonFallback : rows;
 };
 
 /**

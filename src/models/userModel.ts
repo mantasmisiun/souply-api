@@ -1,7 +1,13 @@
 import pool from '../config/db.js';
 
 export const createUser = async (id: string) => {
-    await pool.query('INSERT INTO User (id) VALUES (?)', [id]);
+    // INSERT IGNORE so a device that repeats its first-launch sync on every
+    // cold start (or after a network retry) doesn't fail — the row is either
+    // created now or already there from a prior call. Idempotency matters
+    // because every FK reference to User.id depends on this row existing,
+    // so we can't afford to leave the client in a state where it thinks the
+    // user is registered when the first INSERT silently failed.
+    await pool.query('INSERT IGNORE INTO User (id) VALUES (?)', [id]);
     return id;
 };
 

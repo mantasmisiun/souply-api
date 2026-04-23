@@ -104,49 +104,88 @@ export const updateProductCategory = async (storeProductId: number, categoryId: 
     );
 };
 
-export const getProductsByCategoryWithAmounts = async (categoryId: number) => {
+export type BrowseMode = 'base' | 'sku';
+
+/**
+ * Amount normalization expression for the browse aggregates.
+ *
+ * Mass: kg → ×1000 g.
+ * Volume: l → ×1000 ml. Under the MVP heuristic "most grocery items are
+ * water-based, so 1 kg ≈ 1 l", we display the combined range under the
+ * "g" label — e.g. a cluster containing 250 g, 350 ml, 0.75 kg renders
+ * as "250 - 750 g".
+ *
+ * Non-mass/volume units (vnt, NULL, other) return NULL and drop out of
+ * MIN/MAX aggregation. If a Product / cluster has only such units, its
+ * minAmount/maxAmount come back NULL and the frontend hides the amount
+ * line entirely (Case 3).
+ */
+const AMOUNT_NORMALIZED_EXPR = `
+    CASE
+        WHEN sp.unit IN ('kg', 'l') THEN sp.amount * 1000
+        WHEN sp.unit IN ('g', 'ml') THEN sp.amount
+        ELSE NULL
+    END
+`;
+
+/**
+ * Browse one L3 category.
+ *
+ * Mode only changes which Products are returned:
+ *   'base' — cluster heads only (Product.baseProductId IS NULL). Variants
+ *            collapse behind their head; tapping the head opens the detail
+ *            screen which shows every variant side-by-side.
+ *   'sku'  — every non-merged Product (heads + variants), one row each.
+ *
+ * Amount ranges reflect the Product's own StoreProducts in both modes
+ * (not cluster-wide — keeping the query index-friendly). The detail view
+ * in base mode surfaces the full cluster's variants.
+ */
+export const getProductsByCategoryWithAmounts = async (
+    categoryId: number,
+    mode: BrowseMode = 'base'
+) => {
+    const baseFilter = mode === 'base' ? 'AND p.baseProductId IS NULL' : '';
     const [products]: any = await pool.query(
         `SELECT p.id, p.name, p.categoryId,
             (SELECT JSON_ARRAYAGG(spi.imageUrl)
              FROM StoreProduct spi
              WHERE spi.productId = p.id AND spi.imageUrl IS NOT NULL) AS imageUrls,
-            CAST(MIN(
-                CASE WHEN sp.unit = 'kg' THEN sp.amount * 1000 ELSE sp.amount END
-            ) AS UNSIGNED) as minAmount,
-            CAST(MAX(
-                CASE WHEN sp.unit = 'kg' THEN sp.amount * 1000 ELSE sp.amount END
-            ) AS UNSIGNED) as maxAmount,
+            CAST(MIN(${AMOUNT_NORMALIZED_EXPR}) AS UNSIGNED) as minAmount,
+            CAST(MAX(${AMOUNT_NORMALIZED_EXPR}) AS UNSIGNED) as maxAmount,
             'g' as unit,
             MAX(sp.isWeighable) as hasWeighable
-        FROM Product p
-        LEFT JOIN StoreProduct sp ON sp.productId = p.id
+         FROM Product p
+         LEFT JOIN StoreProduct sp ON sp.productId = p.id
          WHERE p.categoryId = ?
+           AND p.mergedIntoId IS NULL
+           ${baseFilter}
          GROUP BY p.id`,
         [categoryId]
     );
     return products;
 };
 
-export const getAllProductsByL2WithAmounts = async (l2CategoryId: number) => {
+export const getAllProductsByL2WithAmounts = async (
+    l2CategoryId: number,
+    mode: BrowseMode = 'base'
+) => {
+    const baseFilter = mode === 'base' ? 'AND p.baseProductId IS NULL' : '';
     const [products]: any = await pool.query(
         `SELECT p.id, p.name, p.categoryId,
             (SELECT JSON_ARRAYAGG(spi.imageUrl)
              FROM StoreProduct spi
              WHERE spi.productId = p.id AND spi.imageUrl IS NOT NULL) AS imageUrls,
-            CAST(MIN(
-                CASE WHEN sp.unit = 'kg' THEN sp.amount * 1000 ELSE sp.amount END
-            ) AS UNSIGNED) as minAmount,
-            CAST(MAX(
-                CASE WHEN sp.unit = 'kg' THEN sp.amount * 1000 ELSE sp.amount END
-            ) AS UNSIGNED) as maxAmount,
+            CAST(MIN(${AMOUNT_NORMALIZED_EXPR}) AS UNSIGNED) as minAmount,
+            CAST(MAX(${AMOUNT_NORMALIZED_EXPR}) AS UNSIGNED) as maxAmount,
             'g' as unit,
             MAX(sp.isWeighable) as hasWeighable
-        FROM Product p
-        LEFT JOIN StoreProduct sp ON sp.productId = p.id
-         WHERE p.categoryId IN (
-             SELECT id FROM Category WHERE parentCategoryId = ?
-         )
-         OR p.categoryId = ?
+         FROM Product p
+         LEFT JOIN StoreProduct sp ON sp.productId = p.id
+         WHERE (p.categoryId IN (SELECT id FROM Category WHERE parentCategoryId = ?)
+                OR p.categoryId = ?)
+           AND p.mergedIntoId IS NULL
+           ${baseFilter}
          GROUP BY p.id`,
         [l2CategoryId, l2CategoryId]
     );

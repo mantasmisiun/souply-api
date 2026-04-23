@@ -1,15 +1,20 @@
 import { Request, Response, NextFunction } from 'express';
-import { createBasketItem, getBasketItemById, getBasketItemsByBasketId, updateBasketItemQuantity, deleteBasketItem, getBasketItemByBasketAndProduct } from '../models/basketItemModel.js';
+import { createBasketItem, getBasketItemById, getBasketItemsByBasketId, updateBasketItemQuantity, deleteBasketItem, getBasketItemByBasketAndProduct, convertBasketItemsMode } from '../models/basketItemModel.js';
 import { getProductById } from '../models/productModel.js';
 import { getBasketById } from '../models/basketModel.js';
 
 export const addBasketItem = async (req: Request, res: Response, next: NextFunction) => {
     try {
-        const { basketId, productId, quantity } = req.body;
+        const { basketId, productId, quantity, matchMode } = req.body;
         if (!basketId || !productId || quantity === undefined || quantity === null) {
             res.status(400).json({ error: 'All fields are required' });
             return;
         }
+        // Accept 'base' or 'sku'; fall back to 'sku' for clients that don't
+        // yet send the field (pre-Phase-1 app builds). Never throw on a
+        // missing/weird value — the flag is a pricing hint, not auth.
+        const resolvedMatchMode: 'sku' | 'base' =
+            matchMode === 'base' ? 'base' : 'sku';
 
         const basket = await getBasketById(basketId);
         if (!basket) {
@@ -34,8 +39,8 @@ export const addBasketItem = async (req: Request, res: Response, next: NextFunct
             return;
         }
 
-        const id = await createBasketItem(basketId, productId, quantity);
-        res.status(201).json({ id, basketId, productId, quantity });
+        const id = await createBasketItem(basketId, productId, quantity, resolvedMatchMode);
+        res.status(201).json({ id, basketId, productId, quantity, matchMode: resolvedMatchMode });
     } catch (error) {
         next(error);
     }
@@ -98,6 +103,45 @@ export const removeBasketItem = async (req: Request, res: Response, next: NextFu
         }
         await deleteBasketItem(id);
         res.status(204).send();
+    } catch (error) {
+        next(error);
+    }
+};
+
+/**
+ * POST /api/baskets/:basketId/convert-mode
+ * Body: { mode: 'base' | 'sku' }
+ *
+ * Converts every BasketItem in the basket to the target mode. On sku→base
+ * duplicates collapse (same cluster head) and quantities sum. On base→sku
+ * matchMode flips in-place (productId already points at head). Only valid
+ * on draft baskets; calculated/ordered baskets are immutable.
+ */
+export const convertBasketMode = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const basketId = Number(req.params.basketId);
+        if (isNaN(basketId)) {
+            res.status(400).json({ error: 'Invalid basket ID' });
+            return;
+        }
+        const target = req.body?.mode === 'base' ? 'base' : req.body?.mode === 'sku' ? 'sku' : null;
+        if (!target) {
+            res.status(400).json({ error: 'mode must be "base" or "sku"' });
+            return;
+        }
+
+        const basket = await getBasketById(basketId);
+        if (!basket) {
+            res.status(404).json({ error: 'Basket not found' });
+            return;
+        }
+        if (basket.status !== 'draft') {
+            res.status(400).json({ error: 'Cannot modify a basket that is not in draft status' });
+            return;
+        }
+
+        const result = await convertBasketItemsMode(basketId, target);
+        res.json({ ok: true, mode: target, ...result });
     } catch (error) {
         next(error);
     }
