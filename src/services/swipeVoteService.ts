@@ -17,6 +17,7 @@ import {
     promoteMergeByProductIds,
     type MergeDecision,
 } from './storeProductMergeService.js';
+import { markResolvedForProductPair } from '../models/orphanSwipeCandidateModel.js';
 import { wilsonLowerBound } from '../utils/wilson.js';
 
 type Connection = typeof pool | any;
@@ -248,7 +249,7 @@ export const undoSwipeVote = async (
  * baseProduct, which happens after a merge) are silently skipped by
  * applyBaseProductLinkDelta.
  */
-async function applyBaseProductLinkForVote(
+export async function applyBaseProductLinkForVote(
     spIdA: number,
     spIdB: number,
     previousVote: MatchVote | null,
@@ -274,7 +275,7 @@ async function applyBaseProductLinkForVote(
  * vote ingestion and every undo so the Product graph always reflects the
  * latest data.
  */
-async function reevaluateMerge(
+export async function reevaluateMerge(
     spIdA: number,
     spIdB: number,
     agg: Awaited<ReturnType<typeof getMatchAggregate>>,
@@ -299,6 +300,11 @@ async function reevaluateMerge(
         agg.identicalVotes >= MatchThresholds.promoteIdentical.minVotes &&
         identicalLower >= MatchThresholds.promoteIdentical.minWilsonLower
     ) {
+        // Mark any OrphanSwipeCandidate row for this Product pair as
+        // resolved so the extra-queue stops serving it. Fires regardless
+        // of whether the merge was driven by a receipt vote or an orphan
+        // vote — hook is inside reevaluateMerge so both paths converge.
+        await markResolvedForProductPair(productIdA, productIdB, 'promoted', conn);
         return promoteMergeByProductIds(productIdA, productIdB, conn);
     }
 
@@ -307,6 +313,7 @@ async function reevaluateMerge(
         agg.identicalVotes >= MatchThresholds.demoteIdentical.minVotes &&
         identicalLower <= MatchThresholds.demoteIdentical.maxWilsonLower
     ) {
+        await markResolvedForProductPair(productIdA, productIdB, 'demoted', conn);
         return demoteMergeByProductIds(productIdA, productIdB, conn);
     }
 

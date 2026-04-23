@@ -179,18 +179,23 @@ async function main() {
                 // resolve to the same SP (via dedup) + same store + same second
                 // timestamp would otherwise fail. Duplicates are tallied and
                 // reported in the final summary.
+                // All scraped prices land as isFallback=1 regardless of what
+                // the spreadsheet says. Rationale: Barbora is an online store
+                // and its prices aren't guaranteed to match what's on the
+                // shelf at any given physical Maxima. Real receipts from
+                // physical stores (which write isFallback=0) should always
+                // outrank scraped rows in the comparison service.
                 const [res]: any = await conn.query(
                     `INSERT IGNORE INTO Price
                        (storeProductId, storeId, price, promoPrice, promoEnd,
                         isFallback, date, priceVerified, receiptId)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+                     VALUES (?, ?, ?, ?, ?, 1, ?, ?, NULL)`,
                     [
                         spId,
                         storeId,
                         price,
                         toFloatOrNull(row.promoPrice),
                         toDateOrNull(row.promoEnd),
-                        toBool(row.isFallback),
                         toDateOrNow(row.date),
                         toBool(row.priceVerified),
                     ]

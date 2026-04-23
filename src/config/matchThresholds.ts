@@ -44,6 +44,12 @@ export const MatchThresholds = {
      *  real votes. 100ms still filters genuinely accidental thumb bumps. */
     minDwellMs: 100,
 
+    /** Orphan-queue dwell filter. Cross-chain orphan cards take more reading
+     *  than receipt-match cards (two unfamiliar products instead of OCR vs.
+     *  expected candidate), so we require a longer dwell to count the vote
+     *  into the aggregate. The vote row is still written for audit. */
+    minDwellMsOrphan: 700,
+
     /** Max pair-votes a single user can cast per minute — defence against
      *  accidental rapid re-swiping through the queue. */
     maxUserVotesPerMinute: 40,

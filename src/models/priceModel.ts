@@ -15,8 +15,25 @@ export const createPrice = async (
     conn?: Connection
 ) => {
     const db = conn || pool;
+    // Price has UNIQUE (storeProductId, storeId, date). Collisions happen
+    // when the same (SP, store, timestamp) key already exists — e.g. a
+    // previous receipt upload left an orphaned row, or a scraped fallback
+    // row shares the exact date. The right semantic is "most recent
+    // observation wins": overwrite the row in place with the new values
+    // (which may reassign receiptId from NULL to this receipt, or flip
+    // isFallback=1 → 0 when a real receipt supersedes a scrape).
     const [result]: any = await db.query(
-        'INSERT INTO Price (storeProductId, storeId, receiptId, price, promoPrice, promoEnd, isFallback, date, priceVerified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        `INSERT INTO Price
+           (storeProductId, storeId, receiptId, price, promoPrice, promoEnd,
+            isFallback, date, priceVerified)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE
+           receiptId     = VALUES(receiptId),
+           price         = VALUES(price),
+           promoPrice    = VALUES(promoPrice),
+           promoEnd      = VALUES(promoEnd),
+           isFallback    = VALUES(isFallback),
+           priceVerified = VALUES(priceVerified)`,
         [storeProductId, storeId, receiptId, price, promoPrice, promoEnd, isFallback, date, priceVerified]
     );
     return result.insertId;

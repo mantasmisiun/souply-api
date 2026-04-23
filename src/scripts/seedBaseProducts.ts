@@ -35,7 +35,8 @@ interface ProductRow {
   baseProductId: number | null;
 }
 
-const DEFAULT_THRESHOLD = 0.75;
+const DEFAULT_THRESHOLD = 0.85;
+const NEPRISKIRTA_ID = 688;
 
 function parseArgs() {
   const args = process.argv.slice(2);
@@ -69,6 +70,16 @@ async function main() {
     const products = rows as ProductRow[];
     console.log(`Loaded ${products.length} Products`);
 
+    // Reset baseProductId on all Products before reclustering. Makes the
+    // script idempotent: a previously-clustered variant can now be promoted
+    // to canonical (or reassigned to a different cluster) without leaving
+    // a stale link that would violate the "no chains deeper than 1"
+    // invariant.
+    const [resetRes]: any = await conn.query(
+      'UPDATE Product SET baseProductId = NULL WHERE baseProductId IS NOT NULL',
+    );
+    console.log(`Cleared baseProductId on ${resetRes.affectedRows} Products`);
+
     const byCategory = new Map<number, ProductRow[]>();
     for (const p of products) {
       const list = byCategory.get(p.categoryId);
@@ -80,6 +91,12 @@ async function main() {
     let variantCount = 0;
 
     for (const [categoryId, group] of byCategory) {
+      // Skip the Nepriskirta orphan bucket: its members don't share a
+      // coherent category, so clustering them by name similarity produces
+      // meaningless BaseProducts ("Kibiras 10l" paired with "Knyga X").
+      // These will be recategorized via the swipe-refinement flow, and
+      // can be reclustered at that point.
+      if (categoryId === NEPRISKIRTA_ID) continue;
       if (group.length < 2) continue; // singletons remain roots (baseProductId=NULL)
 
       const assigned = new Set<number>();
