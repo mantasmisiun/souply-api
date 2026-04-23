@@ -13,7 +13,7 @@ export const addShoppingList = async (req: Request, res: Response, next: NextFun
         // Update basket status to active
         if (basketId) {
             const { updateBasketStatus } = await import('../models/basketModel.js');
-            await updateBasketStatus(basketId, 'active');
+            await updateBasketStatus(basketId, 'inProgress');
         }
 
         res.status(201).json({ id, userId, storeId, basketId });
@@ -58,6 +58,9 @@ export const changeShoppingListStatus = async (req: Request, res: Response, next
             res.status(400).json({ error: 'Invalid shopping list ID' });
             return;
         }
+        // ShoppingList has its own lifecycle — 'active' (being shopped) vs
+        // 'completed' (done). This is distinct from Basket.status and must
+        // not be conflated with it.
         const validStatuses = ['active', 'completed'];
         if (!status || !validStatuses.includes(status)) {
             res.status(400).json({ error: 'Status must be active or completed' });
@@ -110,7 +113,7 @@ export const removeShoppingList = async (req: Request, res: Response, next: Next
         if (basketId) {
             const { updateBasketStatus, getBasketById } = await import('../models/basketModel.js');
             const basket = await getBasketById(basketId);
-            if (basket && basket.status === 'active') {
+            if (basket && basket.status === 'inProgress') {
                 await updateBasketStatus(basketId, 'compared');
             }
         }
@@ -141,7 +144,7 @@ export const duplicateList = async (req: Request, res: Response, next: NextFunct
         if (basketId) {
             await updateShoppingListBasket(newId, basketId);
             const { updateBasketStatus } = await import('../models/basketModel.js');
-            await updateBasketStatus(basketId, 'active');
+            await updateBasketStatus(basketId, 'inProgress');
         }
 
         res.json({ id: newId });

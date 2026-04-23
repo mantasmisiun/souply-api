@@ -53,4 +53,23 @@ export const MatchThresholds = {
     /** Max pair-votes a single user can cast per minute — defence against
      *  accidental rapid re-swiping through the queue. */
     maxUserVotesPerMinute: 40,
+
+    /** Basket calc tier-3 substitution threshold. When a store doesn't
+     *  carry the user's basket item, we look for the nearest-name-similar
+     *  StoreProduct IN THE SAME CHAIN. If Levenshtein ratio on normalized
+     *  names passes this cutoff, we price the slot with that SP; the
+     *  shopping list still shows the original name+amount so the user
+     *  sees their intent preserved.
+     *
+     *  Kept stricter than the cross-chain Product reuse threshold (0.85)
+     *  since bad substitutions distort store totals and mislead shoppers.
+     *  0.80 catches "PERSIL Discs Sensitive 37" ↔ "PERSIL SENSITIVE 37"
+     *  but rejects "Pienas" ↔ "Pieno produktas". */
+    substitutionMinSimilarity: 0.75,
+
+    /** Products in the Nepriskirta bucket (categoryId=688) are excluded
+     *  from substitution candidates by id. Stored here for documentation /
+     *  future tuning; the calc service references NEPRISKIRTA_CATEGORY_ID
+     *  directly. */
+    nepriskirtaCategoryId: 688,
 } as const;

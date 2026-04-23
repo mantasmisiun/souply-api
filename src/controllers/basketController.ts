@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { createBasket, getBasketsByUserId, getBasketById, updateBasketUpdatedAt, updateBasketStatus, deleteBasket, updateBasketName } from '../models/basketModel.js';
+import { createBasket, getBasketsByUserId, getBasketById, updateBasketUpdatedAt, updateBasketStatus, deleteBasket, updateBasketName, getUserDraftBasketId } from '../models/basketModel.js';
 
 export const addBasket = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -8,8 +8,19 @@ export const addBasket = async (req: Request, res: Response, next: NextFunction)
             res.status(400).json({ error: 'User ID is required' });
             return;
         }
+        // Idempotent behaviour: if the user already has a draft basket,
+        // return it instead of minting a duplicate. This closes the race
+        // where two "add to basket" taps from different screens each fire
+        // a create request before either has updated the client's cached
+        // draftBasketId. The frontend still serializes creates via an
+        // in-flight promise (basketUtils.ts), but this is the backstop.
+        const existing = await getUserDraftBasketId(userId);
+        if (existing !== null) {
+            res.status(200).json({ id: existing, userId, existing: true });
+            return;
+        }
         const id = await createBasket(userId);
-        res.status(201).json({ id, userId });
+        res.status(201).json({ id, userId, existing: false });
     } catch (error) {
         next(error);
     }
@@ -70,9 +81,9 @@ export const changeBasketStatus = async (req: Request, res: Response, next: Next
             res.status(400).json({ error: 'Invalid basket ID' });
             return;
         }
-        const validStatuses = ['draft', 'compared', 'completed'];
+        const validStatuses = ['draft', 'compared', 'inProgress', 'completed'];
         if (!status || !validStatuses.includes(status)) {
-            res.status(400).json({ error: 'Status must be draft, compared or completed' });
+            res.status(400).json({ error: 'Status must be draft, compared, inProgress or completed' });
             return;
         }
         const basket = await getBasketById(id);
@@ -143,8 +154,18 @@ export const calculateBasket = async (req: Request, res: Response, next: NextFun
             res.status(404).json({ error: 'Basket not found' });
             return;
         }
+        // Accept user coordinates from body. Frontend gets them from
+        // expo-location, or from the address-modal → /api/geocode flow.
+        // Service falls back to Vilnius centre if absent.
+        const rawLat = Number(req.body?.lat);
+        const rawLng = Number(req.body?.lng);
+        const opts = {
+            lat: Number.isFinite(rawLat) ? rawLat : undefined,
+            lng: Number.isFinite(rawLng) ? rawLng : undefined,
+        };
+
         const { calculateBasketForStores } = await import('../services/basketCalculationService.js');
-        const results = await calculateBasketForStores(id);
+        const results = await calculateBasketForStores(id, opts);
         await updateBasketStatus(id, 'compared');
         res.json(results);
     } catch (error) {
