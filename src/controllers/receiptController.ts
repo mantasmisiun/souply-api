@@ -3,7 +3,7 @@ import { createReceipt, getReceiptsByUserId, getReceiptById, deleteReceipt, getR
 import {
     getSwipeCandidatesWithDetails,
     getVerifiedStoreProductIdsForReceipt,
-    getVotedPairKeysForUserReceipt,
+    getVotedPairKeysForUser,
 } from "../models/receiptSwipeCandidateModel.js";
 import {
     unverifyReceiptLinePrice,
@@ -346,7 +346,7 @@ export const fetchReceiptSwipeQueue = async (req: Request, res: Response, next: 
         //    Price.priceVerified from the DB — the parsed JSON isn't the
         //    source of truth once swipes start flipping the Price column.
         const votedPairs = userId
-            ? await getVotedPairKeysForUserReceipt(userId, id)
+            ? await getVotedPairKeysForUser(userId)
             : new Set<string>();
         const verifiedSpIds = userId
             ? await getVerifiedStoreProductIdsForReceipt(id)

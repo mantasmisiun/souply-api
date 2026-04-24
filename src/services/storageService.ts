@@ -1,23 +1,88 @@
 import * as Minio from 'minio';
 import { Readable } from 'stream';
 
+/**
+ * MinIO client configured against the PUBLIC hostname.
+ *
+ * Presigned URLs embed the target hostname into the SigV4 signature.
+ * If we sign with endPoint=`minio` (the docker network name) and the
+ * phone later requests `https://minio.manofoto.dpdns.org/...`, MinIO's
+ * signature check sees a different Host header and rejects the PUT as
+ * SignatureDoesNotMatch. We were hitting this bug in prod — uploads
+ * failed silently, leaving Receipt rows with empty filePath.
+ *
+ * Fix: sign against the public URL. The API's own direct calls
+ * (removeObject, putObject) pay a round-trip through Cloudflare +
+ * Traefik, but those operations are infrequent and the latency is
+ * acceptable for correctness.
+ */
 let minioClient: Minio.Client | null = null;
 
-const getClient = () => {
-    if (!minioClient) {
-        minioClient = new Minio.Client({
+interface ParsedEndpoint {
+    endPoint: string;
+    port: number;
+    useSSL: boolean;
+}
+
+const parsePublicUrl = (raw: string | undefined): ParsedEndpoint => {
+    // Fallback to internal endpoint if PUBLIC_URL isn't set. Works on
+    // LAN / dev setups where the phone can reach MinIO directly.
+    if (!raw) {
+        return {
             endPoint: process.env.MINIO_ENDPOINT || '192.168.1.212',
             port: parseInt(process.env.MINIO_PORT || '9000'),
             useSSL: false,
+        };
+    }
+    try {
+        const u = new URL(raw);
+        const useSSL = u.protocol === 'https:';
+        return {
+            endPoint: u.hostname,
+            port: u.port ? parseInt(u.port) : (useSSL ? 443 : 80),
+            useSSL,
+        };
+    } catch {
+        // Malformed MINIO_PUBLIC_URL — log loudly, fall back so the
+        // service doesn't crash during startup.
+        console.warn('[storageService] malformed MINIO_PUBLIC_URL:', raw);
+        return {
+            endPoint: process.env.MINIO_ENDPOINT || '192.168.1.212',
+            port: parseInt(process.env.MINIO_PORT || '9000'),
+            useSSL: false,
+        };
+    }
+};
+
+const getClient = () => {
+    if (!minioClient) {
+        const { endPoint, port, useSSL } = parsePublicUrl(process.env.MINIO_PUBLIC_URL);
+        minioClient = new Minio.Client({
+            endPoint,
+            port,
+            useSSL,
             accessKey: process.env.MINIO_ACCESS_KEY || '',
-            secretKey: process.env.MINIO_SECRET_KEY || ''
+            secretKey: process.env.MINIO_SECRET_KEY || '',
         });
-        console.log('MinIO connecting with:', process.env.MINIO_ACCESS_KEY, process.env.MINIO_ENDPOINT);
+        console.log('[MinIO] signing presigned URLs for', `${useSSL ? 'https' : 'http'}://${endPoint}:${port}`);
     }
     return minioClient;
 };
 
 const BUCKET = process.env.MINIO_BUCKET || 'receipts';
+
+/**
+ * Compute the public URL prefix used to build stored `filePath` strings.
+ * Matches the endpoint the client signs against so the filePath the
+ * phone receives is directly openable (sans query-signature).
+ */
+const publicUrlPrefix = (): string => {
+    const { endPoint, port, useSSL } = parsePublicUrl(process.env.MINIO_PUBLIC_URL);
+    const proto = useSSL ? 'https' : 'http';
+    // Omit :port for default ports — cleaner URL, same behaviour.
+    const portSuffix = (useSSL && port === 443) || (!useSSL && port === 80) ? '' : `:${port}`;
+    return `${proto}://${endPoint}${portSuffix}`;
+};
 
 export const uploadReceiptImage = async (
     imageBuffer: Buffer,
@@ -35,7 +100,7 @@ export const uploadReceiptImage = async (
         { 'Content-Type': mimeType }
     );
 
-    return `http://${process.env.MINIO_ENDPOINT}:${process.env.MINIO_PORT}/${BUCKET}/${objectName}`;
+    return `${publicUrlPrefix()}/${BUCKET}/${objectName}`;
 };
 
 const extractObjectKey = (filePathOrKey: string | null | undefined): string | null => {
@@ -67,23 +132,23 @@ export const deleteReceiptImage = async (fileUrl: string | null | undefined): Pr
  */
 export const getPresignedUploadUrl = async (
     filename: string,
-    mimeType: string
+    _mimeType: string
 ): Promise<{ uploadUrl: string; filePath: string }> => {
     const client = getClient();
     const objectName = `${Date.now()}-${filename.replace(/[^\w.-]/g, '_')}`;
     const uploadUrl = await client.presignedPutObject(BUCKET, objectName, 60 * 15); // 15 min
-    const filePath = `http://${process.env.MINIO_ENDPOINT}:${process.env.MINIO_PORT}/${BUCKET}/${objectName}`;
+    const filePath = `${publicUrlPrefix()}/${BUCKET}/${objectName}`;
     return { uploadUrl, filePath };
 };
 const PRODUCT_IMAGES_BUCKET = process.env.MINIO_PRODUCT_IMAGES_BUCKET || 'product-images';
 
 export const getPresignedProductImageUploadUrl = async (
   filename: string,
-  mimeType: string
+  _mimeType: string
 ): Promise<{ uploadUrl: string; filePath: string }> => {
   const client = getClient();
   const objectName = `${Date.now()}-${filename.replace(/[^\w.-]/g, '_')}`;
   const uploadUrl = await client.presignedPutObject(PRODUCT_IMAGES_BUCKET, objectName, 60 * 15);
-  const filePath = `http://${process.env.MINIO_ENDPOINT}:${process.env.MINIO_PORT}/${PRODUCT_IMAGES_BUCKET}/${objectName}`;
+  const filePath = `${publicUrlPrefix()}/${PRODUCT_IMAGES_BUCKET}/${objectName}`;
   return { uploadUrl, filePath };
 };

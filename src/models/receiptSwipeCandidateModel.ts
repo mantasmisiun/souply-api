@@ -100,18 +100,34 @@ export const getSwipeCandidatesWithDetails = async (receiptId: number) => {
 };
 
 /**
- * All cross-SP pair-votes the given user has cast on this receipt. Returned
- * as a Set of "min-max" strings for O(1) lookup by the queue filter.
+ * All cross-SP pair-votes the given user has EVER cast, across all
+ * receipts. Returned as a Set of "min-max" strings for O(1) lookup
+ * by the queue filter.
+ *
+ * Intentionally NOT scoped to receiptId: StoreProductMatchVote has a
+ * UNIQUE key on (userId, spIdA, spIdB), so there's exactly one row
+ * per user+pair regardless of which receipt surfaced it. Filtering by
+ * receiptId caused the repeat-cards bug — when Receipt A's queue
+ * surfaced pair (X, Y) and the user voted, then Receipt B's queue
+ * also contained (X, Y), the receipt-scoped filter missed it and
+ * re-served the same pair. Multiplied across N receipts with
+ * overlapping altMatches (e.g., multiple energy-drink receipts all
+ * surfacing Red Bull as a candidate), users would see the same pairs
+ * appear to loop forever.
+ *
+ * Secondary gotcha that made this worse: upsertMatchVote OVERWRITES
+ * the row's receiptId on a repeat vote, so even the original receipt
+ * that surfaced the pair would stop filtering it after the user voted
+ * again elsewhere.
  */
-export const getVotedPairKeysForUserReceipt = async (
-    userId: string,
-    receiptId: number
+export const getVotedPairKeysForUser = async (
+    userId: string
 ): Promise<Set<string>> => {
     const [rows]: any = await pool.query(
         `SELECT spIdA, spIdB
            FROM StoreProductMatchVote
-          WHERE userId = ? AND receiptId = ?`,
-        [userId, receiptId]
+          WHERE userId = ?`,
+        [userId]
     );
     const s = new Set<string>();
     for (const r of rows) s.add(`${r.spIdA}-${r.spIdB}`);
