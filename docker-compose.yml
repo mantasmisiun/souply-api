@@ -35,11 +35,12 @@ services:
       - "3000:3000"
 
     networks:
-      # Shared network with MySQL + MinIO. Edit the name below to
-      # match your existing network (find it with `docker network ls`
-      # on OMV — common names: `backend`, `omv_default`, whatever
-      # your MySQL compose named it).
-      - backend
+      # Docker containers can attach to multiple networks. The API
+      # needs one per backing service it reaches by container name.
+      # Adjust these to match YOUR `docker network ls` output on OMV.
+      - mysql_net
+      - minio_2_default
+      - basket_redis_default
 
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/api-docs/"]
@@ -49,10 +50,15 @@ services:
       start_period: 30s
 
 networks:
-  backend:
+  # All three networks pre-exist on OMV; `external: true` tells
+  # docker-compose not to try to create them. The `name:` must
+  # match `docker network ls` exactly.
+  mysql_net:
     external: true
-    # ── EDIT THIS ─────────────────────────────────────────────
-    # Name of the docker network MySQL + MinIO share on OMV.
-    # On OMV: `docker network ls` → pick the network your MySQL
-    # container belongs to. Replace below.
-    name: backend
+    name: mysql_net
+  minio_2_default:
+    external: true
+    name: minio_2_default
+  basket_redis_default:
+    external: true
+    name: basket_redis_default
