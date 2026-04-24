@@ -107,9 +107,17 @@ export const persistReceiptPrices = async (
         if (Number.isFinite(input.chainId) && Array.isArray(parsedData?.products)) {
             for (let i = 0; i < parsedData.products.length; i++) {
                 const line = parsedData.products[i];
-                if (Number.isFinite(line?.storeProductId) && Number(line.storeProductId) > 0) {
-                    continue; // mobile matched this one
-                }
+                // Always route through the resolver — even lines the mobile
+                // matcher already assigned an SP to. The resolver has to see
+                // them because the SP might belong to a DIFFERENT chain
+                // (Lidl/Norfa receipts matched against Maxima/Rimi catalog
+                // via cross-chain fallback). Same-chain SPs exit fast after
+                // a single lookup; cross-chain ones trigger the bootstrap
+                // path that mints a proper SP in the receipt's chain.
+                const incomingSpId =
+                    Number.isFinite(line?.storeProductId) && Number(line.storeProductId) > 0
+                        ? Number(line.storeProductId)
+                        : null;
                 if (!line?.name || typeof line.name !== 'string' || !line.name.trim()) {
                     continue; // empty/garbage OCR line
                 }
@@ -117,13 +125,14 @@ export const persistReceiptPrices = async (
                     const res = await resolveReceiptLineStoreProduct(
                         input.chainId,
                         {
-                            storeProductId: null,
+                            storeProductId: incomingSpId,
                             name: line.name,
                             brandName: typeof line.brandName === 'string' ? line.brandName : null,
                             amount: Number.isFinite(line.amount) ? Number(line.amount) : null,
                             unit: typeof line.unit === 'string' ? line.unit : null,
                             isWeighable: !!line.isWeighable,
                             imageUrl: typeof line.imageUrl === 'string' ? line.imageUrl : null,
+                            price: Number.isFinite(line.price) ? Number(line.price) : null,
                             altMatchProductId:
                                 Array.isArray(line.altMatches) && line.altMatches[0]?.productId
                                     ? Number(line.altMatches[0].productId)

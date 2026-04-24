@@ -12,6 +12,7 @@ import {
     fetchReceiptSwipeQueue,
     convertPdfToImage,
     reportReceiptLineIssue,
+    logAnalizeFailure,
 } from '../controllers/receiptController.js';
 import {
     logBatchReceipt,
@@ -30,6 +31,11 @@ router.post('/receipts/batch-log/finalize', finalizeBatchReport);
 
 // Create a new receipt from OCR results — called once on receipt-process screen mount
 router.post('/receipts', createReceiptFromOcr);
+
+// Analize-flow bail path: log a receipt that couldn't be processed
+// (OCR produced nothing, chain not detected, or store lookup failed).
+// No Receipt row created; this is pure audit logging.
+router.post('/receipts/log-fail', logAnalizeFailure);
 
 // Update an existing receipt after user edits (debounced auto-save)
 router.put('/receipts/:id', updateReceiptFromOcr);

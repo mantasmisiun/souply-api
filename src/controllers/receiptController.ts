@@ -13,6 +13,10 @@ import {
 import { getPresignedUrl } from "../services/storageService.js";
 import { persistReceiptPrices } from '../services/receiptSaveService.js';
 import { getReceiptComparison } from '../services/receiptComparisonService.js';
+import {
+    logFailedReceipt,
+    type FailReason,
+} from "../models/failedReceiptLogModel.js";
 
 export const fetchReceiptsByUserId = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -124,22 +128,49 @@ export const createReceiptFromOcr = async (req: Request, res: Response, next: Ne
         // Receipt.storeId is resolved from parsedData later; initial insert can use null
         const storeId = parsedData.header?.storeId ?? null;
         const receiptId = await createReceipt(userId, storeId, filePath || '', fileType || 'image/jpeg');
-        const result = await persistReceiptPrices(receiptId, userId, parsedData, {
-            chainId: parsedData.header?.chainId,
-            storeId,
-            receiptNo: parsedData.footer?.receiptNo ?? null,
-            date: parsedData.footer?.date ?? null,
-            products: (parsedData.products || []).map((p: any) => ({
-                storeProductId: p.storeProductId ?? null,
-                matchConfirmed: !!p.matchConfirmed,
-                priceVerified: !!p.priceVerified,
-                price: p.price,
-                promoPrice: p.promoPrice,
-                quantity: p.quantity,
-                unit: p.unit,
-            })),
-        });
-        res.status(201).json({ id: receiptId, ...result });
+
+        // Cross-user duplicate safety net. The upfront same-user check above
+        // only catches re-uploads by the SAME user. The UNIQUE constraint on
+        // (receiptNo, storeId, date) is cross-user — a different user
+        // uploading the same physical receipt will collide here. Rather
+        // than leak the error to the client, delete the orphan Receipt row
+        // we just inserted and return a clean 409. The mobile app treats
+        // 409 as a terminal state and navigates back to the Analize tab.
+        try {
+            const result = await persistReceiptPrices(receiptId, userId, parsedData, {
+                chainId: parsedData.header?.chainId,
+                storeId,
+                receiptNo: parsedData.footer?.receiptNo ?? null,
+                date: parsedData.footer?.date ?? null,
+                products: (parsedData.products || []).map((p: any) => ({
+                    storeProductId: p.storeProductId ?? null,
+                    matchConfirmed: !!p.matchConfirmed,
+                    priceVerified: !!p.priceVerified,
+                    price: p.price,
+                    promoPrice: p.promoPrice,
+                    quantity: p.quantity,
+                    unit: p.unit,
+                })),
+            });
+            res.status(201).json({ id: receiptId, ...result });
+        } catch (err: any) {
+            if (err?.code === 'ER_DUP_ENTRY' && /unique_receipt/i.test(String(err?.sqlMessage ?? ''))) {
+                // Best-effort cleanup of the orphaned Receipt row. Non-fatal
+                // if it fails — FK cascade on Price catches residual Price
+                // rows, and a stray empty Receipt row is harmless.
+                try {
+                    await deleteReceipt(receiptId);
+                } catch (cleanupErr) {
+                    console.warn('Failed to clean up orphan receipt', receiptId, cleanupErr);
+                }
+                res.status(409).json({
+                    error: 'duplicate',
+                    message: 'Receipt already uploaded',
+                });
+                return;
+            }
+            throw err;
+        }
     } catch (error) {
         next(error);
     }
@@ -456,6 +487,69 @@ export const reportReceiptLineIssue = async (req: Request, res: Response, next: 
         }
 
         res.json({ ok: true, flaggedCount });
+    } catch (error) {
+        next(error);
+    }
+};
+
+/**
+ * POST /api/receipts/log-fail
+ *
+ * Append a FailedReceiptLog row. Called by the mobile Analize flow
+ * when it bails out BEFORE creating a Receipt (OCR produced nothing,
+ * chain couldn't be detected, or store lookup failed). Purposely
+ * lightweight — no FK checks, no cleanup logic. Lets us answer the
+ * "random receipt vs OCR missed" question without polluting Receipt.
+ *
+ * Validates `failReason` against the ENUM; everything else passes
+ * through with length caps in the model.
+ */
+const VALID_FAIL_REASONS: ReadonlySet<FailReason> = new Set([
+    'ocr_no_text',
+    'ocr_error',
+    'chain_unrecognized',
+    'store_unrecognized',
+]);
+
+export const logAnalizeFailure = async (
+    req: Request,
+    res: Response,
+    next: NextFunction
+) => {
+    try {
+        const {
+            userId,
+            failReason,
+            ocrLineCount,
+            ocrPreview,
+            detectedChainName,
+            extractedStoreAddress,
+            imageFilePath,
+        } = req.body ?? {};
+
+        if (!failReason || !VALID_FAIL_REASONS.has(failReason)) {
+            res.status(400).json({
+                error: `failReason must be one of ${[...VALID_FAIL_REASONS].join(', ')}`,
+            });
+            return;
+        }
+
+        const id = await logFailedReceipt({
+            userId: typeof userId === 'string' && userId.trim() ? userId.trim() : null,
+            failReason,
+            ocrLineCount: Number.isFinite(ocrLineCount) ? Number(ocrLineCount) : null,
+            ocrPreview: typeof ocrPreview === 'string' ? ocrPreview : null,
+            detectedChainName:
+                typeof detectedChainName === 'string' ? detectedChainName.slice(0, 64) : null,
+            extractedStoreAddress:
+                typeof extractedStoreAddress === 'string'
+                    ? extractedStoreAddress.slice(0, 255)
+                    : null,
+            imageFilePath:
+                typeof imageFilePath === 'string' ? imageFilePath.slice(0, 512) : null,
+        });
+
+        res.status(201).json({ id });
     } catch (error) {
         next(error);
     }

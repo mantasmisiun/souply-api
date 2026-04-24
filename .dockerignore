@@ -1,0 +1,17 @@
+# Keep the build context lean. These never belong in the image.
+node_modules
+dist
+receipts/_batch_staging
+receipts/_logs
+receipts/lidl
+receipts/maxima
+receipts/norfa
+receipts/rimi
+receipts/iki
+.env
+.env.local
+.env.production
+.git
+.gitignore
+tests
+**/*.log
