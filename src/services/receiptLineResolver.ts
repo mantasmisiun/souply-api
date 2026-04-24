@@ -85,27 +85,41 @@ export const resolveReceiptLineStoreProduct = async (
         return { storeProductId: existing, source: 'reused' };
     }
 
-    // 2. Resolve category: inherit from top alt-match's Product when we have
-    // one (more accurate than dumping into Nepriskirta), else fall back to
-    // the unassigned bucket.
+    // 2. Resolve category + (optionally) the existing Product to reuse.
+    // When the matcher surfaced an alt-match — same chain with a
+    // Product that looks like this line, OR a cross-chain fallback
+    // result for catalogs without scraped data (Norfa) — we REUSE
+    // that Product id instead of minting a new one. A new chain-
+    // specific StoreProduct row still gets created below, but it
+    // points at the shared Product, so price comparison across
+    // chains works via Product identity. This also deduplicates the
+    // catalog: without reuse, every unmatched receipt line would
+    // create a fresh near-duplicate Product that later clustering
+    // would have to merge.
+    let productId: number | null = null;
     let categoryId: number | null = null;
     if (line.altMatchProductId) {
         const [rows]: any = await db.query(
-            'SELECT categoryId FROM Product WHERE id = ? LIMIT 1',
+            'SELECT id, categoryId FROM Product WHERE id = ? LIMIT 1',
             [line.altMatchProductId]
         );
-        if (rows.length > 0) categoryId = rows[0].categoryId;
+        if (rows.length > 0) {
+            productId = rows[0].id;
+            categoryId = rows[0].categoryId;
+        }
     }
     if (categoryId === null) {
         categoryId = await getUnassignedCategoryId(db);
     }
 
-    // 3. Create Product (auto-resolves baseProductId via resolveBaseProductId).
-    const productId = await createProduct(categoryId, null, line.name, db);
+    // 3. Create Product only when no alt-match to piggyback on.
+    //    (auto-resolves baseProductId via resolveBaseProductId).
+    const resolvedProductId: number =
+        productId ?? (await createProduct(categoryId, null, line.name, db));
 
-    // 4. Create StoreProduct tied to that Product.
+    // 4. Create StoreProduct tied to the (reused-or-new) Product.
     const storeProductId = await createStoreProduct(
-        productId,
+        resolvedProductId,
         chainId,
         line.name,
         line.brandName,

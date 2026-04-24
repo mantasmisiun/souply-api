@@ -1,24 +1,62 @@
 /**
  * Product name matching for OCR'd grocery receipt entries.
  *
- * Strategy: token-based fuzzy matching.
- *   - Tokenize both query and candidate (split on whitespace after normalization)
- *   - For each query token, find the best-matching candidate token (Levenshtein)
- *   - Score = weighted fraction of query tokens with a good match (weight = token length)
- *   - Amount/unit as a soft boost/penalty
+ * Two scoring lanes combined:
+ *   - tokenScore: per-token best-match with Levenshtein + length weighting.
+ *     Good when OCR preserves word boundaries.
+ *   - charScore: Levenshtein similarity on the joined normalized string.
+ *     Rescues cases where OCR split a word across spaces (`gėr imas` for
+ *     `gėrimas`) or lost/swapped a single letter — the full-string view
+ *     sees most characters are still there even though the token view
+ *     sees unmatched fragments.
+ *
+ * Final confidence = max(tokenScore, charScore * 0.95). Char is slightly
+ * discounted so clean token matches still beat noisy-but-similar blobs
+ * of the wrong product.
+ *
+ * Normalization additionally strips common receipt prefixes the parsers
+ * may leak (loyalty card X's, `nuol.` / `galut. kaina` / "sutaupete" /
+ * deposit markers) — defensive so matcher works even when a parser bug
+ * slips a prefix through.
  */
 
 import { levenshtein } from './addressMatcher.js';
 
+/**
+ * Strip OCR prefixes that hold no product signal but often leak through
+ * parsers. Applied inside normalize so token splitting doesn't latch
+ * onto the junk.
+ *
+ * Tokens stripped:
+ *   - Loyalty card masks (`xxxxxxxxxxxxxxx9631` — Mano Rimi tail)
+ *   - `nuol. -1,20` / `galut. kaina 2,27` discount markers (Rimi)
+ *   - `sutaupete` and `aciu nuolaida prekei` (Maxima)
+ *   - `pet (depozitinis) 0,10 eur 0,10` deposit lines (both chains)
+ */
+function stripReceiptPrefixes(s: string): string {
+    return s
+        // Loyalty-card masks — accept K/X prefix series (OCR reads first
+        // X as K) with 4+ mask chars, optionally followed by some digits.
+        .replace(/\b[kx][kx]{3,}\s*\d{0,8}(?:\s+\d)?/gi, ' ')
+        .replace(/\bnuol\.?\s*-?\s*\d+[.,]\d+\b/gi, ' ')
+        .replace(/\bgalut\s*\.?\s*kaina\s*\d+[.,]\d+\b/gi, ' ')
+        .replace(/\bsutaupete\b\s*:?/gi, ' ')
+        .replace(/\baciu\s+nuo\s*la\s*ida\s+prekei\s*:?/gi, ' ')
+        .replace(/\b(pet|skardine)\s*\(depozitin[ei]s?\)\s*\d+[.,]\d+\s*eur?\s*\d+[.,]\d+/gi, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
 export function normalizeProductName(name: string): string {
     if (!name) return '';
-    return name
+    const ascii = name
         .toLowerCase()
-        .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+        .normalize('NFD').replace(/[̀-ͯ]/g, '')
         .replace(/[.,/]/g, ' ')
         .replace(/[^a-z0-9+\s]/g, '')
         .replace(/\s+/g, ' ')
         .trim();
+    return stripReceiptPrefixes(ascii);
 }
 
 function tokenize(normalizedName: string): string[] {
@@ -36,6 +74,26 @@ function bestTokenMatch(queryToken: string, candidateTokens: string[]): number {
         if (score > best) best = score;
     }
     return best;
+}
+
+/**
+ * Levenshtein similarity on whole normalized strings with inner
+ * whitespace removed. Catches split-word OCR where the tokenizer sees
+ * unusable 3-char fragments but character-wise the texts are nearly
+ * identical. Returns [0, 1].
+ *
+ * Early-bail on big length differences to keep the matcher fast when
+ * the caller ranks thousands of chain candidates per query.
+ */
+function charSimilarity(a: string, b: string): number {
+    const aCompact = a.replace(/\s+/g, '');
+    const bCompact = b.replace(/\s+/g, '');
+    const maxLen = Math.max(aCompact.length, bCompact.length);
+    if (maxLen === 0) return 0;
+    const minLen = Math.min(aCompact.length, bCompact.length);
+    if (minLen / maxLen < 0.4) return 0;
+    const dist = levenshtein(aCompact, bCompact);
+    return 1 - dist / maxLen;
 }
 
 export interface MatchCandidate {
@@ -68,7 +126,7 @@ function sameUnit(a: string | null, b: string | null): boolean {
     return a.toLowerCase().replace(/\./g, '') === b.toLowerCase().replace(/\./g, '');
 }
 
-function scoreMatch(queryTokens: string[], candidateTokens: string[]): number {
+function scoreTokens(queryTokens: string[], candidateTokens: string[]): number {
     if (queryTokens.length === 0 || candidateTokens.length === 0) return 0;
 
     const tokenMatchThreshold = 0.75;  // tightened from 0.7
@@ -86,8 +144,9 @@ function scoreMatch(queryTokens: string[], candidateTokens: string[]): number {
     }
 
     // Require at least half of query tokens to have matched at all.
-    // Prevents coincidental single-token matches on short queries from passing
-    // (e.g. "Gira SMETONIŠKA" matching "...KLEBONIŠKA dešra" via adjective suffix).
+    // Prevents coincidental single-token matches on short queries from
+    // passing (e.g. "Gira SMETONIŠKA" matching "...KLEBONIŠKA dešra"
+    // via adjective suffix).
     if (matchedTokens / queryTokens.length < 0.5) return 0;
 
     return weightSum > 0 ? weightedScoreSum / weightSum : 0;
@@ -112,7 +171,15 @@ export function findBestProductMatches(
         const candTokens = tokenize(normalizedCand);
         if (candTokens.length === 0) continue;
 
-        let confidence = scoreMatch(queryTokens, candTokens);
+        const tokenScore = scoreTokens(queryTokens, candTokens);
+        // Always compute char-similarity — cheap early-bail inside
+        // handles the 99% of candidates that aren't close in length.
+        const charScore = charSimilarity(normalizedQuery, normalizedCand);
+        // max() with a small char-discount: favour clean token
+        // matches over character-level coincidence on the wrong
+        // product, but still rescue OCR-split query tokens when the
+        // char view is decisive (e.g. 0.95+).
+        let confidence = Math.max(tokenScore, charScore * 0.95);
 
         if (ocrAmount !== null && ocrUnit && cand.amount !== null && cand.unit) {
             const amountMatches = Math.abs(ocrAmount - cand.amount) < 0.01;

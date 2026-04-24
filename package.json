@@ -6,7 +6,10 @@
   "scripts": {
     "dev": "nodemon --exec \"node --loader ts-node/esm\" src/index.ts --ignore receipts/",
     "build": "tsc",
-    "start": "node dist/index.js",
+    "start": "node dist/basket-api/src/index.js",
+    "receipts:batch": "node --loader ts-node/esm src/scripts/receiptBatch/importReceiptBatch.ts",
+    "receipts:stage": "node --loader ts-node/esm src/scripts/receiptBatch/stageReceiptsOnDevice.ts",
+    "receipts:cleanup": "node --loader ts-node/esm src/scripts/receiptBatch/cleanupTestReceipts.ts",
     "type": "module",
     "test": "NODE_ENV=test NODE_OPTIONS=--experimental-vm-modules jest"
   },

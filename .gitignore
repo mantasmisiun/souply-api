@@ -3,3 +3,12 @@ dist/
 .env
 .env.test
 schema.sql
+# Generated receipt batch outputs
+receipts/_batch_staging/
+receipts/_logs/
+# Raw receipt images (PII)
+receipts/lidl/
+receipts/maxima/
+receipts/norfa/
+receipts/rimi/
+receipts/iki/

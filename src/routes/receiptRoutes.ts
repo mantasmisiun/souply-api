@@ -13,8 +13,20 @@ import {
     convertPdfToImage,
     reportReceiptLineIssue,
 } from '../controllers/receiptController.js';
+import {
+    logBatchReceipt,
+    finalizeBatchReport,
+} from '../controllers/receiptBatchLogController.js';
 
 const router = Router();
+
+// Dev-only: the phone's Menu → "Kvitų paketinis testas" flow POSTs one
+// receipt at a time to /batch-log and a finalize call at the end.
+// Guarded only by the non-prod nature of the caller (dev build with
+// __DEV__=true renders the Menu tab); no auth middleware because the
+// dev API is LAN-only anyway.
+router.post('/receipts/batch-log', logBatchReceipt);
+router.post('/receipts/batch-log/finalize', finalizeBatchReport);
 
 // Create a new receipt from OCR results — called once on receipt-process screen mount
 router.post('/receipts', createReceiptFromOcr);

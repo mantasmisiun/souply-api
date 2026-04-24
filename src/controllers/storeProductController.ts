@@ -7,7 +7,10 @@ import {
   updateStoreProductImageUrl,
 } from '../models/storeProductModel.js';
 import { getProductsByCategoryWithAmounts, getAllProductsByL2WithAmounts } from '../models/productModel.js';
-import { getStoreProductsByChainWithProductData } from '../models/storeProductModel.js';
+import {
+    getStoreProductsByChainWithProductData,
+    getStoreProductsCrossChainWithProductData,
+} from '../models/storeProductModel.js';
 import { findBestProductMatches } from '../utils/productMatcher.js';
 
 export const addStoreProduct = async (req: Request, res: Response, next: NextFunction) => {
@@ -147,21 +150,35 @@ export const matchStoreProductByName = async (req: Request, res: Response, next:
         const amount = amountRaw !== undefined && amountRaw !== '' ? parseFloat(amountRaw) : null;
 
         const candidates = await getStoreProductsByChainWithProductData(chainId);
-        
+
         console.log('=== MATCH REQUEST ===');
         console.log(`chainId=${chainId}, name="${name}", amount=${amount}, unit=${unit}`);
         console.log(`Candidates fetched: ${candidates.length}`);
-        if (candidates.length > 0) {
-            console.log('First candidate:', JSON.stringify(candidates[0]));
-            const alpro = candidates.filter((c: any) => c.storeProductName.toLowerCase().includes('alpro'));
-            console.log(`ALPRO candidates: ${alpro.length}`);
-            if (alpro.length > 0) console.log('First ALPRO:', JSON.stringify(alpro[0]));
-        }
-        
-        const matches = findBestProductMatches(name, amount, unit, candidates);
-        console.log(`Matches above threshold: ${matches.length}`);
 
-        res.json({ matches });
+        let matches = findBestProductMatches(name, amount, unit, candidates);
+        let crossChain = false;
+        console.log(`Same-chain matches above threshold: ${matches.length}`);
+
+        // Cross-chain fallback. When a chain has no scraped catalog yet
+        // (Norfa has no public product-listing endpoint we could scrape
+        // the way we did Barbora / Rimi / IKI), every match against
+        // chainId returns zero. Fall back to one representative
+        // StoreProduct per Product across the OTHER chains — the
+        // matcher scores those. The resolver later reuses the matched
+        // Product id when creating a new chain-specific StoreProduct,
+        // which is how cross-chain product identity bootstraps itself
+        // organically as receipts get processed.
+        if (matches.length === 0) {
+            const crossCandidates = await getStoreProductsCrossChainWithProductData(chainId);
+            console.log(`Cross-chain candidates fetched: ${crossCandidates.length}`);
+            matches = findBestProductMatches(name, amount, unit, crossCandidates);
+            crossChain = matches.length > 0;
+            console.log(
+                `Cross-chain matches above threshold: ${matches.length}${crossChain ? ' (cross-chain fallback)' : ''}`
+            );
+        }
+
+        res.json({ matches, crossChain });
     } catch (error) {
         next(error);
     }

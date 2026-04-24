@@ -4,11 +4,11 @@
     "moduleResolution": "Node16",
     "target": "ES2022",
     "outDir": "./dist",
-    "rootDir": "./src",
+    "rootDir": "..",
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "types": ["jest", "node"]
   },
-  "include": ["src"]
+  "include": ["src", "../shared"]
 }

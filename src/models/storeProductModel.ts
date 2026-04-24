@@ -174,11 +174,45 @@ export const getStoreProductsByChainWithProductData = async (chainId: number) =>
     const [rows]: any = await pool.query(
         `SELECT sp.id, sp.productId, sp.storeProductName, sp.brandName,
                 sp.isWeighable, sp.amount, sp.unit,
-                sp.imageUrl, p.categoryId
+                sp.imageUrl, p.categoryId, sp.chainId
          FROM StoreProduct sp
          JOIN Product p ON sp.productId = p.id
          WHERE sp.chainId = ?`,
         [chainId]
+    );
+    return rows.map((r: any) => ({
+        ...r,
+        isWeighable: !!r.isWeighable,
+        amount: r.amount !== null ? parseFloat(r.amount) : null,
+    }));
+};
+
+/**
+ * Cross-chain candidate fetch. Returns one representative StoreProduct
+ * per Product (lowest sp.id wins — arbitrary but stable), so the
+ * matcher doesn't score the same Product once per chain it's sold in.
+ * Used by the match endpoint as a fallback when a chain's own
+ * StoreProduct catalog is empty or sparse (e.g. Norfa, which has no
+ * scrapable public catalog). The caller reuses the matched Product
+ * id when creating a new chain-specific StoreProduct row via the
+ * receipt resolver — that's how cross-chain product identity gets
+ * established organically.
+ */
+export const getStoreProductsCrossChainWithProductData = async (excludeChainId: number) => {
+    const [rows]: any = await pool.query(
+        `SELECT sp.id, sp.productId, sp.storeProductName, sp.brandName,
+                sp.isWeighable, sp.amount, sp.unit,
+                sp.imageUrl, p.categoryId, sp.chainId
+         FROM StoreProduct sp
+         JOIN Product p ON sp.productId = p.id
+         JOIN (
+             SELECT productId, MIN(id) AS repId
+             FROM StoreProduct
+             WHERE chainId <> ?
+             GROUP BY productId
+         ) rep ON rep.repId = sp.id
+         WHERE sp.chainId <> ?`,
+        [excludeChainId, excludeChainId]
     );
     return rows.map((r: any) => ({
         ...r,

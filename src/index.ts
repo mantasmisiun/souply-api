@@ -1,5 +1,6 @@
-import './config/env.js'; 
+import './config/env.js';
 import express from 'express';
+import * as path from 'path';
 import pool from './config/db.js';
 import storeRoutes from './routes/storeRoutes.js';
 import productRoutes from './routes/productRoutes.js';
@@ -39,6 +40,21 @@ app.use('/api', swipeVoteRoutes);
 app.use('/api', orphanSwipeRoutes);
 app.use('/api', geocodeRoutes);
 app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+
+// Dev-only: static-serve the PNGs produced by `npm run receipts:stage`
+// so the phone-side batch screen can fetch manifest.json + images over
+// HTTP. We keep the old ADB-push path out — Samsung and other OEMs
+// silently restrict direct reads of /Android/data/<pkg>/ in FUSE even
+// though the files land physically. HTTP avoids the whole dance.
+// Resolve relative to process.cwd() rather than import.meta.url —
+// cwd is `basket-api/` under both `npm run dev` (ts-node) and
+// `npm start` (compiled dist/), whereas import.meta.url lands in
+// different spots under those two setups because of our wider
+// rootDir. Concretely: dev → /…/basket-api/src/index.ts; prod →
+// /…/basket-api/dist/basket-api/src/index.js — different `../`
+// counts. cwd sidesteps that.
+const RECEIPTS_STAGING_DIR = path.resolve(process.cwd(), 'receipts/_batch_staging');
+app.use('/receipts-batch', express.static(RECEIPTS_STAGING_DIR, { fallthrough: false }));
 
 app.get('/health', async (req, res) => {
     try {
