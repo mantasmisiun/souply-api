@@ -29,8 +29,15 @@ type ChainName = 'maxima' | 'rimi' | 'iki' | 'norfa' | 'lidl';
 const SUPPORTED: ChainName[] = ['maxima', 'rimi', 'iki', 'norfa', 'lidl'];
 
 const REPO_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../../../..');
-const RECEIPTS_ROOT = path.join(REPO_ROOT, 'basket-api', 'receipts');
-const STAGING_ROOT = path.join(RECEIPTS_ROOT, '_batch_staging');
+// Source PDFs live in the cross-stack module dir under
+// shared/receipts/<chain>/<name>.pdf, alongside their hand-annotated
+// .truth.json siblings. This is where the parser test fixtures live.
+const RECEIPTS_ROOT = path.join(REPO_ROOT, 'shared', 'receipts');
+// Staging output (PNGs + manifest) stays inside basket-api so the
+// existing /receipts-batch static route in src/index.ts keeps
+// serving it without configuration changes. _batch_staging is
+// regeneratable disposable output — no need to live in /shared.
+const STAGING_ROOT = path.join(REPO_ROOT, 'basket-api', 'receipts', '_batch_staging');
 
 interface CliArgs {
     chains: ChainName[];

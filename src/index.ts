@@ -17,6 +17,7 @@ import receiptRoutes from './routes/receiptRoutes.js';
 import swipeVoteRoutes from './routes/swipeVoteRoutes.js';
 import orphanSwipeRoutes from './routes/orphanSwipeRoutes.js';
 import geocodeRoutes from './routes/geocodeRoutes.js';
+import parserTestRoutes from './routes/parserTestRoutes.js';
 import swaggerUi from 'swagger-ui-express';
 import swaggerSpec from './config/swagger.js';
 
@@ -39,6 +40,7 @@ app.use('/api', receiptRoutes);
 app.use('/api', swipeVoteRoutes);
 app.use('/api', orphanSwipeRoutes);
 app.use('/api', geocodeRoutes);
+app.use('/api', parserTestRoutes);
 app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
 // Dev-only: static-serve the PNGs produced by `npm run receipts:stage`
@@ -55,6 +57,15 @@ app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 // counts. cwd sidesteps that.
 const RECEIPTS_STAGING_DIR = path.resolve(process.cwd(), 'receipts/_batch_staging');
 app.use('/receipts-batch', express.static(RECEIPTS_STAGING_DIR, { fallthrough: false }));
+
+// Dev-only: static-serve hand-annotated truth JSONs from
+// /home/.../Projects/shared/receipts/<chain>/<basename>.truth.json.
+// The phone's parser-test screen fetches these per receipt to score
+// V1 vs V2 against ground truth. Same cwd-anchored path strategy as
+// RECEIPTS_STAGING_DIR above — ../shared resolves to the repo's
+// cross-stack module dir from basket-api/.
+const TRUTH_DIR = path.resolve(process.cwd(), '../shared/receipts');
+app.use('/receipts-truth', express.static(TRUTH_DIR, { fallthrough: false }));
 
 app.get('/health', async (req, res) => {
     try {
