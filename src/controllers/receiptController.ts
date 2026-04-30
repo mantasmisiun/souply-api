@@ -235,7 +235,7 @@ export const getReceiptUploadUrl = async (req: Request, res: Response, next: Nex
 };
 
 /**
- * Convert a PDF (base64) to one JPEG per page (each base64) — used by the
+ * Convert a PDF (base64) to one PNG per page (each base64) — used by the
  * mobile app when the user uploads a downloaded Rimi/Maxima receipt PDF.
  * The client OCRs each page separately and merges the line lists.
  *
@@ -243,8 +243,13 @@ export const getReceiptUploadUrl = async (req: Request, res: Response, next: Nex
  * drops sharply on very large images, and Android's Image decoder may
  * downsample-scramble giant stitched receipts. Per-page avoids both.
  *
+ * Rasterisation goes through `pdftoppm` (poppler) — same tool the dev
+ * batch staging script uses. Keeping rasterizer + DPI identical means
+ * a PDF that parses correctly in Kvitų paketinis testas parses the
+ * same way through this endpoint.
+ *
  * Body:     { pdfBase64: string }
- * Response: { images: string[] (base64 JPEGs, one per page), mimeType: 'image/jpeg' }
+ * Response: { images: string[] (base64 PNGs, one per page), mimeType: 'image/png' }
  */
 export const convertPdfToImage = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -258,14 +263,14 @@ export const convertPdfToImage = async (req: Request, res: Response, next: NextF
             res.status(400).json({ error: 'pdfBase64 decoded to an empty buffer' });
             return;
         }
-        const { convertPdfBufferToJpegPages } = await import('../services/pdfService.js');
-        const pages = await convertPdfBufferToJpegPages(pdfBuffer);
+        const { convertPdfBufferToImagePages } = await import('../services/pdfService.js');
+        const pages = await convertPdfBufferToImagePages(pdfBuffer);
         res.json({
             images: pages.map((b) => b.toString('base64')),
-            mimeType: 'image/jpeg',
+            mimeType: 'image/png',
         });
     } catch (error: any) {
-        console.error('PDF → JPEG conversion failed:', error?.message ?? error);
+        console.error('PDF → PNG conversion failed:', error?.message ?? error);
         next(error);
     }
 };

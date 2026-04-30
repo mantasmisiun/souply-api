@@ -95,12 +95,13 @@ export const persistReceiptPrices = async (
             if ('receiptNo' in parsedData) {
                 parsedData.receiptNo = normalizedReceiptNo;
             }
-            if ('date' in parsedData) {
-                parsedData.date = normalizedReceiptDate;
-            }
             if (parsedData.footer && typeof parsedData.footer === 'object') {
                 parsedData.footer.receiptNo = normalizedReceiptNo;
-                parsedData.footer.date = normalizedReceiptDate;
+                // Don't overwrite parsedData.footer.date with the combined
+                // SQL datetime — the canonical timestamp lives in the
+                // Receipt.receiptDate column. The mobile renderer joins
+                // {footer.date} {footer.time}, so writing "YYYY-MM-DD HH:MM:SS"
+                // here caused the time to appear twice after reopen.
             }
         }
 
