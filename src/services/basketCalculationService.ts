@@ -199,29 +199,21 @@ async function resolveItemAtStore(
     // the same Product's price from other chains' nearest-10 stores and
     // feed the basket a plausible-enough number rather than leaving a
     // hole. The UI still flags this with isApproximated+isCrossChainAverage.
-    const avg = await approximateCrossChain(productId, userLat, userLng);
-    if (avg) {
-        return {
-            productId,
-            productName,
-            quantity: userQuantity,
-            matchMode,
-            storeProductName: null,
-            storeProductAmount: null,
-            storeProductUnit: null,
-            packsNeeded: null,
-            actualAmount: null,
-            price: Math.round(avg.pricePerKg * 100) / 100,
-            promoPrice: null,
-            effectivePrice: Math.round(avg.pricePerKg * 100) / 100,
-            totalPrice: Math.round(avg.pricePerKg * Math.max(userQuantity, 1) * 100) / 100,
-            isWeighable: false,
-            isMissing: false,
-            isFallback: false,
+    const synthetic = await approximateCrossChain(productId, userLat, userLng);
+    if (synthetic) {
+        // Run the synthetic SpRow through the same priceItem() path so the
+        // pack-vs-weighable math stays consistent with Tiers 1-3. Then
+        // overwrite the SP-specific fields with nulls — Tier 4 has no
+        // concrete SP at this store.
+        const priced = priceItem(productId, userQuantity, productName, matchMode, synthetic, {
             isSubstituted: false,
-            resolvedProductId: null,
-            storeProductId: null,
             isCrossChainAverage: true,
+        });
+        return {
+            ...priced,
+            storeProductName: null,
+            storeProductId: null,
+            resolvedProductId: null,
         };
     }
 
@@ -376,17 +368,28 @@ async function fetchNearestNameSubstitute(
 /**
  * Cross-chain average fallback. Aggregates the Product's latest prices
  * from every SP at the user's 10 nearest stores, regardless of chain,
- * and returns a per-kg average. Matches the historic approximation
- * behaviour but scoped to nearby coverage rather than all stores.
+ * and returns a synthetic SpRow with averaged effectivePrice + a
+ * representative (amount, unit, isWeighable) signature. The caller
+ * runs this through priceItem() so pack-vs-weighable math stays
+ * consistent with Tiers 1-3.
+ *
+ * Pack size handling: if SPs across stores have different pack sizes
+ * (rare — e.g. 80g at Maxima vs 100g at Rimi), the rows are bucketed
+ * by (amount, unit, isWeighable) and the largest bucket wins. This
+ * avoids the prior bug where averaging mixed pack sizes via per-kg
+ * collapsed back into nonsense when multiplied by a pack count.
  */
 async function approximateCrossChain(
     productId: number,
     userLat: number,
     userLng: number
-): Promise<{ pricePerKg: number } | null> {
+): Promise<(SpRow & { effectivePrice: number }) | null> {
     const [rows]: any = await pool.query(
         `SELECT sp.amount, sp.unit, sp.isWeighable,
                 COALESCE(p.promoPrice, p.price) AS effectivePrice,
+                p.price AS rawPrice,
+                p.promoPrice,
+                p.isFallback,
                 p.storeId
            FROM Price p
            JOIN StoreProduct sp ON p.storeProductId = sp.id
@@ -410,22 +413,52 @@ async function approximateCrossChain(
     );
     if (!rows.length) return null;
 
-    const perStore = new Map<number, number>();
-    for (const row of rows as any[]) {
-        const price = parseFloat(row.effectivePrice);
-        const amount = row.amount ? parseFloat(row.amount) : 1;
-        const unit = row.unit;
-        let pricePerKg: number;
-        if (row.isWeighable) pricePerKg = price;
-        else if (unit === 'g') pricePerKg = (price / amount) * 1000;
-        else if (unit === 'kg') pricePerKg = price / amount;
-        else pricePerKg = price;
-        const current = perStore.get(row.storeId);
-        if (current === undefined || pricePerKg < current) perStore.set(row.storeId, pricePerKg);
+    interface Bucket {
+        amount: number;
+        unit: string | null;
+        isWeighable: boolean;
+        // storeId → cheapest per-pack effective price seen at that store
+        prices: Map<number, number>;
     }
+    const buckets = new Map<string, Bucket>();
+    for (const row of rows as any[]) {
+        const amount = row.amount ? parseFloat(row.amount) : 1;
+        const unit = row.unit ?? null;
+        const isWeighable = !!row.isWeighable;
+        const key = `${amount}|${unit ?? ''}|${isWeighable ? 1 : 0}`;
+        let bucket = buckets.get(key);
+        if (!bucket) {
+            bucket = { amount, unit, isWeighable, prices: new Map() };
+            buckets.set(key, bucket);
+        }
+        const eff = parseFloat(row.effectivePrice);
+        const current = bucket.prices.get(row.storeId);
+        if (current === undefined || eff < current) bucket.prices.set(row.storeId, eff);
+    }
+
+    // Largest bucket wins (most common pack size across nearby stores).
+    let chosen: Bucket | null = null;
+    for (const b of buckets.values()) {
+        if (!chosen || b.prices.size > chosen.prices.size) chosen = b;
+    }
+    if (!chosen || chosen.prices.size === 0) return null;
+
     let total = 0;
-    for (const v of perStore.values()) total += v;
-    return { pricePerKg: total / perStore.size };
+    for (const v of chosen.prices.values()) total += v;
+    const avgEffective = total / chosen.prices.size;
+
+    return {
+        id: 0,
+        productId,
+        storeProductName: '',
+        isWeighable: chosen.isWeighable,
+        amount: chosen.amount,
+        unit: chosen.unit,
+        price: String(avgEffective),
+        promoPrice: null,
+        isFallback: false,
+        effectivePrice: avgEffective,
+    };
 }
 
 function pickCheapest(rows: SpRow[]): (SpRow & { effectivePrice: number }) | null {
@@ -460,22 +493,27 @@ function priceItem(
     const spUnit = chosen.unit;
     const isWeighable = chosen.isWeighable === 1 || chosen.isWeighable === true;
 
-    // Normalize userQuantity to match the SP's unit. Mirror of previous
-    // heuristic: if user said "2" and SP is in grams, they meant 2 kg; if
-    // user said "1500" and SP is in kg, they meant 1500 g = 1.5 kg.
-    let normalizedQuantity = userQuantity;
-    if (spUnit === 'g' && userQuantity < 10) normalizedQuantity = userQuantity * 1000;
-    else if (spUnit === 'kg' && userQuantity > 10) normalizedQuantity = userQuantity / 1000;
-
     let packsNeeded: number;
     let actualAmount: number;
     let totalPrice: number;
     if (isWeighable) {
+        // Weighable: userQuantity is a weight typed by the user.
+        // Normalize to match the SP's unit. If user said "2" for an SP
+        // priced per gram, they meant 2 kg = 2000 g; if they said "1500"
+        // for an SP in kg, they meant 1500 g = 1.5 kg.
+        let normalizedQuantity = userQuantity;
+        if (spUnit === 'g' && userQuantity < 10) normalizedQuantity = userQuantity * 1000;
+        else if (spUnit === 'kg' && userQuantity > 10) normalizedQuantity = userQuantity / 1000;
+
         packsNeeded = 1;
         actualAmount = normalizedQuantity;
         totalPrice = normalizedQuantity * (effectivePrice / Math.max(spAmount, 1));
     } else {
-        packsNeeded = Math.ceil(normalizedQuantity / spAmount);
+        // Non-weighable: userQuantity is a pack count from the basket UI's
+        // +/- buttons, NOT a weight. Charge for each pack at the shelf
+        // price; round any fractional input up to the next whole pack
+        // (you can't buy half an ice cream).
+        packsNeeded = Math.ceil(userQuantity);
         actualAmount = packsNeeded * spAmount;
         totalPrice = packsNeeded * effectivePrice;
     }

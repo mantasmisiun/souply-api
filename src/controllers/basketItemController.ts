@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { createBasketItem, getBasketItemById, getBasketItemsByBasketId, updateBasketItemQuantity, deleteBasketItem, getBasketItemByBasketAndProduct, convertBasketItemsMode } from '../models/basketItemModel.js';
 import { getProductById } from '../models/productModel.js';
-import { getBasketById } from '../models/basketModel.js';
+import { getBasketById, updateBasketUpdatedAt } from '../models/basketModel.js';
 
 export const addBasketItem = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -40,6 +40,7 @@ export const addBasketItem = async (req: Request, res: Response, next: NextFunct
         }
 
         const id = await createBasketItem(basketId, productId, quantity, resolvedMatchMode);
+        await updateBasketUpdatedAt(basketId);
         res.status(201).json({ id, basketId, productId, quantity, matchMode: resolvedMatchMode });
     } catch (error) {
         next(error);
@@ -88,6 +89,7 @@ export const updateBasketItem = async (req: Request, res: Response, next: NextFu
         }
 
         await updateBasketItemQuantity(id, quantity);
+        await updateBasketUpdatedAt(basketItem.basketId);
         res.json({ id, quantity });
     } catch (error) {
         next(error);
@@ -101,7 +103,10 @@ export const removeBasketItem = async (req: Request, res: Response, next: NextFu
             res.status(400).json({ error: 'Invalid ID' });
             return;
         }
+        // Look up the row before deleting so we know which basket to bump.
+        const basketItem = await getBasketItemById(id);
         await deleteBasketItem(id);
+        if (basketItem) await updateBasketUpdatedAt(basketItem.basketId);
         res.status(204).send();
     } catch (error) {
         next(error);
@@ -141,6 +146,7 @@ export const convertBasketMode = async (req: Request, res: Response, next: NextF
         }
 
         const result = await convertBasketItemsMode(basketId, target);
+        await updateBasketUpdatedAt(basketId);
         res.json({ ok: true, mode: target, ...result });
     } catch (error) {
         next(error);

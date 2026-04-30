@@ -35,9 +35,7 @@ export const getBasketsByUserId = async (userId: string) => {
          LEFT JOIN BasketItem ON Basket.id = BasketItem.basketId
          WHERE Basket.userId = ?
          GROUP BY Basket.id
-         ORDER BY 
-             FIELD(status, 'draft', 'compared', 'completed'),
-             updatedAt DESC`,
+         ORDER BY updatedAt DESC`,
         [userId]
     );
     return rows;
