@@ -20,6 +20,14 @@ interface ParsedReceiptInput {
     storeId: number | null;
     receiptNo: string | null;
     date: string | null;
+    /**
+     * Receipt time (`HH:MM:SS` or `HH:MM`) — captured separately
+     * from `date` because MLKit often splits the timestamp across
+     * lines. When present, gets combined with `date` to produce a
+     * `YYYY-MM-DD HH:MM:SS` storage value; otherwise we pad to
+     * midnight.
+     */
+    time?: string | null;
     products: ParsedProductInput[];
 }
 
@@ -81,7 +89,7 @@ export const persistReceiptPrices = async (
 
         const footerRawText = parsedData?.footer?.rawText ?? null;
         const normalizedReceiptNo = normalizeReceiptNo(input.receiptNo, footerRawText);
-        const normalizedReceiptDate = normalizeReceiptDateForStorage(input.date);
+        const normalizedReceiptDate = normalizeReceiptDateForStorage(input.date, input.time);
 
         if (parsedData && typeof parsedData === 'object') {
             if ('receiptNo' in parsedData) {

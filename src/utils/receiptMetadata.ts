@@ -57,12 +57,40 @@ export const normalizeReceiptNo = (
     return null;
 };
 
-export const normalizeReceiptDateForStorage = (receiptDate: string | null | undefined): string => {
+/**
+ * Build a SQL DATETIME from the parsed-receipt fields.
+ *
+ * `receiptDate` may be:
+ *   - a full ISO datetime ("YYYY-MM-DD HH:MM:SS" or with `T`),
+ *   - a date only ("YYYY-MM-DD"),
+ *   - or any string that `new Date()` can parse.
+ *
+ * `receiptTime` is consulted only when `receiptDate` is a date-only
+ * value — the parser captures date and time separately on receipts
+ * where MLKit splits the row, and we want to combine them so the
+ * stored timestamp matches when the shopping happened, not midnight
+ * of that day. Time may be `HH:MM` or `HH:MM:SS`.
+ *
+ * If neither produces a usable datetime, falls back to the current
+ * time so the column stays NOT NULL.
+ */
+export const normalizeReceiptDateForStorage = (
+    receiptDate: string | null | undefined,
+    receiptTime?: string | null | undefined,
+): string => {
     if (typeof receiptDate === 'string') {
         const value = receiptDate.trim();
         if (value) {
             const dateOnlyMatch = value.match(DATE_ONLY_RE);
             if (dateOnlyMatch) {
+                const time = typeof receiptTime === 'string' ? receiptTime.trim() : '';
+                if (time) {
+                    const hhmmss = time.match(/^([01]\d|2[0-3]):([0-5]\d)(?::([0-5]\d))?$/);
+                    if (hhmmss) {
+                        const ss = hhmmss[3] ?? '00';
+                        return `${value} ${hhmmss[1]}:${hhmmss[2]}:${ss}`;
+                    }
+                }
                 return `${value} 00:00:00`;
             }
 

@@ -142,6 +142,7 @@ export const createReceiptFromOcr = async (req: Request, res: Response, next: Ne
                 storeId,
                 receiptNo: parsedData.footer?.receiptNo ?? null,
                 date: parsedData.footer?.date ?? null,
+                time: parsedData.footer?.time ?? null,
                 products: (parsedData.products || []).map((p: any) => ({
                     storeProductId: p.storeProductId ?? null,
                     matchConfirmed: !!p.matchConfirmed,
@@ -195,6 +196,7 @@ export const updateReceiptFromOcr = async (req: Request, res: Response, next: Ne
             storeId: parsedData.header?.storeId ?? null,
             receiptNo: parsedData.footer?.receiptNo ?? null,
             date: parsedData.footer?.date ?? null,
+            time: parsedData.footer?.time ?? null,
             products: (parsedData.products || []).map((p: any) => ({
                 storeProductId: p.storeProductId ?? null,
                 matchConfirmed: !!p.matchConfirmed,
