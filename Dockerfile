@@ -36,10 +36,12 @@ RUN npm run build
 FROM node:20-alpine AS runtime
 WORKDIR /app
 
-# pdf2pic shells out to GhostScript + GraphicsMagick for PDF→image
-# conversion (the /api/receipts/pdf-to-image endpoint). Alpine
-# packages both.
-RUN apk add --no-cache ghostscript graphicsmagick tini
+# pdfService shells out to `pdftoppm` (poppler-utils) for PDF→PNG
+# conversion. Same rasterizer the dev-time `npm run receipts:stage`
+# script uses, so output matches dev parity. Earlier we shipped
+# GhostScript + GraphicsMagick for the old pdf2pic path; both are
+# unused now and dropped from the image.
+RUN apk add --no-cache poppler-utils tini
 
 # Prod deps only.
 COPY basket-api/package*.json ./
