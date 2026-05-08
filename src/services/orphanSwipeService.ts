@@ -28,7 +28,9 @@ import {
     type SwipeVote,
     type CastSwipeVoteResult,
 } from './swipeVoteService.js';
+import { getProductIdForStoreProduct } from './storeProductMergeService.js';
 import { getCandidatePair } from '../models/orphanSwipeCandidateModel.js';
+import { awardSwipePoint } from './userPointsService.js';
 
 export interface CastOrphanSwipeVoteInput {
     userId: string;
@@ -63,6 +65,8 @@ export const castOrphanSwipeVote = async (
     try {
         await connection.beginTransaction();
 
+        await awardSwipePoint(input.userId, connection);
+
         const { previousVote } = await upsertMatchVote(
             input.userId,
             pair.spIdA,
@@ -80,16 +84,23 @@ export const castOrphanSwipeVote = async (
             await applyAggregateDelta(pair.spIdA, pair.spIdB, input.vote, +1, connection);
         }
 
+        const [productIdA, productIdB] = await Promise.all([
+            getProductIdForStoreProduct(pair.spIdA, connection),
+            getProductIdForStoreProduct(pair.spIdB, connection),
+        ]);
+
         await applyBaseProductLinkForVote(
             pair.spIdA,
             pair.spIdB,
             previousVote,
             input.vote,
-            connection
+            connection,
+            productIdA,
+            productIdB,
         );
 
         const agg = await getMatchAggregate(pair.spIdA, pair.spIdB, connection);
-        const merge = await reevaluateMerge(pair.spIdA, pair.spIdB, agg, connection);
+        const merge = await reevaluateMerge(pair.spIdA, pair.spIdB, agg, connection, productIdA, productIdB);
 
         await connection.commit();
         return { ok: true, effect: 'vote-recorded', merge };

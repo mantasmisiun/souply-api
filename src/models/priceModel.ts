@@ -205,3 +205,73 @@ export const getLatestPriceForReceiptItem = async (
     );
     return rows[0] || null;
 };
+
+/**
+ * Batch version of getBaselinePriceAverage — single query for all items.
+ * Returns a Map from storeProductId to baseline average (or null if < 2 data points).
+ */
+export const batchGetBaselinePriceAverages = async (
+    storeProductIds: number[],
+    storeId: number,
+    windowSize: number = 5,
+    conn?: Connection
+): Promise<Map<number, number | null>> => {
+    const db = conn || pool;
+    const result = new Map<number, number | null>();
+    if (storeProductIds.length === 0) return result;
+
+    const [rows]: any = await db.query(
+        `SELECT storeProductId, price
+           FROM (
+               SELECT storeProductId, price,
+                      ROW_NUMBER() OVER (PARTITION BY storeProductId ORDER BY date DESC) AS rn
+                 FROM Price
+                WHERE storeProductId IN (?) AND storeId = ? AND priceVerified = 1 AND isFallback = 0
+           ) ranked
+          WHERE rn <= ?`,
+        [storeProductIds, storeId, windowSize]
+    );
+
+    const grouped = new Map<number, number[]>();
+    for (const row of rows) {
+        const spId = Number(row.storeProductId);
+        if (!grouped.has(spId)) grouped.set(spId, []);
+        grouped.get(spId)!.push(parseFloat(row.price));
+    }
+    for (const [spId, prices] of grouped) {
+        result.set(spId, prices.length >= 2 ? prices.reduce((a, b) => a + b, 0) / prices.length : null);
+    }
+    return result;
+};
+
+/**
+ * Batch version of getLatestPriceForReceiptItem — single query for all items.
+ * Returns a Map from storeProductId to {price, promoPrice} (or null if no row).
+ */
+export const batchGetLatestPricesForReceiptItems = async (
+    storeProductIds: number[],
+    storeId: number,
+    receiptId: number,
+    conn?: Connection
+): Promise<Map<number, { price: string; promoPrice: string | null } | null>> => {
+    const db = conn || pool;
+    const result = new Map<number, { price: string; promoPrice: string | null } | null>();
+    if (storeProductIds.length === 0) return result;
+
+    const [rows]: any = await db.query(
+        `SELECT storeProductId, price, promoPrice
+           FROM (
+               SELECT storeProductId, price, promoPrice,
+                      ROW_NUMBER() OVER (PARTITION BY storeProductId ORDER BY date DESC) AS rn
+                 FROM Price
+                WHERE storeProductId IN (?) AND storeId = ? AND receiptId = ?
+           ) ranked
+          WHERE rn = 1`,
+        [storeProductIds, storeId, receiptId]
+    );
+
+    for (const row of rows) {
+        result.set(Number(row.storeProductId), { price: row.price, promoPrice: row.promoPrice ?? null });
+    }
+    return result;
+};

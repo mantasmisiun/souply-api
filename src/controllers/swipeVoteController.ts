@@ -4,6 +4,7 @@ import {
     SwipeVote,
     undoSwipeVote,
 } from '../services/swipeVoteService.js';
+import { recordMandatorySwipe, shouldShowBurstWarning } from '../services/swipeSessionService.js';
 
 const VALID_VOTES: SwipeVote[] = ['identical', 'similar', 'different'];
 
@@ -16,6 +17,7 @@ export const submitSwipeVote = async (req: Request, res: Response, next: NextFun
             candidateStoreProductId,
             vote,
             dwellMs,
+            isMandatory,
         } = req.body ?? {};
 
         if (!userId || typeof userId !== 'string') {
@@ -47,9 +49,18 @@ export const submitSwipeVote = async (req: Request, res: Response, next: NextFun
             candidateStoreProductId: Number(candidateStoreProductId),
             vote,
             dwellMs: dwell,
+            isMandatory: Boolean(isMandatory),
         });
 
-        res.json(result);
+        let burstWarning = false;
+        if (isMandatory && result.ok && result.effect !== 'dropped-rate-limit') {
+            await recordMandatorySwipe(Number(receiptId), dwell);
+            if (result.isBurst) {
+                burstWarning = await shouldShowBurstWarning(String(userId));
+            }
+        }
+
+        res.json({ ...result, burstWarning });
     } catch (error) {
         next(error);
     }

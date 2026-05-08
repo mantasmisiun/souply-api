@@ -1,17 +1,20 @@
 import {
     createPrice,
-    getBaselinePriceAverage,
-    getLatestPriceForReceiptItem,
+    batchGetBaselinePriceAverages,
+    batchGetLatestPricesForReceiptItems,
 } from '../models/priceModel.js';
-import { updateReceiptDetails, updateReceiptStore } from '../models/receiptModel.js';
+import { updateReceiptDetails, updateReceiptStore, updateReceiptSavedAmount } from '../models/receiptModel.js';
+import { computeReceiptSavings } from './statsService.js';
 import {
     replaceSwipeCandidates,
     type SwipeCandidate,
 } from '../models/receiptSwipeCandidateModel.js';
 import { resolveReceiptLineStoreProduct } from './receiptLineResolver.js';
-import { propagateFallbackPrices } from './priceService.js';
+import { propagateAllFallbackPrices } from './priceService.js';
 import pool from '../config/db.js';
 import { normalizeReceiptDateForStorage, normalizeReceiptNo } from '../utils/receiptMetadata.js';
+import { awardReceiptPoints } from './userPointsService.js';
+import { initMandatorySwipeSession } from './swipeSessionService.js';
 
 const MAX_CANDIDATES_PER_LINE = 5;
 
@@ -49,6 +52,7 @@ export interface SaveResult {
     skippedNoMatch: number;
     skippedClearance: number;
     skippedDuplicate: number;
+    mandatorySwipesRequired: number;
 }
 
 /**
@@ -62,12 +66,13 @@ export interface SaveResult {
  */
 export const persistReceiptPrices = async (
     receiptId: number,
-    _userId: string,
+    userId: string,
     parsedData: any,
     input: ParsedReceiptInput
 ): Promise<SaveResult> => {
     const result: SaveResult = {
         saved: 0,
+        mandatorySwipesRequired: 0,
         skippedNoMatch: 0,
         skippedClearance: 0,
         skippedDuplicate: 0,
@@ -188,7 +193,14 @@ export const persistReceiptPrices = async (
                     ? Number(line.storeProductId)
                     : null;
                 const verified = !!line?.priceVerified;
-                return alt.slice(0, MAX_CANDIDATES_PER_LINE).map((am: any): SwipeCandidate => ({
+                const seenSpIds = new Set<number>();
+                const deduped = alt.filter((am: any) => {
+                    const spId = Number(am.storeProductId);
+                    if (!Number.isFinite(spId) || spId <= 0 || seenSpIds.has(spId)) return false;
+                    seenSpIds.add(spId);
+                    return true;
+                });
+                return deduped.slice(0, MAX_CANDIDATES_PER_LINE).map((am: any): SwipeCandidate => ({
                     storeProductId: Number(am.storeProductId),
                     matchScore: Number.isFinite(am.confidence) ? Number(am.confidence) : 0,
                     autoMatched:
@@ -199,6 +211,15 @@ export const persistReceiptPrices = async (
             }
         );
         await replaceSwipeCandidates(receiptId, candidatesByLine, connection);
+
+        // Count non-auto-matched candidates across all lines to set mandatory swipe count.
+        const nonAutoMatchedPairs = candidatesByLine.reduce((sum, lineCandidates) =>
+            sum + lineCandidates.filter(c => !c.autoMatched).length, 0
+        );
+        result.mandatorySwipesRequired = await initMandatorySwipeSession(receiptId, nonAutoMatchedPairs, connection);
+
+        // Award 1 point per item on the receipt.
+        await awardReceiptPoints(userId, input.products.length, connection);
 
         // No resolved store → can't attach prices, but parsedData + candidates were saved.
         if (!input.storeId) {
@@ -216,6 +237,17 @@ export const persistReceiptPrices = async (
                 ? parsedReceiptDate
                 : new Date();
 
+        // Pre-fetch baselines and duplicate-check data in two queries
+        // instead of 2×N individual calls inside the loop.
+        const eligibleSpIds = input.products
+            .filter(p => p.matchConfirmed && p.storeProductId && p.price > 0)
+            .map(p => p.storeProductId as number);
+
+        const [baselineMap, latestMap] = await Promise.all([
+            batchGetBaselinePriceAverages(eligibleSpIds, input.storeId, BASELINE_WINDOW, connection),
+            batchGetLatestPricesForReceiptItems(eligibleSpIds, input.storeId, receiptId, connection),
+        ]);
+
         for (const item of input.products) {
             if (!item.matchConfirmed || !item.storeProductId) {
                 result.skippedNoMatch++;
@@ -226,23 +258,13 @@ export const persistReceiptPrices = async (
                 continue;
             }
 
-            const baseline = await getBaselinePriceAverage(
-                item.storeProductId,
-                input.storeId,
-                BASELINE_WINDOW,
-                connection
-            );
+            const baseline = baselineMap.get(item.storeProductId) ?? null;
             if (baseline !== null && item.price < baseline * CLEARANCE_RATIO) {
                 result.skippedClearance++;
                 continue;
             }
 
-            const latest = await getLatestPriceForReceiptItem(
-                item.storeProductId,
-                input.storeId,
-                receiptId,
-                connection
-            );
+            const latest = latestMap.get(item.storeProductId) ?? null;
             if (latest) {
                 const samePrice = Math.abs(parseFloat(latest.price) - item.price) < 0.001;
                 const latestPromo = latest.promoPrice === null ? null : parseFloat(latest.promoPrice);
@@ -291,6 +313,18 @@ export const persistReceiptPrices = async (
             }
         }
 
+        // Compute savings: delta between receipt prices and cross-chain market average.
+        // Only counts items that were successfully matched to a StoreProduct.
+        const matchedItems = input.products
+            .filter(p => p.matchConfirmed && p.storeProductId && p.price > 0)
+            .map(p => ({
+                storeProductId: p.storeProductId!,
+                price: p.price,
+                quantity: p.quantity || 1,
+            }));
+        const savedAmount = await computeReceiptSavings(matchedItems, connection);
+        await updateReceiptSavedAmount(receiptId, savedAmount, connection);
+
         await connection.commit();
     } catch (error) {
         await connection.rollback();
@@ -300,28 +334,14 @@ export const persistReceiptPrices = async (
     }
 
     // Fallback propagation runs fire-and-forget AFTER the HTTP response
-    // would have returned. For a 20-product Maxima receipt, propagation is
-    // ~1,000 INSERTs across the whole chain — previously this blocked the
-    // mobile client for ~10–30 s before it saw the receipt saved. Detaching
-    // it means the UI unlocks in under a second; propagation races to
-    // completion in the background. Errors still log but never surface.
-    void (async () => {
-        for (const p of toPropagate) {
-            try {
-                await propagateFallbackPrices(
-                    p.storeProductId,
-                    p.storeId,
-                    p.chainId,
-                    p.price,
-                    p.promoPrice,
-                    p.date,
-                    receiptId
-                );
-            } catch (e) {
-                console.warn(`Fallback propagation failed for sp=${p.storeProductId}:`, e);
-            }
-        }
-    })();
+    // would have returned. Previously ran one propagateFallbackPrices() per
+    // product in parallel, producing N×M individual INSERTs that exhausted
+    // the DB pool and blocked the swipe-queue query for 10–30 s.
+    // Now runs as a single batch (3 queries total regardless of product count).
+    if (toPropagate.length > 0) {
+        void propagateAllFallbackPrices(toPropagate, receiptId)
+            .catch(e => console.warn('Fallback propagation failed:', e));
+    }
 
     return result;
 };

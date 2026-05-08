@@ -19,3 +19,13 @@ export const getUserById = async (id: string) => {
 export const updateLastActive = async (id: string) => {
     await pool.query('UPDATE User SET lastActiveAt = NOW() WHERE id = ?', [id]);
 };
+
+export const addPoints = async (id: string, delta: number, conn?: any) => {
+    const db = conn ?? pool;
+    await db.query('UPDATE User SET points = points + ? WHERE id = ?', [delta, id]);
+};
+
+export const getPoints = async (id: string): Promise<number> => {
+    const [rows]: any = await pool.query('SELECT points FROM User WHERE id = ?', [id]);
+    return rows[0]?.points ?? 0;
+};

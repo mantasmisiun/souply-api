@@ -8,7 +8,8 @@ const pool = mysql.createPool({
     database: process.env.DB_NAME,
     waitForConnections: true,
     connectionLimit: 10,
-    timezone: process.env.DB_TIMEZONE || '+02:00'
+    timezone: process.env.DB_TIMEZONE || '+02:00',
+    ssl: process.env.DB_SSL_REJECT_UNAUTHORIZED === 'false' ? { rejectUnauthorized: false } : undefined,
 });
 
 export default pool;

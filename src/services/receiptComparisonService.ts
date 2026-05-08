@@ -34,6 +34,14 @@ interface ComparisonChainResult {
     chainLogoUrl: string | null;
 }
 
+type SpOption = {
+    isWeighable: boolean;
+    amount: number | null;
+    unit: string | null;
+    price: number;
+    promoPrice: number | null;
+};
+
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
 const normalizeUnit = (unit: string | null | undefined): string | null => {
@@ -56,71 +64,77 @@ const normalizeQuantityToStoreUnit = (
     return quantity;
 };
 
-const getLatestVerifiedOptions = async (
-    productId: number,
-    storeId: number,
-    chainId: number
-) => {
+/**
+ * Batch-fetch the latest verified price for every (storeId, productId) pair.
+ * Returns Map<storeId, Map<productId, SpOption[]>> — one entry per SP that has
+ * a verified price at that store. A productId may map to multiple SP options
+ * when the chain carries the same product in different sizes.
+ *
+ * Uses a window function (ROW_NUMBER) so the DB evaluates one scan of the
+ * Price index instead of one correlated subquery per (storeProductId, storeId).
+ */
+const batchGetLatestVerifiedPricesForStores = async (
+    productIds: number[],
+    storeIds: number[],
+): Promise<Map<number, Map<number, SpOption[]>>> => {
+    if (!productIds.length || !storeIds.length) return new Map();
     const [rows]: any = await pool.query(
-        `SELECT sp.id, sp.storeProductName, sp.isWeighable, sp.amount, sp.unit,
-                p.price, p.promoPrice
+        `SELECT sp.productId, sp.isWeighable, sp.amount, sp.unit,
+                lp.storeId, lp.price, lp.promoPrice
          FROM StoreProduct sp
          JOIN (
-             SELECT p1.storeProductId, p1.price, p1.promoPrice
-             FROM Price p1
-             WHERE p1.storeId = ?
-               AND p1.priceVerified = 1
-               AND p1.id = (
-                   SELECT MAX(p2.id)
-                   FROM Price p2
-                   WHERE p2.storeProductId = p1.storeProductId
-                     AND p2.storeId = p1.storeId
-                     AND p2.priceVerified = 1
-               )
-         ) p ON p.storeProductId = sp.id
-         WHERE sp.productId = ? AND sp.chainId = ?`,
-        [storeId, productId, chainId]
+             SELECT storeProductId, storeId, price, promoPrice,
+                    ROW_NUMBER() OVER (PARTITION BY storeProductId, storeId ORDER BY id DESC) AS rn
+             FROM Price
+             WHERE storeId IN (?)
+               AND priceVerified = 1
+         ) lp ON lp.storeProductId = sp.id AND lp.rn = 1
+         WHERE sp.productId IN (?)`,
+        [storeIds, productIds]
     );
-    return rows;
+    const result = new Map<number, Map<number, SpOption[]>>();
+    for (const row of rows) {
+        const storeId = Number(row.storeId);
+        const productId = Number(row.productId);
+        if (!result.has(storeId)) result.set(storeId, new Map());
+        const byProduct = result.get(storeId)!;
+        if (!byProduct.has(productId)) byProduct.set(productId, []);
+        byProduct.get(productId)!.push({
+            isWeighable: !!row.isWeighable,
+            amount: row.amount === null ? null : Number(row.amount),
+            unit: row.unit ?? null,
+            price: Number(row.price),
+            promoPrice: row.promoPrice === null ? null : Number(row.promoPrice),
+        });
+    }
+    return result;
 };
 
-const calculateItemTotalAtStore = async (
-    productId: number,
+const calculateItemTotalSync = (
+    options: SpOption[],
     quantity: number,
     inputUnit: string | null,
-    storeId: number,
-    chainId: number
-): Promise<number | null> => {
-    const options = await getLatestVerifiedOptions(productId, storeId, chainId);
+): number | null => {
     if (!options.length) return null;
-
-    let best: any = null;
+    let best: (SpOption & { effectivePrice: number; normalizedAmount: number }) | null = null;
     let bestPricePerUnit = Infinity;
-
     for (const option of options) {
-        const effectivePrice = option.promoPrice !== null ? parseFloat(option.promoPrice) : parseFloat(option.price);
-        const amount = option.amount ? parseFloat(option.amount) : 1;
-        if (!Number.isFinite(amount) || amount <= 0) continue;
-
-        const pricePerUnit = effectivePrice / amount;
+        const effectivePrice = option.promoPrice !== null ? option.promoPrice : option.price;
+        const normalizedAmount = option.amount !== null && option.amount > 0 ? option.amount : 1;
+        if (!Number.isFinite(normalizedAmount) || normalizedAmount <= 0) continue;
+        const pricePerUnit = effectivePrice / normalizedAmount;
         if (pricePerUnit < bestPricePerUnit) {
             bestPricePerUnit = pricePerUnit;
-            best = { ...option, effectivePrice, amount };
+            best = { ...option, effectivePrice, normalizedAmount };
         }
     }
-
     if (!best) return null;
-
-    const isWeighable = best.isWeighable === 1 || best.isWeighable === true;
     const normalizedQty = normalizeQuantityToStoreUnit(quantity, inputUnit, best.unit);
-
     if (!Number.isFinite(normalizedQty) || normalizedQty <= 0) return null;
-
-    if (isWeighable) {
+    if (best.isWeighable) {
         return round2(normalizedQty * bestPricePerUnit);
     }
-
-    const packsNeeded = Math.ceil(normalizedQty / best.amount);
+    const packsNeeded = Math.ceil(normalizedQty / best.normalizedAmount);
     return round2(packsNeeded * best.effectivePrice);
 };
 
@@ -148,10 +162,20 @@ const buildStoreBaskets = async (
         baskets.set(store.storeId, { total: 0, knownItems: 0, imputedItems: 0, flatItems: 0 });
     }
 
+    const recognizedProductIds = Array.from(new Set(
+        items
+            .filter(i => i.matchConfirmed && i.storeProductId !== null)
+            .map(i => productIdByStoreProductId.get(i.storeProductId!))
+            .filter((id): id is number => id !== undefined)
+    ));
+    const altStoreIds = allStores
+        .filter(s => s.storeId !== currentStoreId)
+        .map(s => s.storeId);
+    const priceCache = await batchGetLatestVerifiedPricesForStores(recognizedProductIds, altStoreIds);
+
     for (const item of items) {
         if (!(item.price > 0) || !(item.quantity > 0)) continue;
 
-        // Use promoPrice (what the user actually paid) when present; otherwise price.
         const effectiveUnitPrice = item.promoPrice !== null && item.promoPrice > 0
             ? item.promoPrice
             : item.price;
@@ -175,13 +199,8 @@ const buildStoreBaskets = async (
 
         for (const store of allStores) {
             if (store.storeId === currentStoreId) continue;
-            const t = await calculateItemTotalAtStore(
-                productId!,
-                item.quantity,
-                item.unit,
-                store.storeId,
-                store.chainId,
-            );
+            const options = priceCache.get(store.storeId)?.get(productId!) ?? [];
+            const t = calculateItemTotalSync(options, item.quantity, item.unit);
             if (t !== null) {
                 known.set(store.storeId, t);
             }
@@ -256,14 +275,15 @@ export const getReceiptComparison = async (receiptId: number) => {
         };
     }
 
-    const [currentStore] = await getStoreById(receipt.storeId);
+    const [[currentStore], closestPerChain] = await Promise.all([
+        getStoreById(receipt.storeId),
+        getClosestStorePerChainToStore(receipt.storeId),
+    ]);
     if (!currentStore) {
         const err = new Error('Visited store not found');
         (err as any).statusCode = 404;
         throw err;
     }
-
-    const closestPerChain = await getClosestStorePerChainToStore(receipt.storeId);
     const alternativeStores = closestPerChain.filter((s) => s.chainId !== currentStore.chainId);
 
     const currentStoreForCalc: ClosestChainStore = {

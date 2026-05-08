@@ -105,25 +105,27 @@ export const demoteMergeByProductIds = async (
 /**
  * Resolve a Product id through its mergedIntoId chain to the current effective
  * root (baseProductId is a separate concept — we do not follow it here).
- * Caps at 4 hops as a safety against accidental cycles or deep chains.
+ * Uses a single recursive CTE query capped at 4 hops as a safety against
+ * accidental cycles or deep chains.
  */
 export const resolveEffectiveProductId = async (
     productId: number,
     conn?: Connection
 ): Promise<number> => {
     const db = conn || pool;
-    let cur = productId;
-    for (let i = 0; i < 4; i++) {
-        const [rows]: any = await db.query(
-            `SELECT mergedIntoId FROM Product WHERE id = ? LIMIT 1`,
-            [cur]
-        );
-        if (rows.length === 0) return cur;
-        const next = rows[0].mergedIntoId;
-        if (next === null || next === undefined || next === cur) return cur;
-        cur = Number(next);
-    }
-    return cur;
+    const [rows]: any = await db.query(
+        `WITH RECURSIVE chain AS (
+            SELECT id, mergedIntoId, 0 AS depth FROM Product WHERE id = ?
+            UNION ALL
+            SELECT p.id, p.mergedIntoId, chain.depth + 1
+            FROM Product p
+            INNER JOIN chain ON p.id = chain.mergedIntoId
+            WHERE chain.mergedIntoId IS NOT NULL AND chain.depth < 4
+        )
+        SELECT id FROM chain ORDER BY depth DESC LIMIT 1`,
+        [productId]
+    );
+    return rows[0]?.id ?? productId;
 };
 
 /** Fetch productId for a given storeProductId. Needed so the merge logic can
@@ -151,9 +153,10 @@ export const getProductIdForStoreProduct = async (
  */
 export const getEffectiveBaseProductIdForStoreProduct = async (
     storeProductId: number,
-    conn?: Connection
+    conn?: Connection,
+    cachedProductId?: number   // ← NEW: skip the StoreProduct lookup if pre-fetched
 ): Promise<number | null> => {
-    const productId = await getProductIdForStoreProduct(storeProductId, conn);
+    const productId = cachedProductId ?? await getProductIdForStoreProduct(storeProductId, conn);
     if (productId === null) return null;
     const effectiveProductId = await resolveEffectiveProductId(productId, conn);
     const db = conn || pool;

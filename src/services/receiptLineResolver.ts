@@ -219,11 +219,14 @@ export const resolveReceiptLineStoreProduct = async (
             // a new SP in the receipt's chain (or reuse if one already
             // exists for this Product+size). On reject, fall through
             // to the standard create-new-Product flow below.
-            const reject = await checkCrossChainBootstrapGates(line, sp, db);
+            // Run the price-gate check and the dedup lookup concurrently —
+            // both are independent reads and the dedup result is discarded
+            // anyway when the gate rejects.
+            const [reject, existingInChain] = await Promise.all([
+                checkCrossChainBootstrapGates(line, sp, db),
+                findSpByChainProductSize(chainId, sp.productId, line.amount, line.unit, db),
+            ]);
             if (!reject) {
-                const existingInChain = await findSpByChainProductSize(
-                    chainId, sp.productId, line.amount, line.unit, db
-                );
                 if (existingInChain) {
                     return {
                         storeProductId: existingInChain,

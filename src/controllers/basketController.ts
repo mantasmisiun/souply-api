@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { createBasket, getBasketsByUserId, getBasketById, updateBasketUpdatedAt, updateBasketStatus, deleteBasket, updateBasketName, getUserDraftBasketId } from '../models/basketModel.js';
+import { createBasket, getBasketsByUserId, getBasketById, updateBasketUpdatedAt, updateBasketStatus, updateBasketSavedAmount, deleteBasket, updateBasketName, getUserDraftBasketId } from '../models/basketModel.js';
 
 export const addBasket = async (req: Request, res: Response, next: NextFunction) => {
     try {

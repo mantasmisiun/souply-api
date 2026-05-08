@@ -150,3 +150,47 @@ export const updateReceiptFilePath = async (id: number, filePath: string, conn?:
     const db = conn || pool;
     await db.query('UPDATE Receipt SET filePath = ? WHERE id = ?', [filePath, id]);
 };
+
+export const updateReceiptSavedAmount = async (id: number, amount: number, conn?: Connection) => {
+    const db = conn || pool;
+    await db.query('UPDATE Receipt SET savedAmount = ? WHERE id = ?', [amount, id]);
+};
+
+export const setMandatorySwipesRequired = async (id: number, count: number, conn?: Connection) => {
+    const db = conn || pool;
+    await db.query('UPDATE Receipt SET mandatorySwipesRequired = ? WHERE id = ?', [count, id]);
+};
+
+export const incrementMandatorySwipesCompleted = async (id: number, conn?: Connection) => {
+    const db = conn || pool;
+    await db.query(
+        'UPDATE Receipt SET mandatorySwipesCompleted = mandatorySwipesCompleted + 1 WHERE id = ?',
+        [id]
+    );
+};
+
+export const setHasBurstSwipes = async (id: number, conn?: Connection) => {
+    const db = conn || pool;
+    await db.query('UPDATE Receipt SET hasBurstSwipes = 1 WHERE id = ?', [id]);
+};
+
+export const getPendingMandatorySwipeCount = async (userId: string): Promise<number> => {
+    const [rows]: any = await pool.query(
+        `SELECT COUNT(*) AS cnt FROM Receipt
+          WHERE userId = ?
+            AND processingStatus = 'completed'
+            AND mandatorySwipesCompleted < mandatorySwipesRequired`,
+        [userId]
+    );
+    return rows[0]?.cnt ?? 0;
+};
+
+export const getLastThreeReceiptBurstFlags = async (userId: string): Promise<boolean[]> => {
+    const [rows]: any = await pool.query(
+        `SELECT hasBurstSwipes FROM Receipt
+          WHERE userId = ? AND processingStatus = 'completed' AND mandatorySwipesRequired > 0
+          ORDER BY id DESC LIMIT 3`,
+        [userId]
+    );
+    return rows.map((r: any) => r.hasBurstSwipes === 1);
+};

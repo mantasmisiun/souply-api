@@ -17,9 +17,19 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-    await pool.query(`DELETE FROM Price WHERE receiptId IN (SELECT id FROM Receipt WHERE userId = ?)`, [testUserId]);
-    await pool.query(`DELETE FROM Receipt WHERE userId = ?`, [testUserId]);
-    await pool.query(`DELETE FROM User WHERE id = ?`, [testUserId]);
+    const conn = await (pool as any).getConnection();
+    try {
+        await conn.query(`SET foreign_key_checks = 0`);
+        await conn.query(`DELETE FROM Price WHERE receiptId IN (SELECT id FROM Receipt WHERE userId = ?)`, [testUserId]);
+        await conn.query(`DELETE FROM ReceiptLineIssue WHERE receiptId IN (SELECT id FROM Receipt WHERE userId = ?)`, [testUserId]);
+        await conn.query(`DELETE FROM ReceiptSwipeCandidate WHERE receiptId IN (SELECT id FROM Receipt WHERE userId = ?)`, [testUserId]);
+        await conn.query(`DELETE FROM StoreProductMatchVote WHERE userId = ?`, [testUserId]);
+        await conn.query(`DELETE FROM Receipt WHERE userId = ?`, [testUserId]);
+        await conn.query(`DELETE FROM User WHERE id = ?`, [testUserId]);
+        await conn.query(`SET foreign_key_checks = 1`);
+    } finally {
+        conn.release();
+    }
     await pool.end();
 });
 
@@ -70,9 +80,11 @@ describe('POST /api/receipts', () => {
         expect(receipt.processingStatus).toBe('completed');
         expect(receipt.receiptNo).toBe('TEST-001');
 
-        // 3. Price row was created correctly
+        // 3. Price row was created correctly.
+        // Filter isFallback=0: the fire-and-forget propagation also creates
+        // fallback rows for other stores in the chain linked to the same receiptId.
         const [prices] = await pool.query(
-            `SELECT * FROM Price WHERE receiptId = ?`,
+            `SELECT * FROM Price WHERE receiptId = ? AND isFallback = 0`,
             [receiptId]
         ) as any;
         expect(prices).toHaveLength(1);

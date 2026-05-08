@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { addUser, fetchUserById, updateUserLastActive } from '../controllers/userController.js';
+import { addUser, fetchUserById, updateUserLastActive, fetchUserProfile, fetchUserEquivalences, putUserEquivalence, deleteUserEquivalence, fetchUserProductMergeMap, fetchUserStats } from '../controllers/userController.js';
 
 const router = Router();
 
@@ -63,5 +63,11 @@ router.get('/users/:id', fetchUserById);
  *         description: User's last active time updated successfully
  */
 router.patch('/users/:id/last-active', updateUserLastActive);
+router.get('/users/:id/profile', fetchUserProfile);
+router.get('/users/:id/equivalences', fetchUserEquivalences);
+router.put('/users/:id/equivalences', putUserEquivalence);
+router.delete('/users/:id/equivalences', deleteUserEquivalence);
+router.get('/users/:id/product-merge-map', fetchUserProductMergeMap);
+router.get('/users/:id/stats', fetchUserStats);
 
 export default router;

@@ -5,6 +5,7 @@ import {
     getVerifiedStoreProductIdsForReceipt,
     getVotedPairKeysForUser,
 } from "../models/receiptSwipeCandidateModel.js";
+import { buildSwipeQueue } from "../services/swipeQueueService.js";
 import {
     unverifyReceiptLinePrice,
     upsertReceiptLineIssue,
@@ -344,83 +345,26 @@ export const fetchReceiptSwipeQueue = async (req: Request, res: Response, next: 
             ? parsedData.products
             : [];
 
-        const flat = await getSwipeCandidatesWithDetails(id);
+        // Run all three independent DB queries in parallel — previously sequential,
+        // which added up to 3× latency on the mobile client's first load.
+        const [flat, votedPairs, verifiedSpIds] = await Promise.all([
+            getSwipeCandidatesWithDetails(id),
+            // Cards the user has already acted on shouldn't appear again.
+            //  - Cross-SP pairs (line.SP ≠ candidate.SP): skip when a
+            //    StoreProductMatchVote exists for (userId, sortedPair).
+            //  - Self-pairs (line.SP = candidate.SP): read the live
+            //    Price.priceVerified from the DB — the parsed JSON isn't the
+            //    source of truth once swipes start flipping the Price column.
+            userId ? getVotedPairKeysForUser(userId) : Promise.resolve(new Set<string>()),
+            userId ? getVerifiedStoreProductIdsForReceipt(id) : Promise.resolve(new Set<number>()),
+        ]);
 
-        // Cards the user has already acted on shouldn't appear again.
-        //  - Cross-SP pairs (line.SP ≠ candidate.SP): skip when a
-        //    StoreProductMatchVote exists for (userId, sortedPair).
-        //  - Self-pairs (line.SP = candidate.SP): read the live
-        //    Price.priceVerified from the DB — the parsed JSON isn't the
-        //    source of truth once swipes start flipping the Price column.
-        const votedPairs = userId
-            ? await getVotedPairKeysForUser(userId)
-            : new Set<string>();
-        const verifiedSpIds = userId
-            ? await getVerifiedStoreProductIdsForReceipt(id)
-            : new Set<number>();
-
-        const byLine = new Map<number, any>();
-        for (const r of flat) {
-            const line = parsedProducts[r.receiptLineIdx] ?? {};
-            const lineSpId = Number.isFinite(line.storeProductId)
-                ? Number(line.storeProductId)
-                : null;
-            const candidateSpId = Number(r.storeProductId);
-
-            // Lines without a storeProductId can't form a pair vote, so the
-            // swipe UI can't do anything meaningful with them. Pre-C2a
-            // receipts hit this path because SP resolution was only added in
-            // that phase. Skip these cards — the whole line drops out of the
-            // queue since no candidates survive.
-            if (lineSpId === null) continue;
-
-            if (userId) {
-                if (candidateSpId === lineSpId) {
-                    // Self-pair: the DB Price row is the source of truth
-                    // (parsedData.priceVerified can go stale after swipes).
-                    if (verifiedSpIds.has(candidateSpId)) continue;
-                } else {
-                    const a = Math.min(lineSpId, candidateSpId);
-                    const b = Math.max(lineSpId, candidateSpId);
-                    if (votedPairs.has(`${a}-${b}`)) continue;
-                }
-            }
-
-            if (!byLine.has(r.receiptLineIdx)) {
-                byLine.set(r.receiptLineIdx, {
-                    receiptLineIdx: r.receiptLineIdx,
-                    ocrName: line.name ?? null,
-                    ocrAmount: line.amount ?? null,
-                    ocrUnit: line.unit ?? null,
-                    ocrPrice: line.price ?? null,
-                    ocrPromoPrice: line.promoPrice ?? null,
-                    lineStoreProductId: lineSpId,
-                    candidates: [],
-                });
-            }
-            byLine.get(r.receiptLineIdx).candidates.push({
-                rankPos: r.rankPos,
-                storeProductId: candidateSpId,
-                name: r.name,
-                brandName: r.brandName,
-                amount: r.amount,
-                unit: r.unit,
-                isWeighable: !!r.isWeighable,
-                imageUrl: r.imageUrl,
-                productId: r.productId,
-                chainId: r.chainId,
-                chainName: r.chainName,
-                chainLogoUrl: r.chainLogoUrl,
-                matchScore: Number(r.matchScore),
-                autoMatched: !!r.autoMatched,
-            });
-        }
-
-        const items = Array.from(byLine.values()).sort((a, b) => {
-            const aTop = a.candidates[0]?.matchScore ?? 0;
-            const bTop = b.candidates[0]?.matchScore ?? 0;
-            return aTop - bTop; // ascending: lowest-confidence first
-        });
+        const items = buildSwipeQueue(
+            flat,
+            parsedProducts,
+            userId ? votedPairs : new Set<string>(),
+            userId ? verifiedSpIds : new Set<number>(),
+        );
 
         res.json({ receiptId: id, items });
     } catch (error) {

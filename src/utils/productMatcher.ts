@@ -49,14 +49,17 @@ function stripReceiptPrefixes(s: string): string {
 
 export function normalizeProductName(name: string): string {
     if (!name) return '';
-    const ascii = name
+    // Strip receipt-specific noise on the raw string FIRST so the patterns
+    // can match the original dots, commas and parentheses they depend on.
+    // Normalization (dot→space, paren removal) would neutralise them otherwise.
+    const stripped = stripReceiptPrefixes(name);
+    return stripped
         .toLowerCase()
         .normalize('NFD').replace(/[̀-ͯ]/g, '')
         .replace(/[.,/]/g, ' ')
         .replace(/[^a-z0-9+\s]/g, '')
         .replace(/\s+/g, ' ')
         .trim();
-    return stripReceiptPrefixes(ascii);
 }
 
 function tokenize(normalizedName: string): string[] {

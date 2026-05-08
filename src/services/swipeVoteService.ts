@@ -19,6 +19,9 @@ import {
 } from './storeProductMergeService.js';
 import { markResolvedForProductPair } from '../models/orphanSwipeCandidateModel.js';
 import { wilsonLowerBound } from '../utils/wilson.js';
+import { upsertEquivalence } from '../models/userEquivalenceModel.js';
+import { awardSwipePoint } from './userPointsService.js';
+import { isBurstSwipe } from './swipeSessionService.js';
 
 type Connection = typeof pool | any;
 
@@ -31,6 +34,7 @@ export interface CastSwipeVoteInput {
     candidateStoreProductId: number;
     vote: SwipeVote;
     dwellMs: number;
+    isMandatory?: boolean;
 }
 
 export type SwipeVoteEffect =
@@ -49,6 +53,7 @@ export interface CastSwipeVoteResult {
     ok: boolean;
     effect: SwipeVoteEffect;
     merge?: MergeDecision;
+    isBurst?: boolean;
 }
 
 export interface UndoSwipeVoteInput {
@@ -104,12 +109,23 @@ export const castSwipeVote = async (
         return await acknowledgeSelfPair(input, lineSpId);
     }
 
+    const burst = isBurstSwipe(input.dwellMs);
+
     // Pair vote. Sort, write, update aggregate, re-evaluate promote/demote.
     const pair = orderPair(input.candidateStoreProductId, lineSpId);
     const connection = await (pool as any).getConnection();
     try {
         await connection.beginTransaction();
 
+        // Always write the personal equivalence regardless of burst.
+        const equivalenceVerdict = input.vote === 'identical' ? 'same' : 'different';
+        await upsertEquivalence(input.userId, pair.spIdA, pair.spIdB, equivalenceVerdict, connection);
+
+        // Award 1 point per swipe regardless of burst.
+        await awardSwipePoint(input.userId, connection);
+
+        // Burst swipes update personal layer and earn points but do NOT
+        // feed the global aggregate — protects the standard model from noise.
         const { previousVote } = await upsertMatchVote(
             input.userId,
             pair.spIdA,
@@ -119,27 +135,38 @@ export const castSwipeVote = async (
             input.receiptId,
             connection
         );
-        if (previousVote !== null && previousVote !== input.vote) {
-            await applyAggregateDelta(pair.spIdA, pair.spIdB, previousVote, -1, connection);
-        }
-        if (previousVote !== input.vote) {
-            await applyAggregateDelta(pair.spIdA, pair.spIdB, input.vote, +1, connection);
+        if (!burst) {
+            if (previousVote !== null && previousVote !== input.vote) {
+                await applyAggregateDelta(pair.spIdA, pair.spIdB, previousVote, -1, connection);
+            }
+            if (previousVote !== input.vote) {
+                await applyAggregateDelta(pair.spIdA, pair.spIdB, input.vote, +1, connection);
+            }
         }
 
         // Phase C3: maintain cross-baseProduct similarity link tallies. A
         // swipe that crosses a baseProduct boundary with vote='similar'
-        // increments BaseProductLink.similarVoteCount; moving away from
-        // similar decrements.
-        await applyBaseProductLinkForVote(
-            pair.spIdA,
-            pair.spIdB,
-            previousVote,
-            input.vote,
-            connection
-        );
+        // BaseProduct link and merge evaluation only run for non-burst votes.
+        // Fetch productIds in parallel — two independent SP→Product lookups.
+        const [productIdA, productIdB] = await Promise.all([
+            getProductIdForStoreProduct(pair.spIdA, connection),
+            getProductIdForStoreProduct(pair.spIdB, connection),
+        ]);
 
-        const agg = await getMatchAggregate(pair.spIdA, pair.spIdB, connection);
-        const merge = await reevaluateMerge(pair.spIdA, pair.spIdB, agg, connection);
+        let merge: MergeDecision | undefined;
+        if (!burst) {
+            await applyBaseProductLinkForVote(
+                pair.spIdA,
+                pair.spIdB,
+                previousVote,
+                input.vote,
+                connection,
+                productIdA,
+                productIdB,
+            );
+            const agg = await getMatchAggregate(pair.spIdA, pair.spIdB, connection);
+            merge = await reevaluateMerge(pair.spIdA, pair.spIdB, agg, connection, productIdA, productIdB);
+        }
 
         // Also flip the line's Price verification as a user-visible signal.
         // (Aggregate/merge happens silently; this gives the user immediate feedback.)
@@ -154,6 +181,7 @@ export const castSwipeVote = async (
                     ? 'vote-recorded'
                     : linePriceEffect.effect,
             merge,
+            isBurst: burst,
         };
     } catch (e) {
         await connection.rollback();
@@ -203,6 +231,10 @@ export const undoSwipeVote = async (
             pair.spIdB,
             connection
         );
+        const [productIdA, productIdB] = await Promise.all([
+            getProductIdForStoreProduct(pair.spIdA, connection),
+            getProductIdForStoreProduct(pair.spIdB, connection),
+        ]);
         if (deletedVote !== null) {
             await applyAggregateDelta(pair.spIdA, pair.spIdB, deletedVote, -1, connection);
             // Also reverse any BaseProductLink increment the vote caused.
@@ -212,11 +244,13 @@ export const undoSwipeVote = async (
                 pair.spIdB,
                 deletedVote,
                 null,
-                connection
+                connection,
+                productIdA,
+                productIdB,
             );
         }
         const agg = await getMatchAggregate(pair.spIdA, pair.spIdB, connection);
-        const merge = await reevaluateMerge(pair.spIdA, pair.spIdB, agg, connection);
+        const merge = await reevaluateMerge(pair.spIdA, pair.spIdB, agg, connection, productIdA, productIdB);
 
         const linePriceEffect = await revertLinePriceEffect(input, lineSpId, connection);
 
@@ -254,15 +288,19 @@ export async function applyBaseProductLinkForVote(
     spIdB: number,
     previousVote: MatchVote | null,
     newVote: MatchVote | null,
-    conn: Connection
+    conn: Connection,
+    productIdA?: number | null,   // ← NEW: skip StoreProduct lookup if pre-fetched
+    productIdB?: number | null,   // ← NEW: skip StoreProduct lookup if pre-fetched
 ): Promise<void> {
     const prevSimilar = previousVote === 'similar' ? 1 : 0;
     const newSimilar = newVote === 'similar' ? 1 : 0;
     const delta = newSimilar - prevSimilar;
     if (delta === 0) return;
 
-    const bpA = await getEffectiveBaseProductIdForStoreProduct(spIdA, conn);
-    const bpB = await getEffectiveBaseProductIdForStoreProduct(spIdB, conn);
+    const [bpA, bpB] = await Promise.all([
+        getEffectiveBaseProductIdForStoreProduct(spIdA, conn, productIdA ?? undefined),
+        getEffectiveBaseProductIdForStoreProduct(spIdB, conn, productIdB ?? undefined),
+    ]);
     if (bpA === null || bpB === null) return;
     if (bpA === bpB) return;
 
@@ -279,7 +317,9 @@ export async function reevaluateMerge(
     spIdA: number,
     spIdB: number,
     agg: Awaited<ReturnType<typeof getMatchAggregate>>,
-    conn: Connection
+    conn: Connection,
+    productIdA?: number | null,   // ← NEW: skip StoreProduct lookup if pre-fetched
+    productIdB?: number | null,   // ← NEW: skip StoreProduct lookup if pre-fetched
 ): Promise<MergeDecision | undefined> {
     if (!agg) return undefined;
     const total = agg.identicalVotes + agg.similarVotes + agg.differentVotes;
@@ -291,9 +331,11 @@ export async function reevaluateMerge(
         MatchThresholds.wilsonZ
     );
 
-    const productIdA = await getProductIdForStoreProduct(spIdA, conn);
-    const productIdB = await getProductIdForStoreProduct(spIdB, conn);
-    if (productIdA === null || productIdB === null) return undefined;
+    const [resolvedProductIdA, resolvedProductIdB] = await Promise.all([
+        productIdA != null ? Promise.resolve(productIdA) : getProductIdForStoreProduct(spIdA, conn),
+        productIdB != null ? Promise.resolve(productIdB) : getProductIdForStoreProduct(spIdB, conn),
+    ]);
+    if (resolvedProductIdA === null || resolvedProductIdB === null) return undefined;
 
     // Promote: high positive-rate, enough votes → merge their Products.
     if (
@@ -304,8 +346,8 @@ export async function reevaluateMerge(
         // resolved so the extra-queue stops serving it. Fires regardless
         // of whether the merge was driven by a receipt vote or an orphan
         // vote — hook is inside reevaluateMerge so both paths converge.
-        await markResolvedForProductPair(productIdA, productIdB, 'promoted', conn);
-        return promoteMergeByProductIds(productIdA, productIdB, conn);
+        await markResolvedForProductPair(resolvedProductIdA, resolvedProductIdB, 'promoted', conn);
+        return promoteMergeByProductIds(resolvedProductIdA, resolvedProductIdB, conn);
     }
 
     // Demote: confidence dropped below the demote band → unmerge.
@@ -313,8 +355,8 @@ export async function reevaluateMerge(
         agg.identicalVotes >= MatchThresholds.demoteIdentical.minVotes &&
         identicalLower <= MatchThresholds.demoteIdentical.maxWilsonLower
     ) {
-        await markResolvedForProductPair(productIdA, productIdB, 'demoted', conn);
-        return demoteMergeByProductIds(productIdA, productIdB, conn);
+        await markResolvedForProductPair(resolvedProductIdA, resolvedProductIdB, 'demoted', conn);
+        return demoteMergeByProductIds(resolvedProductIdA, resolvedProductIdB, conn);
     }
 
     return undefined;

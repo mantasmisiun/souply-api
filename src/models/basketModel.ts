@@ -67,6 +67,10 @@ export const updateBasketStatus = async (id: number, status: string, conn?: Conn
     );
 };
 
+export const updateBasketSavedAmount = async (id: number, amount: number) => {
+    await pool.query('UPDATE Basket SET savedAmount = ? WHERE id = ?', [amount, id]);
+};
+
 export const updateBasketName = async (id: number, name: string) => {
     await pool.query(
         'UPDATE Basket SET name = ? WHERE id = ?',
