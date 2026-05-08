@@ -18,6 +18,12 @@
  *   npm run receipts:stage -- --chain rimi
  *   npm run receipts:stage -- --chain all
  *
+ * Add --with-truth to stage ONLY receipts that have a hand-annotated
+ * `<basename>.truth.json` sibling — useful when you want the phone
+ * batch test to score only the receipts you've prepared truth for:
+ *
+ *   npm run receipts:stage -- --chain all --with-truth
+ *
  * Prereqs on dev machine: poppler-utils (pdftoppm) — no adb needed.
  */
 
@@ -41,20 +47,23 @@ const STAGING_ROOT = path.join(REPO_ROOT, 'basket-api', 'receipts', '_batch_stag
 
 interface CliArgs {
     chains: ChainName[];
+    withTruth: boolean;
 }
 
 const parseArgs = (argv: string[]): CliArgs => {
     let chain: string | null = null;
+    let withTruth = false;
     for (let i = 2; i < argv.length; i++) {
         const a = argv[i];
         if (a === '--chain') chain = argv[++i];
+        else if (a === '--with-truth') withTruth = true;
     }
     if (!chain) throw new Error('--chain <maxima|rimi|iki|all> required');
-    if (chain === 'all') return { chains: SUPPORTED };
+    if (chain === 'all') return { chains: SUPPORTED, withTruth };
     if (!SUPPORTED.includes(chain as ChainName)) {
         throw new Error(`--chain must be one of ${SUPPORTED.join('|')}|all`);
     }
-    return { chains: [chain as ChainName] };
+    return { chains: [chain as ChainName], withTruth };
 };
 
 const which = (cmd: string): boolean => {
@@ -123,10 +132,27 @@ const main = async () => {
         // based receipts (Lidl on this project) already arrive as PNGs
         // from the phone; requiring them to be wrapped in a PDF just
         // to go through the batch pipeline would be wasteful.
-        const files = fs
-            .readdirSync(srcDir)
+        const allDirEntries = fs.readdirSync(srcDir);
+        const truthBaseSet = new Set(
+            allDirEntries
+                .filter((f) => f.endsWith('.truth.json'))
+                .map((f) => f.replace(/\.truth\.json$/, ''))
+        );
+        let files = allDirEntries
             .filter((f) => /\.(pdf|png|jpe?g)$/i.test(f))
             .sort();
+
+        if (args.withTruth) {
+            const before = files.length;
+            files = files.filter((f) => {
+                const ext = path.extname(f);
+                const base = path.basename(f, ext);
+                return truthBaseSet.has(base);
+            });
+            console.log(
+                `[${chain}] --with-truth: ${files.length}/${before} have truth siblings`
+            );
+        }
 
         console.log(`[${chain}] processing ${files.length} file${files.length === 1 ? '' : 's'}…`);
 

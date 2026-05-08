@@ -3,7 +3,7 @@ import { createListItem, getListItemsByShoppingListId, updateListItemQuantity, t
 
 export const addListItem = async (req: Request, res: Response, next: NextFunction) => {
     try {
-        const { listId, productId, storeProductId, quantity, price } = req.body;
+        const { listId, productId, storeProductId, quantity, price, name } = req.body;
         // productId is OPTIONAL — null is valid for custom/manual items
         // added via the inline quick-add input. Only listId and quantity
         // are truly required.
@@ -31,7 +31,8 @@ export const addListItem = async (req: Request, res: Response, next: NextFunctio
             productId ?? null,
             storeProductId ?? null,
             quantity,
-            price ?? null
+            price ?? null,
+            name ?? null
         );
         res.status(201).json({ id, listId, productId: productId ?? null, storeProductId: storeProductId ?? null, quantity, price: price ?? null });
     } catch (error) {

@@ -7,12 +7,13 @@ export const createListItem = async (
     storeProductId: number | null,
     quantity: number,
     price: number | null = null,
+    customName: string | null = null,
     conn?: Connection
 ) => {
     const db = (conn ?? pool) as any;
     const [result]: any = await db.query(
-        'INSERT INTO ShoppingListItem (listId, productId, storeProductId, quantity, price) VALUES (?, ?, ?, ?, ?)',
-        [listId, productId, storeProductId, quantity, price]
+        'INSERT INTO ShoppingListItem (listId, productId, storeProductId, quantity, price, customName) VALUES (?, ?, ?, ?, ?, ?)',
+        [listId, productId, storeProductId, quantity, price, customName]
     );
     return result.insertId;
 };
@@ -61,7 +62,7 @@ export const getListItemsByShoppingListId = async (listId: number) => {
     // frontend can ignore these fields today.
     const [rows]: any = await pool.query(
         `SELECT sli.*,
-                COALESCE(sp.storeProductName, p.name) AS productName,
+                COALESCE(sp.storeProductName, p.name, sli.customName) AS productName,
                 (SELECT JSON_ARRAYAGG(spi.imageUrl)
                  FROM StoreProduct spi
                  WHERE spi.productId = COALESCE(sp.productId, sli.productId, p.id)
@@ -80,7 +81,7 @@ export const getListItemsByShoppingListId = async (listId: number) => {
          LEFT JOIN Category c2 ON c3.parentCategoryId = c2.id
          WHERE sli.listId = ?
          ORDER BY sli.isChecked ASC,
-                  COALESCE(sp.storeProductName, p.name, '') ASC,
+                  COALESCE(sp.storeProductName, p.name, sli.customName, '') ASC,
                   sli.id ASC`,
         [listId]
     );
