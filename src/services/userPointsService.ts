@@ -7,7 +7,7 @@ export const cumulativePointsForLevel = (level: number): number => level * (leve
 
 export const levelForPoints = (points: number): number => {
     let level = 1;
-    while (cumulativePointsForLevel(level) < points) level++;
+    while (cumulativePointsForLevel(level) <= points) level++;
     return level;
 };
 

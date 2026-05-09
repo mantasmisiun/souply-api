@@ -128,6 +128,54 @@ const AMOUNT_NORMALIZED_EXPR = `
     END
 `;
 
+const BROWSE_SELECT = `
+    SELECT p.id, p.name, p.categoryId,
+        (SELECT JSON_ARRAYAGG(spi.imageUrl)
+         FROM StoreProduct spi
+         WHERE spi.productId = p.id AND spi.imageUrl IS NOT NULL) AS imageUrls,
+        CAST(MIN(${AMOUNT_NORMALIZED_EXPR}) AS UNSIGNED) as minAmount,
+        CAST(MAX(${AMOUNT_NORMALIZED_EXPR}) AS UNSIGNED) as maxAmount,
+        'g' as unit,
+        MAX(sp.isWeighable) as hasWeighable
+     FROM Product p
+     LEFT JOIN StoreProduct sp ON sp.productId = p.id
+`;
+
+/**
+ * Fetch globally merged loser products that the user has personally voted
+ * 'different' on (for the loser ↔ winner pair). These products are normally
+ * hidden by the `mergedIntoId IS NULL` filter but should be restored for
+ * users who explicitly rejected the global merge.
+ */
+async function fetchPersonallyRestoredProducts(
+    userId: string,
+    categoryFilter: string,
+    categoryParams: any[],
+    baseFilter: string,
+): Promise<any[]> {
+    const [rows]: any = await pool.query(
+        `${BROWSE_SELECT}
+         WHERE ${categoryFilter}
+           AND p.mergedIntoId IS NOT NULL
+           AND EXISTS (
+               SELECT 1
+                 FROM UserStoreProductEquivalence e
+                 JOIN StoreProduct spA ON spA.id = e.spIdA
+                 JOIN StoreProduct spB ON spB.id = e.spIdB
+                WHERE e.userId = ?
+                  AND e.verdict = 'different'
+                  AND (
+                      (spA.productId = p.id AND spB.productId = p.mergedIntoId)
+                   OR (spB.productId = p.id AND spA.productId = p.mergedIntoId)
+                  )
+           )
+           ${baseFilter}
+         GROUP BY p.id`,
+        [...categoryParams, userId],
+    );
+    return rows;
+}
+
 /**
  * Browse one L3 category.
  *
@@ -140,48 +188,46 @@ const AMOUNT_NORMALIZED_EXPR = `
  * Amount ranges reflect the Product's own StoreProducts in both modes
  * (not cluster-wide — keeping the query index-friendly). The detail view
  * in base mode surfaces the full cluster's variants.
+ *
+ * When userId is provided, globally merged products that the user has
+ * personally voted 'different' on are restored to the list.
  */
 export const getProductsByCategoryWithAmounts = async (
     categoryId: number,
-    mode: BrowseMode = 'base'
+    mode: BrowseMode = 'base',
+    userId?: string,
 ) => {
     const baseFilter = mode === 'base' ? 'AND p.baseProductId IS NULL' : '';
     const [products]: any = await pool.query(
-        `SELECT p.id, p.name, p.categoryId,
-            (SELECT JSON_ARRAYAGG(spi.imageUrl)
-             FROM StoreProduct spi
-             WHERE spi.productId = p.id AND spi.imageUrl IS NOT NULL) AS imageUrls,
-            CAST(MIN(${AMOUNT_NORMALIZED_EXPR}) AS UNSIGNED) as minAmount,
-            CAST(MAX(${AMOUNT_NORMALIZED_EXPR}) AS UNSIGNED) as maxAmount,
-            'g' as unit,
-            MAX(sp.isWeighable) as hasWeighable
-         FROM Product p
-         LEFT JOIN StoreProduct sp ON sp.productId = p.id
+        `${BROWSE_SELECT}
          WHERE p.categoryId = ?
            AND p.mergedIntoId IS NULL
            ${baseFilter}
          GROUP BY p.id`,
         [categoryId]
     );
+
+    if (userId) {
+        const restored = await fetchPersonallyRestoredProducts(
+            userId,
+            'p.categoryId = ?',
+            [categoryId],
+            baseFilter,
+        );
+        products.push(...restored);
+    }
+
     return products;
 };
 
 export const getAllProductsByL2WithAmounts = async (
     l2CategoryId: number,
-    mode: BrowseMode = 'base'
+    mode: BrowseMode = 'base',
+    userId?: string,
 ) => {
     const baseFilter = mode === 'base' ? 'AND p.baseProductId IS NULL' : '';
     const [products]: any = await pool.query(
-        `SELECT p.id, p.name, p.categoryId,
-            (SELECT JSON_ARRAYAGG(spi.imageUrl)
-             FROM StoreProduct spi
-             WHERE spi.productId = p.id AND spi.imageUrl IS NOT NULL) AS imageUrls,
-            CAST(MIN(${AMOUNT_NORMALIZED_EXPR}) AS UNSIGNED) as minAmount,
-            CAST(MAX(${AMOUNT_NORMALIZED_EXPR}) AS UNSIGNED) as maxAmount,
-            'g' as unit,
-            MAX(sp.isWeighable) as hasWeighable
-         FROM Product p
-         LEFT JOIN StoreProduct sp ON sp.productId = p.id
+        `${BROWSE_SELECT}
          WHERE (p.categoryId IN (SELECT id FROM Category WHERE parentCategoryId = ?)
                 OR p.categoryId = ?)
            AND p.mergedIntoId IS NULL
@@ -189,5 +235,16 @@ export const getAllProductsByL2WithAmounts = async (
          GROUP BY p.id`,
         [l2CategoryId, l2CategoryId]
     );
+
+    if (userId) {
+        const restored = await fetchPersonallyRestoredProducts(
+            userId,
+            '(p.categoryId IN (SELECT id FROM Category WHERE parentCategoryId = ?) OR p.categoryId = ?)',
+            [l2CategoryId, l2CategoryId],
+            baseFilter,
+        );
+        products.push(...restored);
+    }
+
     return products;
 };

@@ -200,8 +200,8 @@ export const calculateBasketForStores = async (
     // Pre-fetch all tier-1/2 prices in a single batch query so the
     // store × item Promise.all loop below never hits the DB for tier-1/2.
     const storeIds  = stores.map((s: any) => Number(s.id));
-    const chainIds  = [...new Set(stores.map((s: any) => Number(s.chainId)))];
-    const productIds = [...new Set(basketItems.map((i: any) => Number(i.productId)))];
+    const chainIds  = [...new Set(stores.map((s: any) => Number(s.chainId)))] as number[];
+    const productIds = [...new Set(basketItems.map((i: any) => Number(i.productId)))] as number[];
     const tier12Cache = await batchFetchTier12Prices(storeIds, chainIds, productIds);
 
     // Stores and per-item lookups are independent within a store —

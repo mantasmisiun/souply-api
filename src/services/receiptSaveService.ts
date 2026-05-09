@@ -68,7 +68,8 @@ export const persistReceiptPrices = async (
     receiptId: number,
     userId: string,
     parsedData: any,
-    input: ParsedReceiptInput
+    input: ParsedReceiptInput,
+    awardPoints = false,
 ): Promise<SaveResult> => {
     const result: SaveResult = {
         saved: 0,
@@ -218,8 +219,9 @@ export const persistReceiptPrices = async (
         );
         result.mandatorySwipesRequired = await initMandatorySwipeSession(receiptId, nonAutoMatchedPairs, connection);
 
-        // Award 1 point per item on the receipt.
-        await awardReceiptPoints(userId, input.products.length, connection);
+        if (awardPoints) {
+            await awardReceiptPoints(userId, input.products.length, connection);
+        }
 
         // No resolved store → can't attach prices, but parsedData + candidates were saved.
         if (!input.storeId) {

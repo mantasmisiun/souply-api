@@ -5,6 +5,7 @@ import {
     undoSwipeVote,
 } from '../services/swipeVoteService.js';
 import { recordMandatorySwipe, shouldShowBurstWarning } from '../services/swipeSessionService.js';
+import { getUserPointsProfile } from '../services/userPointsService.js';
 
 const VALID_VOTES: SwipeVote[] = ['identical', 'similar', 'different'];
 
@@ -60,7 +61,8 @@ export const submitSwipeVote = async (req: Request, res: Response, next: NextFun
             }
         }
 
-        res.json({ ...result, burstWarning });
+        const { level } = await getUserPointsProfile(String(userId));
+        res.json({ ...result, burstWarning, level });
     } catch (error) {
         next(error);
     }

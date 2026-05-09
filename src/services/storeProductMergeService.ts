@@ -46,6 +46,8 @@ export const promoteMergeByProductIds = async (
             : (a.id < b.id ? a : b);
     const loser = winner.id === a.id ? b : a;
 
+    console.log(`[MERGE] PROMOTE: "${winner.name}" (product=${winner.id}) ← "${loser.name}" (product=${loser.id})`);
+
     await db.query(
         `UPDATE Product SET mergedIntoId = ? WHERE id = ?`,
         [winner.id, loser.id]
@@ -70,10 +72,10 @@ export const demoteMergeByProductIds = async (
     if (productAId === productBId) return { action: 'noop' };
 
     const [rows]: any = await db.query(
-        `SELECT id, mergedIntoId FROM Product WHERE id IN (?, ?)`,
+        `SELECT id, name, mergedIntoId FROM Product WHERE id IN (?, ?)`,
         [productAId, productBId]
     );
-    const byId = new Map<number, { id: number; mergedIntoId: number | null }>(
+    const byId = new Map<number, { id: number; name: string; mergedIntoId: number | null }>(
         rows.map((r: any) => [r.id, r])
     );
     const a = byId.get(productAId);
@@ -91,9 +93,27 @@ export const demoteMergeByProductIds = async (
     }
     if (loserId === null) return { action: 'noop' };
 
+    const loserRow = byId.get(loserId);
+    const winnerRow = byId.get(winnerId!);
+    console.log(`[MERGE] DEMOTE: "${loserRow?.name}" (product=${loserId}) unmerged from "${winnerRow?.name}" (product=${winnerId})`);
+
     await db.query(
         `UPDATE Product SET mergedIntoId = NULL WHERE id = ?`,
         [loserId]
+    );
+
+    // Flag personal equivalences on this product pair for re-verification.
+    // Users who previously voted these products as identical should reconfirm
+    // on their next purchase — the community has reversed the merge.
+    await db.query(
+        `UPDATE UserStoreProductEquivalence e
+           JOIN StoreProduct sp1 ON sp1.id = e.spIdA
+           JOIN StoreProduct sp2 ON sp2.id = e.spIdB
+            SET e.needsReverification = 1
+          WHERE e.verdict = 'same'
+            AND sp1.productId IN (?, ?)
+            AND sp2.productId IN (?, ?)`,
+        [loserId, winnerId, loserId, winnerId],
     );
     return {
         action: 'demoted',

@@ -19,7 +19,7 @@ import {
 } from './storeProductMergeService.js';
 import { markResolvedForProductPair } from '../models/orphanSwipeCandidateModel.js';
 import { wilsonLowerBound } from '../utils/wilson.js';
-import { upsertEquivalence } from '../models/userEquivalenceModel.js';
+import { clearReverification, upsertEquivalence } from '../models/userEquivalenceModel.js';
 import { awardSwipePoint } from './userPointsService.js';
 import { isBurstSwipe } from './swipeSessionService.js';
 
@@ -63,6 +63,77 @@ export interface UndoSwipeVoteInput {
     candidateStoreProductId: number;
 }
 
+export interface EditVoteInput {
+    userId: string;
+    spIdA: number;
+    spIdB: number;
+    vote: SwipeVote;
+}
+
+/**
+ * Edit a previously cast vote from the vote history screen. dwellMs is NULL
+ * because this is a deliberate retrospective change, not a real-time swipe.
+ * Always applies personal equivalence (never burst). Always re-evaluates
+ * global merge thresholds.
+ */
+export const editVote = async (input: EditVoteInput): Promise<CastSwipeVoteResult> => {
+    if (input.spIdA >= input.spIdB) {
+        throw new Error('editVote requires spIdA < spIdB');
+    }
+
+    const connection = await (pool as any).getConnection();
+    try {
+        await connection.beginTransaction();
+
+        const [productIdA, productIdB] = await Promise.all([
+            getProductIdForStoreProduct(input.spIdA, connection),
+            getProductIdForStoreProduct(input.spIdB, connection),
+        ]);
+
+        const equivalenceVerdict = input.vote === 'identical' ? 'same' : 'different';
+        await upsertEquivalence(input.userId, input.spIdA, input.spIdB, equivalenceVerdict, connection);
+        await clearReverification(input.userId, input.spIdA, input.spIdB, connection);
+
+        const { previousVote } = await upsertMatchVote(
+            input.userId,
+            input.spIdA,
+            input.spIdB,
+            input.vote,
+            null,
+            null,
+            connection,
+        );
+
+        if (previousVote !== null && previousVote !== input.vote) {
+            await applyAggregateDelta(input.spIdA, input.spIdB, previousVote, -1, connection);
+        }
+        if (previousVote !== input.vote) {
+            await applyAggregateDelta(input.spIdA, input.spIdB, input.vote, +1, connection);
+        }
+
+        await applyBaseProductLinkForVote(
+            input.spIdA,
+            input.spIdB,
+            previousVote,
+            input.vote,
+            connection,
+            productIdA,
+            productIdB,
+        );
+
+        const agg = await getMatchAggregate(input.spIdA, input.spIdB, connection);
+        const merge = await reevaluateMerge(input.spIdA, input.spIdB, agg, connection, productIdA, productIdB);
+
+        await connection.commit();
+        return { ok: true, effect: 'vote-recorded', merge };
+    } catch (e) {
+        await connection.rollback();
+        throw e;
+    } finally {
+        connection.release();
+    }
+};
+
 /**
  * Process a swipe vote. Always runs inside a transaction because it can
  * cascade through several writes (vote row, aggregate row, Price flip,
@@ -97,6 +168,17 @@ export const castSwipeVote = async (
         return { ok: true, effect: 'no-candidate' };
     }
 
+    // Fetch SP names once for diagnostic logging below.
+    const [spNameRows]: any = await pool.query(
+        `SELECT id, storeProductName FROM StoreProduct WHERE id IN (?, ?)`,
+        [lineSpId, input.candidateStoreProductId],
+    );
+    const spNames = new Map<number, string>(
+        spNameRows.map((r: any) => [Number(r.id), (r.storeProductName ?? `SP#${r.id}`) as string]),
+    );
+    const lineName = spNames.get(lineSpId) ?? `SP#${lineSpId}`;
+    const candidateName = spNames.get(input.candidateStoreProductId) ?? `SP#${input.candidateStoreProductId}`;
+
     // Self-pair (candidate already is the line's SP): the vote has no
     // cross-SP signal, so it's just an acknowledgement that the user has
     // seen this auto-match card. Flip priceVerified=1 for ANY direction so
@@ -106,10 +188,12 @@ export const castSwipeVote = async (
     // "auto-match was wrong"), but self-pair cards only exist for >=0.90-
     // confidence auto-matches where different is rare.
     if (input.candidateStoreProductId === lineSpId) {
+        console.log(`[SWIPE] SELF-PAIR: "${lineName}" (sp=${lineSpId}) | dwell=${input.dwellMs}ms`);
         return await acknowledgeSelfPair(input, lineSpId);
     }
 
     const burst = isBurstSwipe(input.dwellMs);
+    console.log(`[SWIPE] VOTE: "${lineName}" (sp=${lineSpId}) vs "${candidateName}" (sp=${input.candidateStoreProductId}) → ${input.vote}${burst ? ' [BURST]' : ''} | dwell=${input.dwellMs}ms | receipt=${input.receiptId} line=${input.receiptLineIdx}`);
 
     // Pair vote. Sort, write, update aggregate, re-evaluate promote/demote.
     const pair = orderPair(input.candidateStoreProductId, lineSpId);
@@ -117,15 +201,18 @@ export const castSwipeVote = async (
     try {
         await connection.beginTransaction();
 
-        // Always write the personal equivalence regardless of burst.
-        const equivalenceVerdict = input.vote === 'identical' ? 'same' : 'different';
-        await upsertEquivalence(input.userId, pair.spIdA, pair.spIdB, equivalenceVerdict, connection);
-
         // Award 1 point per swipe regardless of burst.
         await awardSwipePoint(input.userId, connection);
 
-        // Burst swipes update personal layer and earn points but do NOT
-        // feed the global aggregate — protects the standard model from noise.
+        // Burst swipes earn points but do NOT feed the personal layer or the
+        // global aggregate. Users who burst-swipe have no intent to personalise
+        // their browse view — writing equivalences for them would pollute it.
+        if (!burst) {
+            const equivalenceVerdict = input.vote === 'identical' ? 'same' : 'different';
+            await upsertEquivalence(input.userId, pair.spIdA, pair.spIdB, equivalenceVerdict, connection);
+            // If this pair was flagged for re-verification, the user has now re-voted — clear the flag.
+            await clearReverification(input.userId, pair.spIdA, pair.spIdB, connection);
+        }
         const { previousVote } = await upsertMatchVote(
             input.userId,
             pair.spIdA,
@@ -330,6 +417,7 @@ export async function reevaluateMerge(
         total,
         MatchThresholds.wilsonZ
     );
+    console.log(`[MERGE] Aggregate SP(${spIdA},${spIdB}): identical=${agg.identicalVotes} similar=${agg.similarVotes} different=${agg.differentVotes} | wilsonLower=${identicalLower.toFixed(3)} | promoteNeeds=${MatchThresholds.promoteIdentical.minVotes}votes/${MatchThresholds.promoteIdentical.minWilsonLower}wilson`);
 
     const [resolvedProductIdA, resolvedProductIdB] = await Promise.all([
         productIdA != null ? Promise.resolve(productIdA) : getProductIdForStoreProduct(spIdA, conn),
@@ -368,19 +456,30 @@ export async function reevaluateMerge(
  * `different` flips off, `similar` leaves it alone.
  */
 /**
- * Acknowledge a self-pair swipe — flip priceVerified=1 unconditionally so
- * the queue filter drops the card on next fetch, regardless of which
- * direction the user swiped.
+ * Acknowledge a self-pair swipe.
+ *
+ * identical / similar → verify the price (user confirms the auto-match).
+ * different → the auto-match was wrong. Do NOT verify the price; flag the
+ *   line for admin review so the SP assignment can be corrected.
  */
 async function acknowledgeSelfPair(
     input: CastSwipeVoteInput,
-    lineSpId: number
+    lineSpId: number,
 ): Promise<CastSwipeVoteResult> {
+    if (input.vote === 'different') {
+        await pool.query(
+            `INSERT INTO AdminReviewFlag (type, receiptId, lineIdx, spId, flaggedBy)
+             VALUES ('self-pair-rejected', ?, ?, ?, ?)`,
+            [input.receiptId, input.receiptLineIdx, lineSpId, input.userId],
+        );
+        return { ok: true, effect: 'vote-recorded' };
+    }
+
     const [rows]: any = await pool.query(
         `SELECT id, priceVerified FROM Price
           WHERE receiptId = ? AND storeProductId = ? AND isFallback = 0
           LIMIT 1`,
-        [input.receiptId, lineSpId]
+        [input.receiptId, lineSpId],
     );
     if (rows.length === 0) {
         return { ok: true, effect: 'no-price-row' };

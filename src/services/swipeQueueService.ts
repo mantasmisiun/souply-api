@@ -42,6 +42,8 @@ export interface QueueItem {
     ocrPromoPrice: number | null;
     lineStoreProductId: number;
     candidates: QueueCandidate[];
+    /** True when this card is a re-verification prompt (global merge was reversed). */
+    needsReverification?: boolean;
 }
 
 /**
@@ -51,17 +53,25 @@ export interface QueueItem {
  * Filtering rules:
  * - Lines without a resolved storeProductId are skipped (no pair can be formed)
  * - Self-pairs (candidate == line SP) are skipped if the price is already verified
- * - Cross-pairs are skipped if the user has already voted on that SP pair
+ * - Cross-pairs are skipped if the user has already voted on that SP pair,
+ *   UNLESS the pair is flagged for re-verification (global merge was reversed)
  *
  * Output is sorted lowest-confidence-first so uncertain matches appear first.
+ * Re-verification cards are surfaced at the top regardless of match score.
  */
 export function buildSwipeQueue(
     flat: RawCandidateRow[],
     parsedProducts: any[],
     votedPairs: Set<string>,
     verifiedSpIds: Set<number>,
+    reverificationPairs: Set<string> = new Set(),
 ): QueueItem[] {
     const byLine = new Map<number, QueueItem>();
+    // Within-queue deduplication: prevents the same canonical pair from appearing
+    // as both "A vs B" (line 3's receipt product vs candidate) and "B vs A"
+    // (line 7's receipt product vs candidate) when two receipt lines happen to
+    // be each other's top match.
+    const seenPairs = new Set<string>();
 
     for (const r of flat) {
         const line = parsedProducts[r.receiptLineIdx] ?? {};
@@ -75,10 +85,17 @@ export function buildSwipeQueue(
         } else {
             const a = Math.min(lineSpId, candidateSpId);
             const b = Math.max(lineSpId, candidateSpId);
-            if (votedPairs.has(`${a}-${b}`)) continue;
+            const pairKey = `${a}-${b}`;
+            // Skip already-voted pairs unless they are flagged for re-verification.
+            if (votedPairs.has(pairKey) && !reverificationPairs.has(pairKey)) continue;
+            // Skip pairs already queued from a different receipt line.
+            if (seenPairs.has(pairKey)) continue;
+            seenPairs.add(pairKey);
         }
 
         if (!byLine.has(r.receiptLineIdx)) {
+            const a = Math.min(lineSpId, candidateSpId);
+            const b = Math.max(lineSpId, candidateSpId);
             byLine.set(r.receiptLineIdx, {
                 receiptLineIdx: r.receiptLineIdx,
                 ocrName: line.name ?? null,
@@ -88,6 +105,7 @@ export function buildSwipeQueue(
                 ocrPromoPrice: line.promoPrice ?? null,
                 lineStoreProductId: lineSpId,
                 candidates: [],
+                needsReverification: reverificationPairs.has(`${a}-${b}`),
             });
         }
         byLine.get(r.receiptLineIdx)!.candidates.push({
@@ -109,6 +127,10 @@ export function buildSwipeQueue(
     }
 
     return Array.from(byLine.values()).sort((a, b) => {
+        // Re-verification cards always surface first.
+        if (a.needsReverification !== b.needsReverification) {
+            return a.needsReverification ? -1 : 1;
+        }
         const aTop = a.candidates[0]?.matchScore ?? 0;
         const bTop = b.candidates[0]?.matchScore ?? 0;
         return aTop - bTop;

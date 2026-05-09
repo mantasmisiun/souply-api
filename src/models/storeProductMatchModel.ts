@@ -32,7 +32,7 @@ export const upsertMatchVote = async (
     spIdA: number,
     spIdB: number,
     vote: MatchVote,
-    dwellMs: number,
+    dwellMs: number | null,
     receiptId: number | null,
     conn?: Connection
 ): Promise<{ previousVote: MatchVote | null }> => {
@@ -58,7 +58,7 @@ export const upsertMatchVote = async (
     } else if (previousVote !== vote) {
         await db.query(
             `UPDATE StoreProductMatchVote
-                SET vote = ?, dwellMs = ?, receiptId = ?, createdAt = CURRENT_TIMESTAMP
+                SET vote = ?, dwellMs = ?, receiptId = ?
               WHERE userId = ? AND spIdA = ? AND spIdB = ?`,
             [vote, dwellMs, receiptId, userId, spIdA, spIdB]
         );
@@ -141,6 +141,112 @@ export const deleteMatchVote = async (
         [userId, spIdA, spIdB]
     );
     return { deletedVote: existing[0].vote as MatchVote };
+};
+
+export interface VoteHistoryRow {
+    spIdA: number;
+    spIdB: number;
+    vote: MatchVote;
+    dwellMs: number | null;
+    createdAt: Date;
+    updatedAt: Date;
+    nameA: string;
+    imageUrlA: string | null;
+    chainNameA: string;
+    chainLogoUrlA: string | null;
+    nameB: string;
+    imageUrlB: string | null;
+    chainNameB: string;
+    chainLogoUrlB: string | null;
+}
+
+export interface VoteHistoryOpts {
+    limit?: number;
+    cursor?: string;   // opaque: base64(JSON({ d: updatedAt ISO, id: spIdA }))
+    search?: string;
+    vote?: MatchVote;
+}
+
+export interface VoteHistoryPage {
+    votes: VoteHistoryRow[];
+    nextCursor: string | null;
+}
+
+/**
+ * Paginated vote history for a user. Sorted newest-updated-first with spIdA
+ * as a tiebreak so the cursor is stable even when two rows share the same
+ * updatedAt second.
+ *
+ * Fetches limit+1 rows to cheaply detect whether a next page exists without
+ * a separate COUNT query.
+ */
+export const getVoteHistory = async (
+    userId: string,
+    opts: VoteHistoryOpts = {},
+    conn?: Connection,
+): Promise<VoteHistoryPage> => {
+    const db = conn || pool;
+    const limit = Math.min(opts.limit ?? 15, 50);
+
+    const conditions: string[] = ['v.userId = ?'];
+    const params: any[] = [userId];
+
+    if (opts.search?.trim()) {
+        const term = `%${opts.search.trim()}%`;
+        conditions.push('(spA.storeProductName LIKE ? OR spB.storeProductName LIKE ?)');
+        params.push(term, term);
+    }
+
+    if (opts.vote) {
+        conditions.push('v.vote = ?');
+        params.push(opts.vote);
+    }
+
+    if (opts.cursor) {
+        try {
+            const { d, id } = JSON.parse(Buffer.from(opts.cursor, 'base64url').toString('utf8'));
+            conditions.push('(v.updatedAt < ? OR (v.updatedAt = ? AND v.spIdA > ?))');
+            params.push(d, d, id);
+        } catch { /* ignore malformed cursor — just return from the start */ }
+    }
+
+    params.push(limit + 1);
+
+    const [rows]: any = await db.query(
+        `SELECT
+             v.spIdA, v.spIdB, v.vote, v.dwellMs, v.createdAt, v.updatedAt,
+             spA.storeProductName AS nameA,
+             spA.imageUrl         AS imageUrlA,
+             scA.name             AS chainNameA,
+             scA.logoUrl          AS chainLogoUrlA,
+             spB.storeProductName AS nameB,
+             spB.imageUrl         AS imageUrlB,
+             scB.name             AS chainNameB,
+             scB.logoUrl          AS chainLogoUrlB
+           FROM StoreProductMatchVote v
+           JOIN StoreProduct spA ON spA.id = v.spIdA
+           JOIN StoreChain   scA ON scA.id = spA.chainId
+           JOIN StoreProduct spB ON spB.id = v.spIdB
+           JOIN StoreChain   scB ON scB.id = spB.chainId
+          WHERE ${conditions.join(' AND ')}
+          ORDER BY v.updatedAt DESC, v.spIdA ASC
+          LIMIT ?`,
+        params,
+    );
+
+    const hasMore = rows.length > limit;
+    const votes: VoteHistoryRow[] = hasMore ? rows.slice(0, limit) : rows;
+
+    let nextCursor: string | null = null;
+    if (hasMore && votes.length > 0) {
+        const last = votes[votes.length - 1];
+        const d = last.updatedAt instanceof Date
+            ? last.updatedAt.toISOString()
+            : String(last.updatedAt);
+        nextCursor = Buffer.from(JSON.stringify({ d, id: last.spIdA })).toString('base64url');
+    }
+
+    return { votes, nextCursor };
 };
 
 /**

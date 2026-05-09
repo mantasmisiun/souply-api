@@ -10,51 +10,202 @@ export interface UserEquivalence {
     spIdA: number;
     spIdB: number;
     verdict: EquivalenceVerdict;
+    needsReverification: boolean;
 }
 
 const orderPair = (a: number, b: number) => ({ spIdA: Math.min(a, b), spIdB: Math.max(a, b) });
 
+// ---------------------------------------------------------------------------
+// Component helpers (union-find logic lives here, not in the service layer)
+// ---------------------------------------------------------------------------
+
+/**
+ * Return all productIds directly connected to `productId` via 'same' verdicts
+ * for this user. Because we normalise on write (all entries point to root),
+ * one hop is enough to recover the full component.
+ */
+async function getComponentNeighbours(
+    userId: string,
+    productId: number,
+    db: Connection,
+): Promise<{ productId: number; spId: number }[]> {
+    const [rows]: any = await db.query(
+        `SELECT
+             e.spIdA, e.spIdB,
+             sp1.productId AS productIdA,
+             sp2.productId AS productIdB
+           FROM UserStoreProductEquivalence e
+           JOIN StoreProduct sp1 ON sp1.id = e.spIdA
+           JOIN StoreProduct sp2 ON sp2.id = e.spIdB
+          WHERE e.userId = ?
+            AND e.verdict = 'same'
+            AND (sp1.productId = ? OR sp2.productId = ?)`,
+        [userId, productId, productId],
+    );
+
+    return rows.map((r: any) => {
+        const isA = r.productIdA === productId;
+        return {
+            productId: isA ? r.productIdB : r.productIdA,
+            spId:      isA ? r.spIdB      : r.spIdA,
+        };
+    });
+}
+
+/**
+ * Pick the canonical winner from a set of product rows using the same rule
+ * as the global merge: shortest name wins, lower id breaks ties.
+ */
+function pickRoot(products: { id: number; name: string }[]): number {
+    return products.reduce((best, p) => {
+        const bName = products.find(x => x.id === best)!.name;
+        if (p.name.length < bName.length) return p.id;
+        if (p.name.length === bName.length && p.id < best) return p.id;
+        return best;
+    }, products[0].id);
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/**
+ * Upsert a personal equivalence verdict for a SP pair.
+ *
+ * For 'same' verdicts the model maintains a union-find structure: every
+ * entry always points directly at the component root (shortest product name,
+ * lower id tiebreak). This guarantees O(1) component lookups and avoids
+ * chains that would break the browse merge-map logic.
+ *
+ * For 'different' verdicts the entry is stored as-is. The personal browse
+ * layer treats 'different' as a signal to keep products separate and never
+ * merges them, regardless of the global aggregate.
+ */
 export const upsertEquivalence = async (
     userId: string,
     spA: number,
     spB: number,
     verdict: EquivalenceVerdict,
-    conn?: Connection
-) => {
+    conn?: Connection,
+): Promise<void> => {
     const db = conn ?? pool;
     const { spIdA, spIdB } = orderPair(spA, spB);
-    await db.query(
-        `INSERT INTO UserStoreProductEquivalence (userId, spIdA, spIdB, verdict)
-         VALUES (?, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE verdict = VALUES(verdict), updatedAt = CURRENT_TIMESTAMP`,
-        [userId, spIdA, spIdB, verdict]
+
+    if (verdict !== 'same') {
+        await db.query(
+            `INSERT INTO UserStoreProductEquivalence (userId, spIdA, spIdB, verdict)
+             VALUES (?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE
+                 verdict = VALUES(verdict),
+                 needsReverification = 0,
+                 updatedAt = CURRENT_TIMESTAMP`,
+            [userId, spIdA, spIdB, verdict],
+        );
+        return;
+    }
+
+    // --- 'same' path: union-find normalization ---
+
+    // 1. Resolve the product each SP belongs to.
+    const [spRows]: any = await db.query(
+        `SELECT id, productId FROM StoreProduct WHERE id IN (?, ?)`,
+        [spA, spB],
     );
+    const spProductMap = new Map<number, number>(spRows.map((r: any) => [Number(r.id), Number(r.productId)]));
+    const productA = spProductMap.get(spA);
+    const productB = spProductMap.get(spB);
+
+    if (!productA || !productB || productA === productB) {
+        // SPs belong to the same product or lookup failed — nothing to merge.
+        await db.query(
+            `INSERT INTO UserStoreProductEquivalence (userId, spIdA, spIdB, verdict)
+             VALUES (?, ?, ?, 'same')
+             ON DUPLICATE KEY UPDATE
+                 verdict = 'same',
+                 needsReverification = 0,
+                 updatedAt = CURRENT_TIMESTAMP`,
+            [userId, spIdA, spIdB],
+        );
+        return;
+    }
+
+    // 2. Find each product's existing component (one hop, since we normalise).
+    const neighboursA = await getComponentNeighbours(userId, productA, db);
+    const neighboursB = await getComponentNeighbours(userId, productB, db);
+
+    // Build the merged component: product → representative SP.
+    // Start with the two SPs from the current vote.
+    const componentSp = new Map<number, number>([
+        [productA, spA],
+        [productB, spB],
+    ]);
+    for (const n of neighboursA) if (!componentSp.has(n.productId)) componentSp.set(n.productId, n.spId);
+    for (const n of neighboursB) if (!componentSp.has(n.productId)) componentSp.set(n.productId, n.spId);
+
+    // 3. Fetch product names to elect the root.
+    const allProductIds = [...componentSp.keys()];
+    const [productRows]: any = await db.query(
+        `SELECT id, name FROM Product WHERE id IN (?)`,
+        [allProductIds],
+    );
+    const rootProductId = pickRoot(productRows);
+    const rootSp = componentSp.get(rootProductId)!;
+
+    // 4. Delete all existing 'same' entries for any product in this component.
+    //    We rewrite them all to guarantee direct-to-root pointers.
+    const allSpIds = [...componentSp.values()];
+    await db.query(
+        `DELETE FROM UserStoreProductEquivalence
+          WHERE userId = ?
+            AND verdict = 'same'
+            AND (spIdA IN (?) OR spIdB IN (?))`,
+        [userId, allSpIds, allSpIds],
+    );
+
+    // 5. Re-insert one entry per non-root member, each pointing at rootSp.
+    const insertRows: [string, number, number, string][] = [];
+    for (const [productId, memberSp] of componentSp) {
+        if (productId === rootProductId) continue;
+        const { spIdA: a, spIdB: b } = orderPair(memberSp, rootSp);
+        insertRows.push([userId, a, b, 'same']);
+    }
+
+    if (insertRows.length > 0) {
+        await db.query(
+            `INSERT INTO UserStoreProductEquivalence (userId, spIdA, spIdB, verdict)
+             VALUES ?
+             ON DUPLICATE KEY UPDATE
+                 verdict = 'same',
+                 needsReverification = 0,
+                 updatedAt = CURRENT_TIMESTAMP`,
+            [insertRows],
+        );
+    }
 };
 
 export const getEquivalencesForUser = async (userId: string): Promise<UserEquivalence[]> => {
     const [rows]: any = await pool.query(
-        `SELECT id, userId, spIdA, spIdB, verdict
+        `SELECT id, userId, spIdA, spIdB, verdict, needsReverification
            FROM UserStoreProductEquivalence
           WHERE userId = ?`,
-        [userId]
+        [userId],
     );
     return rows;
 };
 
 // Returns all SP IDs the user considers equivalent to any of the given SP IDs.
-// Used by L2 browse to expand a product cluster with user's personal merges.
 export const getEquivalentSpIds = async (
     userId: string,
-    spIds: number[]
+    spIds: number[],
 ): Promise<Map<number, number[]>> => {
     if (spIds.length === 0) return new Map();
     const [rows]: any = await pool.query(
-        `SELECT spIdA, spIdB, verdict
+        `SELECT spIdA, spIdB
            FROM UserStoreProductEquivalence
           WHERE userId = ?
             AND verdict = 'same'
             AND (spIdA IN (?) OR spIdB IN (?))`,
-        [userId, spIds, spIds]
+        [userId, spIds, spIds],
     );
     const map = new Map<number, number[]>();
     for (const row of rows) {
@@ -68,38 +219,153 @@ export const getEquivalentSpIds = async (
     return map;
 };
 
-// For a given list of product IDs (from an L2 browse category), returns a map
-// of { hideProductId → keepProductId } based on the user's personal 'same' verdicts.
-// Products linked by a user equivalence where both SPs belong to different products
-// collapse into one row: the one with the lower id is kept, the other hidden.
-// Only direct pairs are considered (no transitivity).
+/**
+ * For a browse product list, return { hideProductId → keepProductId } based on
+ * the user's personal 'same' verdicts. Winner = shortest product name (lower id
+ * tiebreak), matching the global merge rule so personal and global views are
+ * consistent.
+ */
 export const getUserProductMergeMap = async (
     userId: string,
-    productIds: number[]
+    productIds: number[],
 ): Promise<Map<number, number>> => {
     if (productIds.length === 0) return new Map();
     const [rows]: any = await pool.query(
-        `SELECT LEAST(sp1.productId, sp2.productId)    AS keepId,
-                GREATEST(sp1.productId, sp2.productId) AS hideId
+        `SELECT
+             sp1.productId AS productIdA,
+             sp2.productId AS productIdB,
+             p1.name       AS nameA,
+             p2.name       AS nameB
            FROM UserStoreProductEquivalence e
            JOIN StoreProduct sp1 ON sp1.id = e.spIdA
            JOIN StoreProduct sp2 ON sp2.id = e.spIdB
+           JOIN Product      p1  ON p1.id  = sp1.productId
+           JOIN Product      p2  ON p2.id  = sp2.productId
           WHERE e.userId = ?
             AND e.verdict = 'same'
             AND sp1.productId != sp2.productId
             AND sp1.productId IN (?)
             AND sp2.productId IN (?)`,
-        [userId, productIds, productIds]
+        [userId, productIds, productIds],
     );
+
     const map = new Map<number, number>();
-    for (const row of rows) map.set(row.hideId, row.keepId);
+    for (const row of rows) {
+        const aId: number = row.productIdA;
+        const bId: number = row.productIdB;
+        const aName: string = row.nameA;
+        const bName: string = row.nameB;
+
+        let keepId: number;
+        let hideId: number;
+        if (aName.length !== bName.length) {
+            keepId = aName.length < bName.length ? aId : bId;
+            hideId = aName.length < bName.length ? bId : aId;
+        } else {
+            keepId = aId < bId ? aId : bId;
+            hideId = aId < bId ? bId : aId;
+        }
+        map.set(hideId, keepId);
+    }
     return map;
 };
 
-export const deleteEquivalence = async (userId: string, spA: number, spB: number) => {
+/**
+ * Return all productIds in the personal component containing `productId` for
+ * this user. Since all entries point directly to the root, fetching the root
+ * and all its members takes exactly two queries.
+ *
+ * Used by the product detail page to collect all SPs across a personal merge.
+ */
+export const getPersonalComponentForProduct = async (
+    userId: string,
+    productId: number,
+    conn?: Connection,
+): Promise<number[]> => {
+    const db = conn ?? pool;
+
+    // Step 1: find this product's root (if it is itself a member pointing to root).
+    const [rootRows]: any = await db.query(
+        `SELECT
+             CASE WHEN sp1.productId = ? THEN sp2.productId ELSE sp1.productId END AS rootProductId
+           FROM UserStoreProductEquivalence e
+           JOIN StoreProduct sp1 ON sp1.id = e.spIdA
+           JOIN StoreProduct sp2 ON sp2.id = e.spIdB
+          WHERE e.userId = ?
+            AND e.verdict = 'same'
+            AND (sp1.productId = ? OR sp2.productId = ?)
+          LIMIT 1`,
+        [productId, userId, productId, productId],
+    );
+
+    const rootProductId: number = rootRows[0]?.rootProductId ?? productId;
+
+    // Step 2: find all members pointing to this root (includes root itself).
+    const [memberRows]: any = await db.query(
+        `SELECT DISTINCT
+             CASE WHEN sp1.productId = ? THEN sp2.productId ELSE sp1.productId END AS memberId
+           FROM UserStoreProductEquivalence e
+           JOIN StoreProduct sp1 ON sp1.id = e.spIdA
+           JOIN StoreProduct sp2 ON sp2.id = e.spIdB
+          WHERE e.userId = ?
+            AND e.verdict = 'same'
+            AND (sp1.productId = ? OR sp2.productId = ?)`,
+        [rootProductId, userId, rootProductId, rootProductId],
+    );
+
+    const members: number[] = memberRows.map((r: any) => Number(r.memberId));
+    if (!members.includes(rootProductId)) members.push(rootProductId);
+    return members;
+};
+
+/**
+ * Return the set of SP pair keys (formatted as "minId-maxId") for pairs that
+ * need re-verification for this user, filtered to only SPs present in the
+ * given receipt's lines. Used by the queue builder to surface re-verification
+ * cards even though the pair was already voted on.
+ */
+export const getReverificationPairKeysForReceipt = async (
+    userId: string,
+    receiptSpIds: number[],
+): Promise<Set<string>> => {
+    if (receiptSpIds.length === 0) return new Set();
+    const [rows]: any = await pool.query(
+        `SELECT spIdA, spIdB
+           FROM UserStoreProductEquivalence
+          WHERE userId = ?
+            AND needsReverification = 1
+            AND (spIdA IN (?) OR spIdB IN (?))`,
+        [userId, receiptSpIds, receiptSpIds],
+    );
+    const s = new Set<string>();
+    for (const r of rows) s.add(`${r.spIdA}-${r.spIdB}`);
+    return s;
+};
+
+/**
+ * Clear the needsReverification flag for a specific SP pair after the user
+ * has re-voted on it.
+ */
+export const clearReverification = async (
+    userId: string,
+    spA: number,
+    spB: number,
+    conn?: Connection,
+): Promise<void> => {
+    const db = conn ?? pool;
+    const { spIdA, spIdB } = orderPair(spA, spB);
+    await db.query(
+        `UPDATE UserStoreProductEquivalence
+            SET needsReverification = 0
+          WHERE userId = ? AND spIdA = ? AND spIdB = ?`,
+        [userId, spIdA, spIdB],
+    );
+};
+
+export const deleteEquivalence = async (userId: string, spA: number, spB: number): Promise<void> => {
     const { spIdA, spIdB } = orderPair(spA, spB);
     await pool.query(
         `DELETE FROM UserStoreProductEquivalence WHERE userId = ? AND spIdA = ? AND spIdB = ?`,
-        [userId, spIdA, spIdB]
+        [userId, spIdA, spIdB],
     );
 };

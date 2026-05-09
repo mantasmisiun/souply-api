@@ -18,6 +18,7 @@ import swipeVoteRoutes from './routes/swipeVoteRoutes.js';
 import orphanSwipeRoutes from './routes/orphanSwipeRoutes.js';
 import geocodeRoutes from './routes/geocodeRoutes.js';
 import parserTestRoutes from './routes/parserTestRoutes.js';
+import adminRoutes from './routes/adminRoutes.js';
 import swaggerUi from 'swagger-ui-express';
 import swaggerSpec from './config/swagger.js';
 
@@ -41,6 +42,7 @@ app.use('/api', swipeVoteRoutes);
 app.use('/api', orphanSwipeRoutes);
 app.use('/api', geocodeRoutes);
 app.use('/api', parserTestRoutes);
+app.use('/api', adminRoutes);
 app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
 // Dev-only: static-serve the PNGs produced by `npm run receipts:stage`

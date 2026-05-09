@@ -74,7 +74,8 @@ export const fetchProductsByCategoryWithAmounts = async (req: Request, res: Resp
             return;
         }
         const mode = parseMode(req.query.mode);
-        const products = await getProductsByCategoryWithAmounts(categoryId, mode);
+        const userId = typeof req.query.userId === 'string' ? req.query.userId : undefined;
+        const products = await getProductsByCategoryWithAmounts(categoryId, mode, userId);
         res.json(products);
     } catch (error) {
         next(error);
@@ -89,7 +90,8 @@ export const fetchAllProductsByL2WithAmounts = async (req: Request, res: Respons
             return;
         }
         const mode = parseMode(req.query.mode);
-        const products = await getAllProductsByL2WithAmounts(categoryId, mode);
+        const userId = typeof req.query.userId === 'string' ? req.query.userId : undefined;
+        const products = await getAllProductsByL2WithAmounts(categoryId, mode, userId);
         res.json(products);
     } catch (error) {
         next(error);

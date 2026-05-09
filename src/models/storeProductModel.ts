@@ -1,4 +1,5 @@
 import pool from '../config/db.js';
+import { resolveEffectiveProductId } from '../services/storeProductMergeService.js';
 
 type Connection = typeof pool | any;
 
@@ -68,12 +69,15 @@ export const getStoreProductsByProductId = async (productId: number) => {
  * this base" at a glance.
  */
 export const getStoreProductsForCluster = async (productId: number) => {
+    // Follow mergedIntoId chain so a globally merged loser still shows its winner's cluster.
+    const effectiveProductId = await resolveEffectiveProductId(productId);
+
     const [headRows]: any = await pool.query(
         `SELECT COALESCE(baseProductId, id) AS headId
            FROM Product
-          WHERE id = ? AND mergedIntoId IS NULL
+          WHERE id = ?
           LIMIT 1`,
-        [productId]
+        [effectiveProductId]
     );
     if (!headRows[0]) return [];
     const headId = Number(headRows[0].headId);

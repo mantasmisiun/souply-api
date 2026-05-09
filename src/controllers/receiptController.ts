@@ -6,6 +6,7 @@ import {
     getVotedPairKeysForUser,
 } from "../models/receiptSwipeCandidateModel.js";
 import { buildSwipeQueue } from "../services/swipeQueueService.js";
+import { getReverificationPairKeysForReceipt } from "../models/userEquivalenceModel.js";
 import {
     unverifyReceiptLinePrice,
     upsertReceiptLineIssue,
@@ -153,7 +154,7 @@ export const createReceiptFromOcr = async (req: Request, res: Response, next: Ne
                     quantity: p.quantity,
                     unit: p.unit,
                 })),
-            });
+            }, true);
             res.status(201).json({ id: receiptId, ...result });
         } catch (err: any) {
             if (err?.code === 'ER_DUP_ENTRY' && /unique_receipt/i.test(String(err?.sqlMessage ?? ''))) {
@@ -345,9 +346,12 @@ export const fetchReceiptSwipeQueue = async (req: Request, res: Response, next: 
             ? parsedData.products
             : [];
 
-        // Run all three independent DB queries in parallel — previously sequential,
-        // which added up to 3× latency on the mobile client's first load.
-        const [flat, votedPairs, verifiedSpIds] = await Promise.all([
+        // Collect SP IDs present in this receipt for the re-verification lookup.
+        const receiptSpIds = parsedProducts
+            .map((p: any) => Number(p.storeProductId))
+            .filter((spId: number) => spId > 0);
+
+        const [flat, votedPairs, verifiedSpIds, reverificationPairs] = await Promise.all([
             getSwipeCandidatesWithDetails(id),
             // Cards the user has already acted on shouldn't appear again.
             //  - Cross-SP pairs (line.SP ≠ candidate.SP): skip when a
@@ -357,6 +361,11 @@ export const fetchReceiptSwipeQueue = async (req: Request, res: Response, next: 
             //    source of truth once swipes start flipping the Price column.
             userId ? getVotedPairKeysForUser(userId) : Promise.resolve(new Set<string>()),
             userId ? getVerifiedStoreProductIdsForReceipt(id) : Promise.resolve(new Set<number>()),
+            // Re-verification exception: pairs flagged after a global demotion
+            // are re-surfaced even though the user has already voted on them.
+            userId && receiptSpIds.length > 0
+                ? getReverificationPairKeysForReceipt(userId, receiptSpIds)
+                : Promise.resolve(new Set<string>()),
         ]);
 
         const items = buildSwipeQueue(
@@ -364,6 +373,7 @@ export const fetchReceiptSwipeQueue = async (req: Request, res: Response, next: 
             parsedProducts,
             userId ? votedPairs : new Set<string>(),
             userId ? verifiedSpIds : new Set<number>(),
+            userId ? reverificationPairs : new Set<string>(),
         );
 
         res.json({ receiptId: id, items });

@@ -6,6 +6,8 @@ import { hasPendingMandatorySwipes, shouldShowBurstWarning } from '../services/s
 import { getPendingMandatorySwipeCount } from '../models/receiptModel.js';
 import { getEquivalencesForUser, upsertEquivalence, deleteEquivalence, getUserProductMergeMap, type EquivalenceVerdict } from '../models/userEquivalenceModel.js';
 import { getUserStats } from '../services/statsService.js';
+import { getVoteHistory, orderPair, type MatchVote } from '../models/storeProductMatchModel.js';
+import { editVote } from '../services/swipeVoteService.js';
 
 export const addUser = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -153,6 +155,55 @@ export const fetchUserStats = async (req: Request, res: Response, next: NextFunc
         const userId = String(req.params.id);
         const stats = await getUserStats(userId);
         res.json(stats);
+    } catch (error) {
+        next(error);
+    }
+};
+
+// GET /users/:id/votes?limit=&cursor=&search=&vote=
+// Returns a paginated, optionally filtered vote history page.
+export const fetchUserVoteHistory = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const userId = String(req.params.id);
+        const limit  = req.query.limit  ? Number(req.query.limit)  : undefined;
+        const cursor = req.query.cursor ? String(req.query.cursor) : undefined;
+        const search = req.query.search ? String(req.query.search) : undefined;
+        const vote   = req.query.vote   ? String(req.query.vote)   : undefined;
+
+        const page = await getVoteHistory(userId, {
+            limit: limit && Number.isFinite(limit) ? limit : undefined,
+            cursor,
+            search,
+            vote: (['identical', 'similar', 'different'].includes(vote ?? '')) ? vote as any : undefined,
+        });
+        res.json(page);
+    } catch (error) {
+        next(error);
+    }
+};
+
+// PUT /users/:id/votes/pair
+// Edit an existing vote from the history screen. Body: { spIdA, spIdB, vote }.
+// dwellMs is not accepted — retrospective edits have no dwell time.
+export const editUserVotePair = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const userId = String(req.params.id);
+        const spIdA = Number(req.body?.spIdA);
+        const spIdB = Number(req.body?.spIdB);
+        const vote = req.body?.vote as string;
+
+        if (!Number.isFinite(spIdA) || !Number.isFinite(spIdB) || spIdA <= 0 || spIdB <= 0) {
+            res.status(400).json({ error: 'spIdA and spIdB must be positive integers' });
+            return;
+        }
+        if (!['identical', 'similar', 'different'].includes(vote)) {
+            res.status(400).json({ error: 'vote must be identical | similar | different' });
+            return;
+        }
+
+        const { spIdA: a, spIdB: b } = orderPair(spIdA, spIdB);
+        const result = await editVote({ userId, spIdA: a, spIdB: b, vote: vote as MatchVote });
+        res.json(result);
     } catch (error) {
         next(error);
     }

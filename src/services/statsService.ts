@@ -4,7 +4,7 @@ const CHAIN_COLORS: Record<string, string> = {
     'Rimi':   '#E31E2D',
     'Lidl':   '#0095D9',
     'IKI':    '#FFD100',
-    'Norfa':  '#4CAF50',
+    'Norf':   '#4CAF50',
     'Maxima': '#003DA5',
 };
 

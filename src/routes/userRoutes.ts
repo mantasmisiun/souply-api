@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { addUser, fetchUserById, updateUserLastActive, fetchUserProfile, fetchUserEquivalences, putUserEquivalence, deleteUserEquivalence, fetchUserProductMergeMap, fetchUserStats } from '../controllers/userController.js';
+import { addUser, fetchUserById, updateUserLastActive, fetchUserProfile, fetchUserEquivalences, putUserEquivalence, deleteUserEquivalence, fetchUserProductMergeMap, fetchUserStats, fetchUserVoteHistory, editUserVotePair } from '../controllers/userController.js';
 
 const router = Router();
 
@@ -69,5 +69,7 @@ router.put('/users/:id/equivalences', putUserEquivalence);
 router.delete('/users/:id/equivalences', deleteUserEquivalence);
 router.get('/users/:id/product-merge-map', fetchUserProductMergeMap);
 router.get('/users/:id/stats', fetchUserStats);
+router.get('/users/:id/votes', fetchUserVoteHistory);
+router.put('/users/:id/votes/pair', editUserVotePair);
 
 export default router;
