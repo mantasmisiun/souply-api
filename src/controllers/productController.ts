@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { createProduct, searchProduct, getProductById, getProductsByCategory, getProductsByCategoryWithAmounts, getAllProductsByL2WithAmounts } from '../models/productModel.js';
+import { createProduct, searchProduct, getProductById, getProductsByCategory, getProductsByCategoryWithAmounts, getAllProductsByL2WithAmounts, getDiscountedProducts } from '../models/productModel.js';
 
 export const addProduct = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -92,6 +92,21 @@ export const fetchAllProductsByL2WithAmounts = async (req: Request, res: Respons
         const mode = parseMode(req.query.mode);
         const userId = typeof req.query.userId === 'string' ? req.query.userId : undefined;
         const products = await getAllProductsByL2WithAmounts(categoryId, mode, userId);
+        res.json(products);
+    } catch (error) {
+        next(error);
+    }
+};
+
+export const fetchDiscountedProducts = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const l2CategoryId = req.query.l2CategoryId ? Number(req.query.l2CategoryId) : undefined;
+        const search = typeof req.query.search === 'string' && req.query.search.trim()
+            ? req.query.search.trim()
+            : undefined;
+        const limit = Math.min(req.query.limit ? Number(req.query.limit) : 30, 100);
+        const offset = req.query.offset ? Number(req.query.offset) : 0;
+        const products = await getDiscountedProducts({ l2CategoryId, search, limit, offset });
         res.json(products);
     } catch (error) {
         next(error);

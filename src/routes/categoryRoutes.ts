@@ -3,7 +3,7 @@ import {
     addCategory, fetchAllCategories, fetchSubCategories, fetchCategoryById,
     fetchCategoryPath, fetchAllProductsByParentCategory,
     fetchCategoryAncestors, fetchStoreProductsByCategory, fetchL3CategorySearch,
-    resolveCategoryPathHandler
+    resolveCategoryPathHandler, fetchAllL2Categories
 } from '../controllers/categoryController.js';
 
 const router = Router();
@@ -52,6 +52,7 @@ router.post('/categories/resolve-path', resolveCategoryPathHandler);
  */
 // GET /api/categories - Get all top-level categories
 router.get('/categories', fetchAllCategories);
+router.get('/categories/l2', fetchAllL2Categories);
 router.get('/categories/l3/search', fetchL3CategorySearch);
 /**
  * @swagger

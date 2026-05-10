@@ -97,3 +97,11 @@ export const getBasketIdByListId = async (listId: number): Promise<number | null
 export const updateShoppingListBasket = async (listId: number, basketId: number) => {
     await pool.query('UPDATE ShoppingList SET basketId = ? WHERE id = ?', [basketId, listId]);
 };
+
+export const getListOwnerUserId = async (listId: number): Promise<string | null> => {
+    const [rows]: any = await pool.query(
+        'SELECT userId FROM ShoppingList WHERE id = ? LIMIT 1',
+        [listId],
+    );
+    return rows[0]?.userId ?? null;
+};

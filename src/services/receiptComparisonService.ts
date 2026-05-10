@@ -180,6 +180,11 @@ const buildStoreBaskets = async (
             ? item.promoPrice
             : item.price;
         const lineTotal = round2(effectiveUnitPrice * item.quantity);
+        // Regular price used as the imputation baseline: a promo at the
+        // visited store is specific to that chain's current campaign and
+        // shouldn't drag down the estimated cost at stores that don't carry
+        // the item.
+        const regularLineTotal = round2(item.price * item.quantity);
         const productId = item.storeProductId !== null
             ? productIdByStoreProductId.get(item.storeProductId)
             : undefined;
@@ -194,8 +199,14 @@ const buildStoreBaskets = async (
             continue;
         }
 
+        // known: actual price you'd pay at each store (promo where applicable).
+        // forImputation: baseline for averaging — current store contributes its
+        // regular price so a promo doesn't skew the estimate for stores that
+        // don't stock this product.
         const known = new Map<number, number>();
         known.set(currentStoreId, lineTotal);
+        const forImputation = new Map<number, number>();
+        forImputation.set(currentStoreId, regularLineTotal);
 
         for (const store of allStores) {
             if (store.storeId === currentStoreId) continue;
@@ -203,11 +214,12 @@ const buildStoreBaskets = async (
             const t = calculateItemTotalSync(options, item.quantity, item.unit);
             if (t !== null) {
                 known.set(store.storeId, t);
+                forImputation.set(store.storeId, t);
             }
         }
 
-        const values = Array.from(known.values());
-        const imputed = round2(values.reduce((a, b) => a + b, 0) / values.length);
+        const imputedValues = Array.from(forImputation.values());
+        const imputed = round2(imputedValues.reduce((a, b) => a + b, 0) / imputedValues.length);
 
         for (const store of allStores) {
             const b = baskets.get(store.storeId)!;

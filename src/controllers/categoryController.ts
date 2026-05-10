@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { createCategory, getTopLevelCategories, getSubCategories, getCategoryById, getCategoryPath, getCategoryAncestors, getStoreProductsByCategoryAndChain, getAllProductsByParentCategory, searchL3CategoriesByName, resolveCategoryByPath } from '../models/categoryModel.js';
+import { createCategory, getTopLevelCategories, getSubCategories, getCategoryById, getCategoryPath, getCategoryAncestors, getStoreProductsByCategoryAndChain, getAllProductsByParentCategory, searchL3CategoriesByName, resolveCategoryByPath, getAllL2Categories } from '../models/categoryModel.js';
 
 export const addCategory = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -138,6 +138,15 @@ export const fetchL3CategorySearch = async (req: Request, res: Response, next: N
  * Returns the deepest matching Category id (or null) for a hierarchical
  * path. Used by scrapers to map their chain's category tree onto ours.
  */
+export const fetchAllL2Categories = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const categories = await getAllL2Categories();
+        res.json(categories);
+    } catch (error) {
+        next(error);
+    }
+};
+
 export const resolveCategoryPathHandler = async (
     req: Request, res: Response, next: NextFunction
 ) => {

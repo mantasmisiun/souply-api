@@ -335,6 +335,7 @@ describe('persistReceiptPrices — createPrice arguments', () => {
             expect.any(Date), // date (derived from receipt date)
             true,             // priceVerified
             1,                // receiptId
+            false,            // requiresCoupon
             mockConn,         // connection
         );
     });
@@ -346,7 +347,7 @@ describe('persistReceiptPrices — createPrice arguments', () => {
         await persistReceiptPrices(1, 'u1', parsedData, input);
 
         expect(mockCreatePrice).toHaveBeenCalledWith(
-            100, 10, 2.00, null, null, false, expect.any(Date), false, 1, mockConn,
+            100, 10, 2.00, null, null, false, expect.any(Date), false, 1, false, mockConn,
         );
     });
 });

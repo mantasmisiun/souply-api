@@ -1,5 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
-import { createListItem, getListItemsByShoppingListId, updateListItemQuantity, toggleListItem, deleteListItem, getListItemByListAndProduct } from '../models/shoppingListItemModel.js';
+import { createListItem, getListItemsByShoppingListId, updateListItemQuantity, toggleListItem, deleteListItem, getListItemByListAndProduct, getListItemById } from '../models/shoppingListItemModel.js';
+import { getListOwnerUserId } from '../models/shoppingListModel.js';
+import { logInteraction } from '../models/productInteractionModel.js';
 
 export const addListItem = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -34,6 +36,11 @@ export const addListItem = async (req: Request, res: Response, next: NextFunctio
             price ?? null,
             name ?? null
         );
+        if (productId != null) {
+            getListOwnerUserId(listId).then(userId => {
+                if (userId) logInteraction(userId, productId, 'list_add').catch(() => {});
+            }).catch(() => {});
+        }
         res.status(201).json({ id, listId, productId: productId ?? null, storeProductId: storeProductId ?? null, quantity, price: price ?? null });
     } catch (error) {
         next(error);
@@ -78,6 +85,13 @@ export const toggleListItemChecked = async (req: Request, res: Response, next: N
             return;
         }
         await toggleListItem(id, isChecked);
+        if (isChecked) {
+            getListItemById(id).then(async item => {
+                if (!item?.productId) return;
+                const userId = await getListOwnerUserId(item.listId);
+                if (userId) logInteraction(userId, item.productId, 'list_check').catch(() => {});
+            }).catch(() => {});
+        }
         res.json({ id, isChecked });
     } catch (error) {
         next(error);

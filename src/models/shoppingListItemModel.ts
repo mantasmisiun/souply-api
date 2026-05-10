@@ -73,7 +73,14 @@ export const getListItemsByShoppingListId = async (listId: number) => {
                 c3.id   AS l3CategoryId,
                 c3.name AS l3CategoryName,
                 c2.id   AS l2CategoryId,
-                c2.name AS l2CategoryName
+                c2.name AS l2CategoryName,
+                (SELECT CONCAT('-', ROUND((1 - pr.promoPrice / pr.price) * 100), '%')
+                 FROM Price pr
+                 WHERE pr.storeProductId = sli.storeProductId
+                   AND pr.requiresCoupon = 1
+                   AND pr.promoEnd IS NOT NULL AND pr.promoEnd > NOW()
+                   AND pr.price > 0 AND pr.promoPrice > 0
+                 ORDER BY pr.date DESC LIMIT 1) AS couponLabel
          FROM ShoppingListItem sli
          LEFT JOIN Product p ON sli.productId = p.id
          LEFT JOIN StoreProduct sp ON sli.storeProductId = sp.id
@@ -93,6 +100,8 @@ export const getListItemsByShoppingListId = async (listId: number) => {
         price: row.price ? parseFloat(row.price) : null,
         unit: row.isWeighable ? 'kg' : 'vnt.',
         amount: row.amount ? parseFloat(row.amount) : null,
+        requiresCoupon: row.couponLabel != null,
+        couponLabel: row.couponLabel ?? null,
     }));
 };
 
@@ -112,6 +121,14 @@ export const toggleListItem = async (id: number, isChecked: boolean) => {
 
 export const deleteListItem = async (id: number) => {
     await pool.query('DELETE FROM ShoppingListItem WHERE id = ?', [id]);
+};
+
+export const getListItemById = async (id: number) => {
+    const [rows]: any = await pool.query(
+        'SELECT id, listId, productId FROM ShoppingListItem WHERE id = ? LIMIT 1',
+        [id],
+    );
+    return rows[0] || null;
 };
 
 export const getListItemByListAndProduct = async (listId: number, productId: number) => {

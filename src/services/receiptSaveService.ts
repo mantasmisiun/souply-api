@@ -291,6 +291,7 @@ export const persistReceiptPrices = async (
                 writeDate,
                 item.priceVerified === true,
                 receiptId,
+                false,
                 connection
             );
             result.saved++;

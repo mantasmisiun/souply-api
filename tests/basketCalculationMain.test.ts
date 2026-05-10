@@ -24,8 +24,6 @@ beforeAll(async () => {
     calculateBasketForStores = mod.calculateBasketForStores;
 });
 
-// resetAllMocks clears both call tracking AND queued mockResolvedValueOnce values.
-// clearAllMocks would leave stale queue entries that bleed into later tests.
 beforeEach(() => jest.resetAllMocks());
 
 // ---------------------------------------------------------------------------
@@ -50,37 +48,66 @@ function makeBasketItem(overrides: Record<string, any> = {}) {
 }
 
 /**
- * Row format returned by batchFetchTier12Prices. Uses `spProductId` (aliased
- * from Product.id in the SQL) as the cache key, alongside `storeId` so the
- * cache is indexed per store.
+ * SP row returned by batchFetchTier12Prices step 1:
+ *   SELECT sp.id, sp.productId, sp.storeProductName, sp.isWeighable,
+ *          sp.amount, sp.unit, prod.baseProductId
  */
-function makeBatchRow(storeId: number, price: string, overrides: Record<string, any> = {}) {
+function makeSpDbRow(overrides: Record<string, any> = {}) {
     return {
-        id: 10, spProductId: 100, storeProductName: 'Pienas 1L',
-        isWeighable: 0, amount: '1', unit: 'vnt',
-        price, promoPrice: null, isFallback: 0,
-        storeId, baseProductId: null,
+        id: 10,
+        productId: 100,
+        storeProductName: 'Pienas 1L',
+        isWeighable: 0,
+        amount: '1',
+        unit: 'vnt',
+        baseProductId: null,
         ...overrides,
     };
 }
 
 /**
- * Sets up mockPoolQuery for the typical tier waterfall:
- *   1st call  — batchFetchTier12Prices (single pre-fetch)
- *   subsequent — discriminated by SQL content for tier-3/4 fallbacks
+ * Price row returned by fetchLatestPrices (batchFetchTier12Prices step 2):
+ *   SELECT p.storeProductId, p.storeId, p.price, p.promoPrice, p.isFallback
+ */
+function makePriceDbRow(storeId: number, price: string, overrides: Record<string, any> = {}) {
+    return {
+        storeProductId: 10,
+        storeId,
+        price,
+        promoPrice: null,
+        isFallback: 0,
+        ...overrides,
+    };
+}
+
+/**
+ * Queue the mock pool responses for a calculateBasketForStores call
+ * (single chain, single product, N stores):
+ *
+ *   Call 1  — batchFetchTier12Prices step 1: find matching StoreProducts
+ *   Call 2  — batchFetchTier12Prices step 2: fetchLatestPrices for those SPs
+ *             (only queued if spRows.length > 0)
+ *   Call 3  — batchFetchTier3Substitutes LIKE candidate query (empty by default)
+ *   Call 4  — approximateCrossChain step 1: SP rows for the product
+ *   Call 5  — approximateCrossChain step 2: fetchLatestPrices for tier-4 SPs
+ *             (only queued if tier4SpRows.length > 0)
  */
 function setupTiers(
-    tier12Rows: any[],
+    spRows: any[],
+    priceRows: any[],
     tier3Rows: any[] = [],
-    tier4Rows: any[] = [],
+    tier4SpRows: any[] = [],
+    tier4PriceRows: any[] = [],
 ) {
-    mockPoolQuery
-        .mockResolvedValueOnce([tier12Rows])   // batch pre-fetch
-        .mockImplementation(async (sql: string) => {
-            if (sql.includes('ACOS')) return [tier4Rows];
-            if (sql.includes('LIKE ?')) return [tier3Rows];
-            return [[]];
-        });
+    mockPoolQuery.mockResolvedValueOnce([spRows]);
+    if (spRows.length > 0) {
+        mockPoolQuery.mockResolvedValueOnce([priceRows]);
+    }
+    mockPoolQuery.mockResolvedValueOnce([tier3Rows]);
+    mockPoolQuery.mockResolvedValueOnce([tier4SpRows]);
+    if (tier4SpRows.length > 0) {
+        mockPoolQuery.mockResolvedValueOnce([tier4PriceRows]);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -107,7 +134,10 @@ describe('calculateBasketForStores — tier-1 match', () => {
     it('computes total as qty × effectivePrice for a direct match', async () => {
         mockGetClosestStores.mockResolvedValue([makeStore(1)]);
         mockGetBasketProductIds.mockResolvedValue([makeBasketItem()]);
-        setupTiers([makeBatchRow(1, '2.50')]);
+        setupTiers(
+            [makeSpDbRow()],
+            [makePriceDbRow(1, '2.50')],
+        );
 
         const [store] = await calculateBasketForStores(1);
 
@@ -122,7 +152,10 @@ describe('calculateBasketForStores — tier-1 match', () => {
     it('uses promoPrice as effectivePrice when present', async () => {
         mockGetClosestStores.mockResolvedValue([makeStore(1)]);
         mockGetBasketProductIds.mockResolvedValue([makeBasketItem()]);
-        setupTiers([makeBatchRow(1, '5.00', { promoPrice: '3.00' })]);
+        setupTiers(
+            [makeSpDbRow()],
+            [makePriceDbRow(1, '5.00', { promoPrice: '3.00' })],
+        );
 
         const [store] = await calculateBasketForStores(1);
 
@@ -133,7 +166,10 @@ describe('calculateBasketForStores — tier-1 match', () => {
     it('preserves isFallback from the Price row', async () => {
         mockGetClosestStores.mockResolvedValue([makeStore(1)]);
         mockGetBasketProductIds.mockResolvedValue([makeBasketItem()]);
-        setupTiers([makeBatchRow(1, '2.00', { isFallback: 1 })]);
+        setupTiers(
+            [makeSpDbRow()],
+            [makePriceDbRow(1, '2.00', { isFallback: 1 })],
+        );
 
         const [store] = await calculateBasketForStores(1);
 
@@ -149,7 +185,10 @@ describe('calculateBasketForStores — missing item', () => {
     it('marks item missing and contributes 0 to total when no tier matches', async () => {
         mockGetClosestStores.mockResolvedValue([makeStore(1)]);
         mockGetBasketProductIds.mockResolvedValue([makeBasketItem()]);
-        setupTiers([], [], []); // batch empty + tier-3 + tier-4 empty
+        // SP query returns empty → batchFetchTier12 returns early, no step-2 call
+        // tier-3 LIKE returns empty → no substitute
+        // tier-4 SP returns empty → approximateCrossChain returns null
+        setupTiers([], [], [], []);
 
         const [store] = await calculateBasketForStores(1);
 
@@ -167,17 +206,11 @@ describe('calculateBasketForStores — tier-4 cross-chain average', () => {
     it('sets isCrossChainAverage and isApproximated when tier-4 is used', async () => {
         mockGetClosestStores.mockResolvedValue([makeStore(1)]);
         mockGetBasketProductIds.mockResolvedValue([makeBasketItem()]);
-        setupTiers(
-            [],  // no tier-1/2 match
-            [],  // no tier-3 substitute
-            [    // tier-4: cross-chain price from a nearby store
-                {
-                    amount: '1', unit: 'vnt', isWeighable: 0,
-                    effectivePrice: '3.00', rawPrice: '3.00',
-                    promoPrice: null, isFallback: 0, storeId: 99,
-                },
-            ]
-        );
+
+        // No SP in this chain → tier-1 miss
+        const tier4Sp = { id: 20, amount: '1', unit: 'vnt', isWeighable: 0 };
+        const tier4Price = { storeProductId: 20, storeId: 1, price: '3.00', promoPrice: null, isFallback: 0 };
+        setupTiers([], [], [], [tier4Sp], [tier4Price]);
 
         const [store] = await calculateBasketForStores(1);
 
@@ -188,20 +221,22 @@ describe('calculateBasketForStores — tier-4 cross-chain average', () => {
     });
 
     it('averages across multiple stores in the same pack-size bucket', async () => {
-        mockGetClosestStores.mockResolvedValue([makeStore(1)]);
+        // Two nearby stores; neither has a tier-1 SP for the product.
+        // Both have prices for the product's SP (from another chain/context).
+        mockGetClosestStores.mockResolvedValue([makeStore(10), makeStore(20)]);
         mockGetBasketProductIds.mockResolvedValue([makeBasketItem({ quantity: '1' })]);
-        setupTiers(
-            [], [],
-            [
-                { amount: '1', unit: 'vnt', isWeighable: 0, effectivePrice: '2.00', rawPrice: '2.00', promoPrice: null, isFallback: 0, storeId: 10 },
-                { amount: '1', unit: 'vnt', isWeighable: 0, effectivePrice: '4.00', rawPrice: '4.00', promoPrice: null, isFallback: 0, storeId: 20 },
-            ]
-        );
 
-        const [store] = await calculateBasketForStores(1);
+        const tier4Sp = { id: 30, amount: '1', unit: 'vnt', isWeighable: 0 };
+        const tier4Prices = [
+            { storeProductId: 30, storeId: 10, price: '2.00', promoPrice: null, isFallback: 0 },
+            { storeProductId: 30, storeId: 20, price: '4.00', promoPrice: null, isFallback: 0 },
+        ];
+        setupTiers([], [], [], [tier4Sp], tier4Prices);
 
-        // avg(2.00, 4.00) = 3.00, qty=1 → total=3.00
-        expect(store.total).toBe(3.00);
+        const results = await calculateBasketForStores(1);
+
+        // Both stores use tier-4 cross-chain average = (2.00 + 4.00) / 2 = 3.00
+        expect(results[0].total).toBe(3.00);
     });
 });
 
@@ -214,9 +249,11 @@ describe('calculateBasketForStores — sort order', () => {
         mockGetClosestStores.mockResolvedValue([makeStore(1), makeStore(2)]);
         mockGetBasketProductIds.mockResolvedValue([makeBasketItem()]);
 
-        // Batch returns data only for store 1; store 2 falls through to
-        // tier-3/4 which are also empty → store 2 has a missing item.
-        setupTiers([makeBatchRow(1, '4.00')]);
+        // Only storeId=1 has a price row; storeId=2 gets nothing at any tier.
+        setupTiers(
+            [makeSpDbRow()],
+            [makePriceDbRow(1, '4.00')], // only store 1 priced
+        );
 
         const result = await calculateBasketForStores(1);
 
@@ -228,11 +265,14 @@ describe('calculateBasketForStores — sort order', () => {
         mockGetClosestStores.mockResolvedValue([makeStore(1), makeStore(2)]);
         mockGetBasketProductIds.mockResolvedValue([makeBasketItem()]);
 
-        // Batch contains rows for both stores at different prices.
-        setupTiers([
-            makeBatchRow(1, '2.00'),  // total = 2 × 2.00 = 4.00
-            makeBatchRow(2, '5.00'),  // total = 2 × 5.00 = 10.00
-        ]);
+        // Both stores have prices for the same SP (id=10).
+        setupTiers(
+            [makeSpDbRow()],
+            [
+                makePriceDbRow(1, '2.00'), // store 1: total = 2 × 2.00 = 4.00
+                makePriceDbRow(2, '5.00'), // store 2: total = 2 × 5.00 = 10.00
+            ],
+        );
 
         const result = await calculateBasketForStores(1);
 

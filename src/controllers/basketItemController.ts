@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import { createBasketItem, getBasketItemById, getBasketItemsByBasketId, updateBasketItemQuantity, deleteBasketItem, getBasketItemByBasketAndProduct, convertBasketItemsMode } from '../models/basketItemModel.js';
 import { getProductById } from '../models/productModel.js';
 import { getBasketById, updateBasketUpdatedAt } from '../models/basketModel.js';
+import { logInteraction } from '../models/productInteractionModel.js';
 
 export const addBasketItem = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -41,6 +42,7 @@ export const addBasketItem = async (req: Request, res: Response, next: NextFunct
 
         const id = await createBasketItem(basketId, productId, quantity, resolvedMatchMode);
         await updateBasketUpdatedAt(basketId);
+        logInteraction(basket.userId, productId, 'basket_add').catch(() => {});
         res.status(201).json({ id, basketId, productId, quantity, matchMode: resolvedMatchMode });
     } catch (error) {
         next(error);

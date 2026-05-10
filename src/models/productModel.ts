@@ -64,7 +64,7 @@ const PRODUCT_WITH_IMAGES_SELECT = `
 
 export const searchProduct = async (query: string) => {
     const [products]: any = await pool.query(
-        `SELECT ${PRODUCT_WITH_IMAGES_SELECT} FROM Product p WHERE p.name LIKE ?`,
+        `SELECT ${PRODUCT_WITH_IMAGES_SELECT} FROM Product p WHERE p.name LIKE ? ORDER BY p.globalScore DESC`,
         [`%${query}%`]
     );
     return products;
@@ -136,9 +136,24 @@ const BROWSE_SELECT = `
         CAST(MIN(${AMOUNT_NORMALIZED_EXPR}) AS UNSIGNED) as minAmount,
         CAST(MAX(${AMOUNT_NORMALIZED_EXPR}) AS UNSIGNED) as maxAmount,
         'g' as unit,
-        MAX(sp.isWeighable) as hasWeighable
+        MAX(sp.isWeighable) as hasWeighable,
+        MAX(ROUND((1 - dp.promoPrice / dp.price) * 100)) AS bestDiscountPct
      FROM Product p
      LEFT JOIN StoreProduct sp ON sp.productId = p.id
+     LEFT JOIN (
+         SELECT spi2.productId, pr.promoPrice, pr.price
+         FROM Price pr
+         JOIN StoreProduct spi2 ON spi2.id = pr.storeProductId
+         INNER JOIN (
+             SELECT storeProductId, MAX(id) AS maxId
+             FROM Price
+             WHERE promoEnd > NOW()
+               AND promoPrice IS NOT NULL
+             GROUP BY storeProductId
+         ) latest ON latest.maxId = pr.id
+         WHERE pr.promoPrice < pr.price
+           AND pr.price > 0
+     ) dp ON dp.productId = p.id
 `;
 
 /**
@@ -192,20 +207,45 @@ async function fetchPersonallyRestoredProducts(
  * When userId is provided, globally merged products that the user has
  * personally voted 'different' on are restored to the list.
  */
+const BLENDED_ORDER_BY = `
+    ORDER BY CASE
+        WHEN MAX(ups.interactionCount) > 0
+        THEN (LEAST(MAX(ups.interactionCount), 10) / 10.0) * MAX(ups.score)
+             + (1 - LEAST(MAX(ups.interactionCount), 10) / 10.0) * p.globalScore
+        ELSE p.globalScore
+    END DESC
+`;
+
 export const getProductsByCategoryWithAmounts = async (
     categoryId: number,
     mode: BrowseMode = 'base',
     userId?: string,
 ) => {
     const baseFilter = mode === 'base' ? 'AND p.baseProductId IS NULL' : '';
-    const [products]: any = await pool.query(
-        `${BROWSE_SELECT}
-         WHERE p.categoryId = ?
-           AND p.mergedIntoId IS NULL
-           ${baseFilter}
-         GROUP BY p.id`,
-        [categoryId]
-    );
+
+    let products: any[];
+    if (userId) {
+        [products] = await pool.query(
+            `${BROWSE_SELECT}
+             LEFT JOIN UserProductScore ups ON ups.userId = ? AND ups.productId = p.id
+             WHERE p.categoryId = ?
+               AND p.mergedIntoId IS NULL
+               ${baseFilter}
+             GROUP BY p.id
+             ${BLENDED_ORDER_BY}`,
+            [userId, categoryId],
+        ) as any;
+    } else {
+        [products] = await pool.query(
+            `${BROWSE_SELECT}
+             WHERE p.categoryId = ?
+               AND p.mergedIntoId IS NULL
+               ${baseFilter}
+             GROUP BY p.id
+             ORDER BY p.globalScore DESC`,
+            [categoryId],
+        ) as any;
+    }
 
     if (userId) {
         const restored = await fetchPersonallyRestoredProducts(
@@ -220,27 +260,131 @@ export const getProductsByCategoryWithAmounts = async (
     return products;
 };
 
+const DISCOUNT_AMOUNT_EXPR = `
+    CASE
+        WHEN sp.unit IN ('kg', 'l') THEN sp.amount * 1000
+        WHEN sp.unit IN ('g', 'ml') THEN sp.amount
+        ELSE NULL
+    END
+`;
+
+const discountsCache = new Map<string, { data: any[]; expiresAt: number }>();
+const DISCOUNTS_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+export const invalidateDiscountsCache = () => discountsCache.clear();
+
+export const getDiscountedProducts = async (opts: {
+    l2CategoryId?: number;
+    search?: string;
+    limit?: number;
+    offset?: number;
+} = {}) => {
+    const cacheKey = `${opts.l2CategoryId ?? ''}|${opts.search ?? ''}`;
+    const cached = discountsCache.get(cacheKey);
+    if (cached && Date.now() < cached.expiresAt) {
+        const { limit, offset = 0 } = opts;
+        return limit != null ? cached.data.slice(offset, offset + limit) : cached.data;
+    }
+
+    const conditions: string[] = [
+        'p.mergedIntoId IS NULL',
+        'p.baseProductId IS NULL',
+    ];
+    const params: any[] = [];
+
+    if (opts.l2CategoryId != null) {
+        conditions.push(
+            '(p.categoryId IN (SELECT id FROM Category WHERE parentCategoryId = ?) OR p.categoryId = ?)',
+        );
+        params.push(opts.l2CategoryId, opts.l2CategoryId);
+    }
+
+    if (opts.search) {
+        conditions.push('p.name LIKE ?');
+        params.push(`%${opts.search}%`);
+    }
+
+    const where = conditions.join(' AND ');
+
+    const [rows]: any = await pool.query(
+        `SELECT p.id, p.name, p.categoryId,
+            imgs.imageUrls,
+            CAST(MIN(${DISCOUNT_AMOUNT_EXPR}) AS UNSIGNED) AS minAmount,
+            CAST(MAX(${DISCOUNT_AMOUNT_EXPR}) AS UNSIGNED) AS maxAmount,
+            'g' AS unit,
+            MAX(sp.isWeighable) AS hasWeighable,
+            MAX(ROUND((1 - d.promoPrice / d.price) * 100)) AS bestDiscountPct
+         FROM Product p
+         LEFT JOIN StoreProduct sp ON sp.productId = p.id
+         LEFT JOIN (
+             SELECT productId, JSON_ARRAYAGG(imageUrl) AS imageUrls
+             FROM StoreProduct
+             WHERE imageUrl IS NOT NULL
+             GROUP BY productId
+         ) imgs ON imgs.productId = p.id
+         INNER JOIN (
+             SELECT spi2.productId, pr.promoPrice, pr.price
+             FROM Price pr
+             JOIN StoreProduct spi2 ON spi2.id = pr.storeProductId
+             INNER JOIN (
+                 SELECT storeProductId, MAX(id) AS maxId
+                 FROM Price
+                 WHERE promoEnd > NOW()
+                   AND promoPrice IS NOT NULL
+                 GROUP BY storeProductId
+             ) latest ON latest.maxId = pr.id
+             WHERE pr.promoPrice < pr.price
+               AND pr.price > 0
+         ) d ON d.productId = p.id
+         WHERE ${where}
+         GROUP BY p.id
+         HAVING bestDiscountPct > 0
+         ORDER BY bestDiscountPct DESC`,
+        params,
+    );
+    discountsCache.set(cacheKey, { data: rows, expiresAt: Date.now() + DISCOUNTS_CACHE_TTL });
+    const { limit, offset = 0 } = opts;
+    return limit != null ? rows.slice(offset, offset + limit) : rows;
+};
+
 export const getAllProductsByL2WithAmounts = async (
     l2CategoryId: number,
     mode: BrowseMode = 'base',
     userId?: string,
 ) => {
     const baseFilter = mode === 'base' ? 'AND p.baseProductId IS NULL' : '';
-    const [products]: any = await pool.query(
-        `${BROWSE_SELECT}
-         WHERE (p.categoryId IN (SELECT id FROM Category WHERE parentCategoryId = ?)
-                OR p.categoryId = ?)
-           AND p.mergedIntoId IS NULL
-           ${baseFilter}
-         GROUP BY p.id`,
-        [l2CategoryId, l2CategoryId]
-    );
+    const l2Filter = '(p.categoryId IN (SELECT id FROM Category WHERE parentCategoryId = ?) OR p.categoryId = ?)';
+    const l2Params = [l2CategoryId, l2CategoryId];
+
+    let products: any[];
+    if (userId) {
+        [products] = await pool.query(
+            `${BROWSE_SELECT}
+             LEFT JOIN UserProductScore ups ON ups.userId = ? AND ups.productId = p.id
+             WHERE ${l2Filter}
+               AND p.mergedIntoId IS NULL
+               ${baseFilter}
+             GROUP BY p.id
+             ${BLENDED_ORDER_BY}`,
+            [userId, ...l2Params],
+        ) as any;
+    } else {
+        [products] = await pool.query(
+            `${BROWSE_SELECT}
+             WHERE ${l2Filter}
+               AND p.mergedIntoId IS NULL
+               ${baseFilter}
+             GROUP BY p.id
+             ORDER BY p.globalScore DESC`,
+            l2Params,
+        ) as any;
+    }
 
     if (userId) {
         const restored = await fetchPersonallyRestoredProducts(
             userId,
-            '(p.categoryId IN (SELECT id FROM Category WHERE parentCategoryId = ?) OR p.categoryId = ?)',
-            [l2CategoryId, l2CategoryId],
+            l2Filter,
+            l2Params,
             baseFilter,
         );
         products.push(...restored);

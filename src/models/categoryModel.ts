@@ -1,5 +1,17 @@
 import pool from '../config/db.js';
 
+export const getAllL2Categories = async () => {
+    const [rows]: any = await pool.query(
+        `SELECT c2.id, c2.name, c2.parentCategoryId, c1.id AS l1Id, c1.name AS l1Name
+         FROM Category c2
+         JOIN Category c1 ON c1.id = c2.parentCategoryId
+         WHERE c2.parentCategoryId IN (SELECT id FROM Category WHERE parentCategoryId IS NULL)
+           AND c2.isHidden = 0
+         ORDER BY c1.id, c2.name`,
+    );
+    return rows;
+};
+
 //Create a new category
 export const createCategory = async (
     name: string,

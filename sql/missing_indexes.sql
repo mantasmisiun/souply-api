@@ -36,3 +36,11 @@ CREATE INDEX idx_receipt_user_status
 --    storeProductId for the PARTITION BY ordering.
 CREATE INDEX idx_price_store_verified
     ON Price (storeId, priceVerified, storeProductId);
+
+-- 6. Price: getDiscountedProducts inner subquery groups by storeProductId
+--    where promoEnd > NOW() and promoPrice IS NOT NULL. Without this index
+--    the DB full-scans the entire Price table (all scraper promo rows) and
+--    filters promoEnd in memory — the main cause of 30 s load times on the
+--    Nuolaidos screen after a full scraper run.
+CREATE INDEX idx_price_promo_end
+    ON Price (promoEnd, storeProductId);

@@ -21,6 +21,7 @@ import parserTestRoutes from './routes/parserTestRoutes.js';
 import adminRoutes from './routes/adminRoutes.js';
 import swaggerUi from 'swagger-ui-express';
 import swaggerSpec from './config/swagger.js';
+import './scrapers/scheduler.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;

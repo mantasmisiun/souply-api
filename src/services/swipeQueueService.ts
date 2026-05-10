@@ -67,11 +67,12 @@ export function buildSwipeQueue(
     reverificationPairs: Set<string> = new Set(),
 ): QueueItem[] {
     const byLine = new Map<number, QueueItem>();
-    // Within-queue deduplication: prevents the same canonical pair from appearing
-    // as both "A vs B" (line 3's receipt product vs candidate) and "B vs A"
-    // (line 7's receipt product vs candidate) when two receipt lines happen to
-    // be each other's top match.
-    const seenPairs = new Set<string>();
+    // Cross-line deduplication: prevents the same canonical pair (A, B) from
+    // appearing in two different receipt lines (e.g., line 3 has product A vs
+    // candidate B, and line 7 has product B vs candidate A). Within the same
+    // line, the same candidate may appear at multiple rank positions (DB
+    // duplicates) and is intentionally kept — dedup happens at save time.
+    const seenPairs = new Map<string, number>(); // pairKey → receiptLineIdx
 
     for (const r of flat) {
         const line = parsedProducts[r.receiptLineIdx] ?? {};
@@ -89,8 +90,9 @@ export function buildSwipeQueue(
             // Skip already-voted pairs unless they are flagged for re-verification.
             if (votedPairs.has(pairKey) && !reverificationPairs.has(pairKey)) continue;
             // Skip pairs already queued from a different receipt line.
-            if (seenPairs.has(pairKey)) continue;
-            seenPairs.add(pairKey);
+            const claimedByLine = seenPairs.get(pairKey);
+            if (claimedByLine !== undefined && claimedByLine !== r.receiptLineIdx) continue;
+            if (claimedByLine === undefined) seenPairs.set(pairKey, r.receiptLineIdx);
         }
 
         if (!byLine.has(r.receiptLineIdx)) {

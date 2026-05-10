@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { addProduct, searchProducts, fetchProductById, fetchProductsByCategory, fetchProductsByCategoryWithAmounts, fetchAllProductsByL2WithAmounts } from '../controllers/productController.js';
+import { addProduct, searchProducts, fetchProductById, fetchProductsByCategory, fetchProductsByCategoryWithAmounts, fetchAllProductsByL2WithAmounts, fetchDiscountedProducts } from '../controllers/productController.js';
 
 const router = Router();
 /**
@@ -59,6 +59,9 @@ router.post('/products', addProduct);
  */
 // GET /api/products/search?q= - Search products by name
 router.get('/products/search', searchProducts);
+
+// GET /api/products/discounted?l2CategoryId=&search= - Products with active promos
+router.get('/products/discounted', fetchDiscountedProducts);
 
 /**
  * @swagger

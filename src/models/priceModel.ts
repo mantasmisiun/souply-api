@@ -12,6 +12,7 @@ export const createPrice = async (
     date: Date,
     priceVerified: boolean,
     receiptId: number | null,
+    requiresCoupon: boolean = false,
     conn?: Connection
 ) => {
     const db = conn || pool;
@@ -25,16 +26,17 @@ export const createPrice = async (
     const [result]: any = await db.query(
         `INSERT INTO Price
            (storeProductId, storeId, receiptId, price, promoPrice, promoEnd,
-            isFallback, date, priceVerified)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            isFallback, date, priceVerified, requiresCoupon)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON DUPLICATE KEY UPDATE
-           receiptId     = VALUES(receiptId),
-           price         = VALUES(price),
-           promoPrice    = VALUES(promoPrice),
-           promoEnd      = VALUES(promoEnd),
-           isFallback    = VALUES(isFallback),
-           priceVerified = VALUES(priceVerified)`,
-        [storeProductId, storeId, receiptId, price, promoPrice, promoEnd, isFallback, date, priceVerified]
+           receiptId      = VALUES(receiptId),
+           price          = VALUES(price),
+           promoPrice     = VALUES(promoPrice),
+           promoEnd       = VALUES(promoEnd),
+           isFallback     = VALUES(isFallback),
+           priceVerified  = VALUES(priceVerified),
+           requiresCoupon = VALUES(requiresCoupon)`,
+        [storeProductId, storeId, receiptId, price, promoPrice, promoEnd, isFallback, date, priceVerified, requiresCoupon]
     );
     return result.insertId;
 };
@@ -112,6 +114,10 @@ export const updatePriceById = async (id: number, price: number, promoPrice: num
 };
 
 //For fallback price
+export const extendPromoEnd = async (id: number, newEnd: Date): Promise<void> => {
+    await pool.query('UPDATE Price SET promoEnd = ? WHERE id = ?', [newEnd, id]);
+};
+
 export const getPriceByStoreProductAndStore = async (storeProductId: number, storeId: number) => {
     const [rows]: any = await pool.query(
         `SELECT * FROM Price WHERE storeProductId = ? AND storeId = ? 

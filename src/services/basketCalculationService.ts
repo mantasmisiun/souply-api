@@ -94,6 +94,40 @@ function addToNestedMap<K1, K2, V>(
  * Uses ROW_NUMBER() to pick the latest Price row per (storeProductId, storeId)
  * without a correlated subquery.
  */
+/**
+ * Fetch the latest Price for each (storeProductId, storeId) pair.
+ * Uses MAX(id) grouping — scans only Price rows for the specific SPs and
+ * stores we care about, not all rows.
+ * Returns: spId → storeId → { price, promoPrice, isFallback }.
+ */
+async function fetchLatestPrices(
+    spIds: number[],
+    storeIds: number[],
+): Promise<Map<number, Map<number, { price: any; promoPrice: any; isFallback: any }>>> {
+    const result = new Map<number, Map<number, any>>();
+    if (!spIds.length || !storeIds.length) return result;
+    const [rows]: any = await pool.query(
+        `SELECT p.storeProductId, p.storeId, p.price,
+                CASE WHEN p.promoEnd > NOW() THEN p.promoPrice ELSE NULL END AS promoPrice,
+                p.isFallback
+         FROM Price p
+         INNER JOIN (
+             SELECT storeProductId, storeId, MAX(id) AS maxId
+             FROM Price
+             WHERE storeProductId IN (?) AND storeId IN (?)
+             GROUP BY storeProductId, storeId
+         ) latest ON latest.maxId = p.id`,
+        [spIds, storeIds],
+    );
+    for (const row of rows as any[]) {
+        const spId = Number(row.storeProductId);
+        const storeId = Number(row.storeId);
+        if (!result.has(spId)) result.set(spId, new Map());
+        result.get(spId)!.set(storeId, row);
+    }
+    return result;
+}
+
 const batchFetchTier12Prices = async (
     storeIds: number[],
     chainIds: number[],
@@ -102,48 +136,47 @@ const batchFetchTier12Prices = async (
     const cache: Tier12Cache = { sku: new Map(), cluster: new Map() };
     if (!storeIds.length || !productIds.length) return cache;
 
-    const [rows]: any = await pool.query(
-        `SELECT sp.id, sp.productId AS spProductId, sp.storeProductName,
+    // Step 1: find relevant StoreProducts (tiny result for small baskets)
+    const [spRows]: any = await pool.query(
+        `SELECT sp.id, sp.productId, sp.storeProductName,
                 sp.isWeighable, sp.amount, sp.unit,
-                lp.storeId, lp.price, lp.promoPrice, lp.isFallback,
                 prod.baseProductId
          FROM StoreProduct sp
          JOIN Product prod ON prod.id = sp.productId
-         JOIN (
-             SELECT storeProductId, storeId, price, promoPrice, isFallback,
-                    ROW_NUMBER() OVER (PARTITION BY storeProductId, storeId ORDER BY id DESC) AS rn
-             FROM Price WHERE storeId IN (?)
-         ) lp ON lp.storeProductId = sp.id AND lp.rn = 1
          WHERE sp.chainId IN (?)
            AND prod.mergedIntoId IS NULL
            AND (prod.id IN (?) OR prod.baseProductId IN (?))`,
-        [storeIds, chainIds, productIds, productIds],
+        [chainIds, productIds, productIds],
     );
+    if (!spRows.length) return cache;
 
-    for (const row of rows as any[]) {
-        const storeId = Number(row.storeId);
-        const spProductId = Number(row.spProductId);
-        const baseProductId = row.baseProductId !== null ? Number(row.baseProductId) : null;
+    // Step 2: fetch latest prices only for those SPs at those stores
+    const spIds = (spRows as any[]).map(r => Number(r.id));
+    const priceMap = await fetchLatestPrices(spIds, storeIds);
 
-        const spRow: SpRow = {
-            id: Number(row.id),
-            productId: spProductId,
-            storeProductName: row.storeProductName,
-            isWeighable: row.isWeighable,
-            amount: row.amount,
-            unit: row.unit,
-            price: row.price,
-            promoPrice: row.promoPrice,
-            isFallback: row.isFallback,
-        };
+    for (const sp of spRows as any[]) {
+        const spId = Number(sp.id);
+        const spProductId = Number(sp.productId);
+        const baseProductId = sp.baseProductId !== null ? Number(sp.baseProductId) : null;
+        const storePrices = priceMap.get(spId);
+        if (!storePrices) continue;
 
-        // Index under direct productId — used by both sku and base lookups.
-        addToNestedMap(cache.sku, storeId, spProductId, spRow);
-
-        // Also index under the base product when this SP's product is a
-        // cluster member. Enables base-mode basket items to find variants.
-        if (baseProductId !== null && baseProductId !== spProductId) {
-            addToNestedMap(cache.cluster, storeId, baseProductId, spRow);
+        for (const [storeId, pd] of storePrices.entries()) {
+            const spRow: SpRow = {
+                id: spId,
+                productId: spProductId,
+                storeProductName: sp.storeProductName,
+                isWeighable: sp.isWeighable,
+                amount: sp.amount,
+                unit: sp.unit,
+                price: pd.price,
+                promoPrice: pd.promoPrice,
+                isFallback: pd.isFallback,
+            };
+            addToNestedMap(cache.sku, storeId, spProductId, spRow);
+            if (baseProductId !== null && baseProductId !== spProductId) {
+                addToNestedMap(cache.cluster, storeId, baseProductId, spRow);
+            }
         }
     }
 
@@ -197,18 +230,30 @@ export const calculateBasketForStores = async (
 
     if (!basketItems.length) return [];
 
-    // Pre-fetch all tier-1/2 prices in a single batch query so the
-    // store × item Promise.all loop below never hits the DB for tier-1/2.
-    const storeIds  = stores.map((s: any) => Number(s.id));
-    const chainIds  = [...new Set(stores.map((s: any) => Number(s.chainId)))] as number[];
+    // Drop stores with no coordinates (distance would be null).
+    const validStores = (stores as any[]).filter(s => s.distance != null);
+
+    const storeIds  = validStores.map((s: any) => Number(s.id));
+    const chainIds  = [...new Set(validStores.map((s: any) => Number(s.chainId)))] as number[];
     const productIds = [...new Set(basketItems.map((i: any) => Number(i.productId)))] as number[];
+
+    // Tier 1/2: single batch query — sync lookup inside the loop.
     const tier12Cache = await batchFetchTier12Prices(storeIds, chainIds, productIds);
 
-    // Stores and per-item lookups are independent within a store —
-    // parallelize both dimensions. Tier-1/2 is now sync (cache); only
-    // tier-3/4 fallback paths issue further DB queries.
+    // Tier 3: one query per (chainId × productId) instead of per (storeId × productId).
+    // Results keyed as "chainId:productId" → best-substitute SpRow per store.
+    const tier3Cache = await batchFetchTier3Substitutes(productIds, basketItems, storeIds, chainIds);
+
+    // Tier 4: one cross-chain average query per productId, not per (store × productId).
+    const tier4Cache = new Map<number, (SpRow & { effectivePrice: number }) | null>();
+    await Promise.all(
+        productIds.map(async pid => {
+            tier4Cache.set(pid, await approximateCrossChain(pid, storeIds));
+        })
+    );
+
     const storeResults = await Promise.all(
-        stores.map(async (store: any): Promise<StoreResult> => {
+        validStores.map(async (store: any): Promise<StoreResult> => {
             const itemResults = await Promise.all(
                 basketItems.map((basketItem: any) =>
                     resolveItemAtStore(
@@ -218,9 +263,9 @@ export const calculateBasketForStores = async (
                         basketItem.matchMode === 'base' ? 'base' : 'sku',
                         Number(store.id),
                         Number(store.chainId),
-                        lat,
-                        lng,
                         tier12Cache,
+                        tier3Cache,
+                        tier4Cache,
                     )
                 )
             );
@@ -253,9 +298,18 @@ export const calculateBasketForStores = async (
     );
 
     return storeResults.sort((a, b) => {
-        if (a.missingItemNames.length !== b.missingItemNames.length) {
+        // 1. Fewer missing items first (item not found anywhere)
+        if (a.missingItemNames.length !== b.missingItemNames.length)
             return a.missingItemNames.length - b.missingItemNames.length;
-        }
+        // 2. Fewer cross-chain average items first (tier-4: item not at this chain at all)
+        const aCCA = a.items.filter(i => i.isCrossChainAverage).length;
+        const bCCA = b.items.filter(i => i.isCrossChainAverage).length;
+        if (aCCA !== bCCA) return aCCA - bCCA;
+        // 3. Fewer substituted items first (tier-3: found a similar item, not the exact one)
+        const aSub = a.items.filter(i => i.isSubstituted).length;
+        const bSub = b.items.filter(i => i.isSubstituted).length;
+        if (aSub !== bSub) return aSub - bSub;
+        // 4. Cheaper total
         return a.total - b.total;
     });
 };
@@ -264,6 +318,9 @@ export const calculateBasketForStores = async (
  * Tiered resolution for a single basket item at a specific store. Returns
  * the best-effort ItemResult — never throws for "no data"; the missing/
  * substitution/average flags communicate quality.
+ *
+ * Tier 3 and 4 results are pre-computed before the store loop and passed
+ * in as caches — no DB calls happen here.
  */
 async function resolveItemAtStore(
     productId: number,
@@ -272,61 +329,30 @@ async function resolveItemAtStore(
     matchMode: MatchMode,
     storeId: number,
     chainId: number,
-    userLat: number,
-    userLng: number,
     tier12Cache: Tier12Cache,
+    tier3Cache: Map<string, (SpRow & { effectivePrice: number }) | null>,
+    tier4Cache: Map<number, (SpRow & { effectivePrice: number }) | null>,
 ): Promise<ItemResult> {
     // Tier 1 / 2: served from the pre-fetched cache — no DB call.
     const direct = getCheapestFromCache(tier12Cache, storeId, productId, matchMode);
     if (direct) {
-        return priceItem(
-            productId,
-            userQuantity,
-            productName,
-            matchMode,
-            direct,
-            { isSubstituted: false, isCrossChainAverage: false }
-        );
+        return priceItem(productId, userQuantity, productName, matchMode, direct,
+            { isSubstituted: false, isCrossChainAverage: false });
     }
 
-    // Tier 3: name-similar SP in this chain.
-    const substitute = await fetchNearestNameSubstitute(
-        productId,
-        productName,
-        storeId,
-        chainId
-    );
+    // Tier 3: pre-computed best substitute for this (chain, product) pair.
+    const substitute = tier3Cache.get(`${chainId}:${productId}`) ?? null;
     if (substitute) {
-        return priceItem(
-            productId,
-            userQuantity,
-            productName,
-            matchMode,
-            substitute,
-            { isSubstituted: true, isCrossChainAverage: false }
-        );
+        return priceItem(productId, userQuantity, productName, matchMode, substitute,
+            { isSubstituted: true, isCrossChainAverage: false });
     }
 
-    // Tier 4: cross-chain average. When chain coverage is zero, we borrow
-    // the same Product's price from other chains' nearest-10 stores and
-    // feed the basket a plausible-enough number rather than leaving a
-    // hole. The UI still flags this with isApproximated+isCrossChainAverage.
-    const synthetic = await approximateCrossChain(productId, userLat, userLng);
+    // Tier 4: pre-computed cross-chain average — no DB call.
+    const synthetic = tier4Cache.get(productId) ?? null;
     if (synthetic) {
-        // Run the synthetic SpRow through the same priceItem() path so the
-        // pack-vs-weighable math stays consistent with Tiers 1-3. Then
-        // overwrite the SP-specific fields with nulls — Tier 4 has no
-        // concrete SP at this store.
-        const priced = priceItem(productId, userQuantity, productName, matchMode, synthetic, {
-            isSubstituted: false,
-            isCrossChainAverage: true,
-        });
-        return {
-            ...priced,
-            storeProductName: null,
-            storeProductId: null,
-            resolvedProductId: null,
-        };
+        const priced = priceItem(productId, userQuantity, productName, matchMode, synthetic,
+            { isSubstituted: false, isCrossChainAverage: true });
+        return { ...priced, storeProductName: null, storeProductId: null, resolvedProductId: null };
     }
 
     return missingAtStore(productId, productName, userQuantity, matchMode);
@@ -342,6 +368,91 @@ export interface SpRow {
     price: string | null;
     promoPrice: string | null;
     isFallback: number | boolean;
+}
+
+/**
+ * Pre-fetch tier-3 substitutes for all (chainId × productId) pairs in one
+ * pass. Returns a Map keyed "chainId:productId" → best substitute SpRow
+ * (cheapest effective price among name-similar SPs in that chain, priced
+ * at any of the nearby stores). One query per chain instead of one per
+ * (store × product).
+ */
+async function batchFetchTier3Substitutes(
+    productIds: number[],
+    basketItems: any[],
+    storeIds: number[],
+    chainIds: number[],
+): Promise<Map<string, (SpRow & { effectivePrice: number }) | null>> {
+    const result = new Map<string, (SpRow & { effectivePrice: number }) | null>();
+    if (!productIds.length || !chainIds.length || !storeIds.length) return result;
+
+    await Promise.all(chainIds.map(async chainId => {
+        await Promise.all(basketItems.map(async (bi: any) => {
+            const productId = Number(bi.productId);
+            const productName = String(bi.name);
+            const key = `${chainId}:${productId}`;
+            const normalized = normalizeName(productName);
+            if (!normalized) { result.set(key, null); return; }
+            const firstToken = normalized.split(' ')[0];
+            if (firstToken.length < 3) { result.set(key, null); return; }
+
+            // Step 1: find candidate SPs by name — no price join yet
+            const [candidateRows]: any = await pool.query(
+                `SELECT sp.id, sp.productId, sp.storeProductName, sp.isWeighable, sp.amount, sp.unit,
+                        prod.name AS productName
+                   FROM StoreProduct sp
+                   JOIN Product prod ON prod.id = sp.productId
+                  WHERE sp.chainId = ?
+                    AND prod.mergedIntoId IS NULL
+                    AND prod.categoryId <> ?
+                    AND prod.id <> ?
+                    AND (LOWER(prod.name) LIKE ? OR LOWER(sp.storeProductName) LIKE ?)
+                  LIMIT 200`,
+                [chainId, NEPRISKIRTA_CATEGORY_ID, productId,
+                    `%${firstToken}%`, `%${firstToken}%`],
+            );
+            if (!candidateRows.length) { result.set(key, null); return; }
+
+            // Score candidates — only keep the best above the threshold
+            let bestCandidate: (typeof candidateRows[number] & { score: number }) | null = null;
+            for (const sp of candidateRows as any[]) {
+                const score = levenshteinRatio(normalized, normalizeName(sp.productName));
+                if (score < MatchThresholds.substitutionMinSimilarity) continue;
+                if (!bestCandidate || score > bestCandidate.score) bestCandidate = { ...sp, score };
+            }
+            if (!bestCandidate) { result.set(key, null); return; }
+
+            // Step 2: price the winning candidate at any nearby store
+            const candidateSpIds = [Number(bestCandidate.id)];
+            const priceMap = await fetchLatestPrices(candidateSpIds, storeIds);
+            const storePrices = priceMap.get(Number(bestCandidate.id));
+            if (!storePrices?.size) { result.set(key, null); return; }
+
+            // Pick the cheapest price across the nearby stores
+            let bestPrice: any = null;
+            for (const pd of storePrices.values()) {
+                if (pd.price == null) continue;
+                const eff = pd.promoPrice ? parseFloat(pd.promoPrice) : parseFloat(pd.price);
+                const bestEff = bestPrice
+                    ? (bestPrice.promoPrice ? parseFloat(bestPrice.promoPrice) : parseFloat(bestPrice.price))
+                    : Infinity;
+                if (eff < bestEff) bestPrice = pd;
+            }
+            if (!bestPrice) { result.set(key, null); return; }
+
+            result.set(key, {
+                ...bestCandidate,
+                price: bestPrice.price,
+                promoPrice: bestPrice.promoPrice,
+                isFallback: bestPrice.isFallback,
+                effectivePrice: bestPrice.promoPrice
+                    ? parseFloat(bestPrice.promoPrice)
+                    : parseFloat(bestPrice.price),
+            });
+        }));
+    }));
+
+    return result;
 }
 
 /**
@@ -457,35 +568,40 @@ async function fetchNearestNameSubstitute(
  */
 async function approximateCrossChain(
     productId: number,
-    userLat: number,
-    userLng: number
+    nearbyStoreIds: number[],
 ): Promise<(SpRow & { effectivePrice: number }) | null> {
-    const [rows]: any = await pool.query(
-        `SELECT sp.amount, sp.unit, sp.isWeighable,
-                COALESCE(lp.promoPrice, lp.price) AS effectivePrice,
-                lp.price AS rawPrice,
-                lp.promoPrice,
-                lp.isFallback,
-                lp.storeId
-           FROM StoreProduct sp
-           JOIN (
-               SELECT storeProductId, storeId, price, promoPrice, isFallback,
-                      ROW_NUMBER() OVER (PARTITION BY storeProductId, storeId ORDER BY id DESC) AS rn
-               FROM Price
-               WHERE storeId IN (
-                   SELECT id FROM Store
-                   ORDER BY (
-                       6371 * ACOS(
-                           COS(RADIANS(?)) * COS(RADIANS(latitude)) *
-                           COS(RADIANS(longitude) - RADIANS(?)) +
-                           SIN(RADIANS(?)) * SIN(RADIANS(latitude))
-                       )
-                   ) ASC LIMIT 10
-               )
-           ) lp ON lp.storeProductId = sp.id AND lp.rn = 1
-          WHERE sp.productId = ?`,
-        [userLat, userLng, userLat, productId]
+    if (!nearbyStoreIds.length) return null;
+
+    // Step 1: find all SPs for this product (small result)
+    const [spRows]: any = await pool.query(
+        `SELECT id, amount, unit, isWeighable FROM StoreProduct WHERE productId = ?`,
+        [productId],
     );
+    if (!spRows.length) return null;
+    const spIds = (spRows as any[]).map(r => Number(r.id));
+
+    // Step 2: fetch latest prices for those SPs at nearby stores
+    const priceMap = await fetchLatestPrices(spIds, nearbyStoreIds);
+
+    // Flatten into rows
+    const rows: any[] = [];
+    for (const sp of spRows as any[]) {
+        const storePrices = priceMap.get(Number(sp.id));
+        if (!storePrices) continue;
+        for (const [storeId, pd] of storePrices.entries()) {
+            if (pd.price == null) continue;
+            rows.push({
+                amount: sp.amount,
+                unit: sp.unit,
+                isWeighable: sp.isWeighable,
+                // Use the regular price for cross-chain estimation: a promo at
+                // one chain doesn't imply the same discount at a chain that
+                // doesn't even stock this product.
+                effectivePrice: parseFloat(pd.price),
+                storeId,
+            });
+        }
+    }
     if (!rows.length) return null;
 
     interface Bucket {
