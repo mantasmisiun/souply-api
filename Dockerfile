@@ -61,7 +61,7 @@ COPY --from=builder /app/basket-api/dist ./dist
 
 # Tini as PID 1 so the container handles SIGTERM cleanly on
 # docker stop (Node alone can be stubborn about signals).
-ENTRYPOINT ["/sbin/tini", "--"]
+ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["node", "dist/basket-api/src/index.js"]
 
 EXPOSE 3000
