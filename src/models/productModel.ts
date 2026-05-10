@@ -136,24 +136,9 @@ const BROWSE_SELECT = `
         CAST(MIN(${AMOUNT_NORMALIZED_EXPR}) AS UNSIGNED) as minAmount,
         CAST(MAX(${AMOUNT_NORMALIZED_EXPR}) AS UNSIGNED) as maxAmount,
         'g' as unit,
-        MAX(sp.isWeighable) as hasWeighable,
-        MAX(ROUND((1 - dp.promoPrice / dp.price) * 100)) AS bestDiscountPct
+        MAX(sp.isWeighable) as hasWeighable
      FROM Product p
      LEFT JOIN StoreProduct sp ON sp.productId = p.id
-     LEFT JOIN (
-         SELECT spi2.productId, pr.promoPrice, pr.price
-         FROM Price pr
-         JOIN StoreProduct spi2 ON spi2.id = pr.storeProductId
-         INNER JOIN (
-             SELECT storeProductId, MAX(id) AS maxId
-             FROM Price
-             WHERE promoEnd > NOW()
-               AND promoPrice IS NOT NULL
-             GROUP BY storeProductId
-         ) latest ON latest.maxId = pr.id
-         WHERE pr.promoPrice < pr.price
-           AND pr.price > 0
-     ) dp ON dp.productId = p.id
 `;
 
 /**
