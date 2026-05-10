@@ -33,19 +33,28 @@ WORKDIR /app/basket-api
 RUN npm run build
 
 # ─── Stage 2: runtime ───────────────────────────────────────────
-FROM node:20-alpine AS runtime
+# node:20-slim (Debian) instead of Alpine: Playwright's Chromium is
+# compiled for glibc; it silently fails to launch on musl/Alpine.
+FROM node:20-slim AS runtime
 WORKDIR /app
 
-# pdfService shells out to `pdftoppm` (poppler-utils) for PDF→PNG
-# conversion. Same rasterizer the dev-time `npm run receipts:stage`
-# script uses, so output matches dev parity. Earlier we shipped
-# GhostScript + GraphicsMagick for the old pdf2pic path; both are
-# unused now and dropped from the image.
-RUN apk add --no-cache poppler-utils tini
+# tini: PID 1 signal handling.
+# poppler-utils: pdftoppm for PDF→PNG in pdfService.
+# The rest are Chromium system libraries pulled in by
+# `playwright install --with-deps` below, but listing them here
+# keeps the apt layer cacheable independently of the npm layer.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    tini \
+    poppler-utils \
+    && rm -rf /var/lib/apt/lists/*
 
-# Prod deps only.
+# Prod deps only (playwright itself is a prod dep — scrapers need it).
 COPY basket-api/package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
+
+# Download Chromium + all required system libraries into the image.
+# Must run after npm ci so the playwright CLI is available.
+RUN npx playwright install chromium --with-deps
 
 # Compiled output.
 COPY --from=builder /app/basket-api/dist ./dist
