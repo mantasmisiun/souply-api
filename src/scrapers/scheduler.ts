@@ -5,7 +5,7 @@ import { runNorfaPromoScraper } from './norfa/index.js';
 import { runRimiPromoScraper } from './rimi/index.js';
 import { runLidlPromoScraper } from './lidl/index.js';
 import { recalcGlobalScores } from '../models/productInteractionModel.js';
-import { invalidateDiscountsCache } from '../models/productModel.js';
+import { warmDiscountsCache } from '../models/productModel.js';
 
 // Lithuanian store promo schedule (verified from store websites):
 //   IKI      Mon–Sun   → scrape Monday 06:00
@@ -29,8 +29,9 @@ async function run(label: string, scrapers: (() => Promise<any>)[]) {
     console.log(`[Scheduler] ${label}: starting…`);
     try {
         for (const scraper of scrapers) await scraper();
-        invalidateDiscountsCache();
-        console.log(`[Scheduler] ${label}: finished.`);
+        console.log(`[Scheduler] ${label}: finished. Warming discounts cache…`);
+        await warmDiscountsCache();
+        console.log(`[Scheduler] ${label}: discounts cache warmed.`);
     } catch (e: any) {
         console.error(`[Scheduler] ${label}: failed —`, e.message);
     } finally {

@@ -104,7 +104,7 @@ export const fetchDiscountedProducts = async (req: Request, res: Response, next:
         const search = typeof req.query.search === 'string' && req.query.search.trim()
             ? req.query.search.trim()
             : undefined;
-        const limit = Math.min(req.query.limit ? Number(req.query.limit) : 30, 100);
+        const limit = req.query.limit ? Math.min(Number(req.query.limit), 500) : undefined;
         const offset = req.query.offset ? Number(req.query.offset) : 0;
         const products = await getDiscountedProducts({ l2CategoryId, search, limit, offset });
         res.json(products);

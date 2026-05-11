@@ -254,9 +254,14 @@ const DISCOUNT_AMOUNT_EXPR = `
 `;
 
 const discountsCache = new Map<string, { data: any[]; expiresAt: number }>();
-const DISCOUNTS_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+const DISCOUNTS_CACHE_TTL = 2 * 60 * 60 * 1000; // 2 hours
 
 export const invalidateDiscountsCache = () => discountsCache.clear();
+
+export const warmDiscountsCache = async () => {
+    discountsCache.clear();
+    await getDiscountedProducts({});
+};
 
 export const getDiscountedProducts = async (opts: {
     l2CategoryId?: number;
@@ -293,6 +298,7 @@ export const getDiscountedProducts = async (opts: {
 
     const [rows]: any = await pool.query(
         `SELECT p.id, p.name, p.categoryId,
+            c.parentCategoryId AS l2CategoryId,
             imgs.imageUrls,
             CAST(MIN(${DISCOUNT_AMOUNT_EXPR}) AS UNSIGNED) AS minAmount,
             CAST(MAX(${DISCOUNT_AMOUNT_EXPR}) AS UNSIGNED) AS maxAmount,
@@ -300,6 +306,7 @@ export const getDiscountedProducts = async (opts: {
             MAX(sp.isWeighable) AS hasWeighable,
             MAX(ROUND((1 - d.promoPrice / d.price) * 100)) AS bestDiscountPct
          FROM Product p
+         LEFT JOIN Category c ON c.id = p.categoryId
          LEFT JOIN StoreProduct sp ON sp.productId = p.id
          LEFT JOIN (
              SELECT productId, JSON_ARRAYAGG(imageUrl) AS imageUrls

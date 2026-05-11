@@ -22,6 +22,7 @@ import adminRoutes from './routes/adminRoutes.js';
 import swaggerUi from 'swagger-ui-express';
 import swaggerSpec from './config/swagger.js';
 import './scrapers/scheduler.js';
+import { warmDiscountsCache } from './models/productModel.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -91,5 +92,6 @@ export default app;
 if (process.env.NODE_ENV !== 'test') {
     app.listen(PORT, () => {
         console.log(`Server running on port ${PORT}`);
+        warmDiscountsCache().catch(e => console.error('[Startup] Discounts cache warm failed:', e.message));
     });
 }

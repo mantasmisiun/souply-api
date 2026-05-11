@@ -20,9 +20,16 @@ function getChainColor(chainName: string): string {
 }
 
 const CATEGORY_COLORS = [
-    '#6366F1', '#EC4899', '#F59E0B', '#10B981',
-    '#3B82F6', '#EF4444', '#8B5CF6', '#14B8A6',
-    '#F97316', '#84CC16',
+    '#6366F1', // indigo
+    '#F59E0B', // amber
+    '#10B981', // emerald
+    '#EC4899', // pink
+    '#06B6D4', // cyan
+    '#8B5CF6', // violet
+    '#F97316', // orange
+    '#3B82F6', // blue
+    '#84CC16', // lime
+    '#14B8A6', // teal
 ];
 
 const LT_MONTHS = ['sau', 'vas', 'kov', 'bal', 'geg', 'bir', 'lie', 'rgp', 'rgs', 'spa', 'lap', 'grd'];
@@ -128,7 +135,7 @@ export const computeReceiptSavings = async (
 
 export const getUserStats = async (userId: string) => {
     const [receipts]: any = await pool.query(
-        `SELECT r.receiptDate, r.parsedData, sc.name AS chainName
+        `SELECT r.receiptDate, r.parsedData, sc.name AS chainName, sc.miniLogoUrl AS chainMiniLogoUrl
            FROM Receipt r
            LEFT JOIN Store s ON s.id = r.storeId
            LEFT JOIN StoreChain sc ON sc.id = s.chainId
@@ -137,6 +144,7 @@ export const getUserStats = async (userId: string) => {
     );
 
     const storeMap: Record<string, number> = {};
+    const chainMiniLogoMap: Record<string, string | null> = {};
     const categoryMap: Record<string, number> = {};
     const monthMap: Record<string, number> = {};
     // spId → { productId, [{price, qty}] } — filled during the receipt loop
@@ -200,6 +208,9 @@ export const getUserStats = async (userId: string) => {
                 : receipt.parsedData;
             const items: any[] = parsed?.products ?? parsed?.items ?? [];
             const chainName: string = receipt.chainName ?? 'Kita';
+            if (!(chainName in chainMiniLogoMap)) {
+                chainMiniLogoMap[chainName] = receipt.chainMiniLogoUrl ?? null;
+            }
             const month = receipt.receiptDate
                 ? new Date(receipt.receiptDate).toISOString().slice(0, 7)
                 : null;
@@ -287,6 +298,7 @@ export const getUserStats = async (userId: string) => {
             chainName,
             total: Math.round(total * 100) / 100,
             color: getChainColor(chainName),
+            miniLogoUrl: chainMiniLogoMap[chainName] ?? null,
         }))
         .sort((a, b) => b.total - a.total);
 
@@ -295,13 +307,18 @@ export const getUserStats = async (userId: string) => {
         .map(([categoryName, total]) => ({ categoryName, total: Math.round(total * 100) / 100 }))
         .sort((a, b) => b.total - a.total);
     const topCategories = sortedCategories.slice(0, TOP_CATEGORIES);
-    const remainderTotal = sortedCategories.slice(TOP_CATEGORIES).reduce((s, c) => s + c.total, 0);
+    const kitaItems = sortedCategories.slice(TOP_CATEGORIES);
+    const remainderTotal = kitaItems.reduce((s, c) => s + c.total, 0);
     if (remainderTotal > 0) {
-        topCategories.push({ categoryName: 'Kita', total: Math.round(remainderTotal * 100) / 100 });
+        topCategories.push({ categoryName: 'Kitos', total: Math.round(remainderTotal * 100) / 100 });
     }
     const categoryBreakdown = topCategories.map((item, i) => ({
         ...item,
         color: CATEGORY_COLORS[i % CATEGORY_COLORS.length],
+    }));
+    const kitaBreakdown = kitaItems.map((item, i) => ({
+        ...item,
+        color: CATEGORY_COLORS[(TOP_CATEGORIES + i) % CATEGORY_COLORS.length],
     }));
 
     const now = new Date();
@@ -315,5 +332,5 @@ export const getUserStats = async (userId: string) => {
         };
     });
 
-    return { storeBreakdown, categoryBreakdown, monthlySpending, totalSavings };
+    return { storeBreakdown, categoryBreakdown, kitaBreakdown, monthlySpending, totalSavings };
 };
