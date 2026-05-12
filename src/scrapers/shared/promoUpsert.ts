@@ -80,7 +80,7 @@ async function fanOutPrice(
 
     for (const storeId of chainStoreIds) {
         const existing = latestByStore.get(storeId);
-        if (existing?.promoEnd && new Date(existing.promoEnd) >= new Date()) {
+        if (existing) {
             const samePrice = Math.abs(parseFloat(existing.price) - regularPrice) < 0.001;
             const existingPromo = existing.promoPrice ? parseFloat(existing.promoPrice) : null;
             const samePromo = existingPromo === promoPrice ||
@@ -88,7 +88,7 @@ async function fanOutPrice(
                  Math.abs(existingPromo - promoPrice) < 0.001);
             const sameCoupon = (existing.requiresCoupon ?? 0) === Number(requiresCoupon);
             if (samePrice && samePromo && sameCoupon) {
-                if (promoEnd > new Date(existing.promoEnd)) toExtend.push(Number(existing.id));
+                if (existing.promoEnd && promoEnd > new Date(existing.promoEnd)) toExtend.push(Number(existing.id));
                 continue;
             }
         }
