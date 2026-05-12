@@ -110,8 +110,8 @@ const findSpByChainProductSize = async (
     const [rows]: any = await db.query(
         `SELECT id FROM StoreProduct
          WHERE chainId = ? AND productId = ?
-           AND ((amount IS NULL AND ? IS NULL) OR amount = ?)
-           AND ((unit   IS NULL AND ? IS NULL) OR unit   = ?)
+           AND (amount IS NULL OR ? IS NULL OR amount = ?)
+           AND (unit   IS NULL OR ? IS NULL OR unit   = ?)
          LIMIT 1`,
         [chainId, productId, amount, amount, unit, unit]
     );
@@ -212,9 +212,19 @@ export const resolveReceiptLineStoreProduct = async (
     if (line.storeProductId) {
         const sp = await getSpById(line.storeProductId, db);
         if (sp && sp.chainId === chainId) {
-            return { storeProductId: line.storeProductId, source: 'reused' };
-        }
-        if (sp) {
+            // If both the SP and the receipt line carry amount data and they
+            // differ by more than 30%, the matcher picked the wrong size variant
+            // (e.g. 1 L SP for a 1.51 L product). Fall through to dedup/create
+            // so a correctly-sized SP is found or created instead.
+            const amountMismatch =
+                sp.amount !== null &&
+                line.amount !== null &&
+                Math.abs(sp.amount - line.amount) / Math.max(sp.amount, line.amount) > 0.3;
+            if (!amountMismatch) {
+                return { storeProductId: line.storeProductId, source: 'reused' };
+            }
+            // Amount mismatch — fall through to dedup/create for correct size.
+        } else if (sp) {
             // Cross-chain SP — evaluate bootstrap gates. On pass, mint
             // a new SP in the receipt's chain (or reuse if one already
             // exists for this Product+size). On reject, fall through
@@ -321,17 +331,31 @@ const createFreshProductAndSp = async (
     const resolvedProductId: number =
         productId ?? (await createProduct(categoryId, null, line.name, db));
 
-    const storeProductId = await createStoreProduct(
-        resolvedProductId,
-        chainId,
-        line.name,
-        line.brandName,
-        !!line.isWeighable,
-        line.amount,
-        line.unit,
-        line.imageUrl,
-        db
-    );
+    let storeProductId: number;
+    try {
+        storeProductId = await createStoreProduct(
+            resolvedProductId,
+            chainId,
+            line.name,
+            line.brandName,
+            !!line.isWeighable,
+            line.amount,
+            line.unit,
+            line.imageUrl,
+            db
+        );
+    } catch (e: any) {
+        if (e.code === 'ER_DUP_ENTRY') {
+            // Race or same-product different-OCR-name: the UNIQUE key on
+            // (chainId, productId, amount, unit) already has this combination.
+            // Find and reuse the existing SP instead of crashing.
+            const existing = await findSpByChainProductSize(
+                chainId, resolvedProductId, line.amount, line.unit, db
+            );
+            if (existing) return { storeProductId: existing, source: 'reused' };
+        }
+        throw e;
+    }
 
     return { storeProductId, source: 'created' };
 };

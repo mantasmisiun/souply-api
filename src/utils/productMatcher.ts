@@ -146,11 +146,40 @@ function scoreTokens(queryTokens: string[], candidateTokens: string[]): number {
         if (effective > 0) matchedTokens++;
     }
 
-    // Require at least half of query tokens to have matched at all.
-    // Prevents coincidental single-token matches on short queries from
-    // passing (e.g. "Gira SMETONIŠKA" matching "...KLEBONIŠKA dešra"
-    // via adjective suffix).
-    if (matchedTokens / queryTokens.length < 0.5) return 0;
+    // Require at least half of query tokens to have matched. Use only
+    // long-token count as the denominator — short tokens (≤3 chars, e.g.
+    // "2", "5", "%" fragments) can only pass via exact-match and should
+    // not inflate the denominator and penalise legitimate matches.
+    // Example: "Kefyras 2,5 %" (long tokens: ["kefyras"]) should match
+    // "Kefyras" even though "2"/"5" can't contribute.
+    // Fall back to full token count when there are no long tokens at all
+    // (purely numeric/short queries like "3 A").
+    const queryLongCount = queryTokens.filter(t => t.length > 3).length;
+    const effectiveDenom = queryLongCount > 0 ? queryLongCount : queryTokens.length;
+    // For queries with ≥ 3 long tokens, require 67% coverage (effectively
+    // 2 of 3 must match). This prevents a shared 2-word prefix like
+    // "karštai rūkytos" from creating false positives between different
+    // smoked products where the 3rd distinguishing token doesn't match.
+    const coverageThreshold = queryLongCount >= 3 ? 0.67 : 0.5;
+    if (matchedTokens / effectiveDenom < coverageThreshold) return 0;
+
+    // Candidate long-token coverage guard. Fires when the candidate has
+    // more long tokens than the query (candLong >= queryLong+1). At least
+    // 40% of candidate long tokens must be covered by the query.
+    // Catches false positives from shared-prefix matches — e.g.:
+    //   "sviestas" (1 long) vs "Livarno stalinis Led sviestuvas" (3 long):
+    //     1/3 = 33% < 40% → rejected.
+    //   "Apelsinai 4/5dyd." (2 long) vs "Apelsinų nekt. ELMENHORSTER" (3 long):
+    //     1/3 = 33% < 40% → rejected.
+    //   "Bananai" (1 long) vs "Bananai Chiquita" (2 long):
+    //     1/2 = 50% ≥ 40% → passes. Short receipt names match slightly-longer SPs.
+    const candLongTokens = candidateTokens.filter(t => t.length > 3);
+    if (candLongTokens.length >= queryLongCount + 1) {
+        const candMatchedCount = candLongTokens.filter(
+            ct => bestTokenMatch(ct, queryTokens) >= tokenMatchThreshold
+        ).length;
+        if (candMatchedCount / candLongTokens.length < 0.4) return 0;
+    }
 
     return weightSum > 0 ? weightedScoreSum / weightSum : 0;
 }
@@ -178,11 +207,14 @@ export function findBestProductMatches(
         // Always compute char-similarity — cheap early-bail inside
         // handles the 99% of candidates that aren't close in length.
         const charScore = charSimilarity(normalizedQuery, normalizedCand);
-        // max() with a small char-discount: favour clean token
-        // matches over character-level coincidence on the wrong
-        // product, but still rescue OCR-split query tokens when the
-        // char view is decisive (e.g. 0.95+).
-        let confidence = Math.max(tokenScore, charScore * 0.95);
+        // charScore is a rescue for OCR-split tokens (e.g. "ger imas" →
+        // "gerimas"). Only apply it when charScore ≥ 0.6 so incidental
+        // substring overlap between unrelated Lithuanian words (e.g.
+        // "bananai"/"mandarinai" share "-anai", charScore≈0.5) doesn't
+        // produce false positives. The 0.6 floor corresponds to Levenshtein
+        // distance ≤ 40% of the longer string — genuinely similar texts.
+        const charContribution = charScore >= 0.6 ? charScore * 0.95 : 0;
+        let confidence = Math.max(tokenScore, charContribution);
 
         if (ocrAmount !== null && ocrUnit && cand.amount !== null && cand.unit) {
             const amountMatches = Math.abs(ocrAmount - cand.amount) < 0.01;
