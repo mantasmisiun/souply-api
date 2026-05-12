@@ -13,6 +13,7 @@ import {
     convertPdfToImage,
     reportReceiptLineIssue,
     logAnalizeFailure,
+    markSwipesDone,
 } from '../controllers/receiptController.js';
 import {
     logBatchReceipt,
@@ -50,6 +51,7 @@ router.get('/receipts/:id', fetchReceiptById);
 router.get('/receipts/:id/image', fetchReceiptImage);
 router.get('/receipts/:id/comparison', fetchReceiptComparison);
 router.get('/receipts/:id/swipe-queue', fetchReceiptSwipeQueue);
+router.post('/receipts/:id/complete-swipes', markSwipesDone);
 router.post('/receipts/:id/lines/:idx/report-issue', reportReceiptLineIssue);
 
 export default router;

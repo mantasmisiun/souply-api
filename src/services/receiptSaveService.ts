@@ -11,10 +11,11 @@ import {
 } from '../models/receiptSwipeCandidateModel.js';
 import { resolveReceiptLineStoreProduct } from './receiptLineResolver.js';
 import { propagateAllFallbackPrices } from './priceService.js';
+import { refillForOrphans } from '../scripts/seedOrphanSwipeCandidates.js';
 import pool from '../config/db.js';
 import { normalizeReceiptDateForStorage, normalizeReceiptNo } from '../utils/receiptMetadata.js';
 import { awardReceiptPoints } from './userPointsService.js';
-import { initMandatorySwipeSession } from './swipeSessionService.js';
+import { initMandatorySwipeSession, MANDATORY_SWIPES_PER_RECEIPT } from './swipeSessionService.js';
 
 const MAX_CANDIDATES_PER_LINE = 5;
 
@@ -144,7 +145,7 @@ export const persistReceiptPrices = async (
                             name: line.name,
                             brandName: typeof line.brandName === 'string' ? line.brandName : null,
                             amount: Number.isFinite(line.amount) ? Number(line.amount) : null,
-                            unit: typeof line.unit === 'string' ? line.unit : null,
+                            unit: typeof line.sizeUnit === 'string' ? line.sizeUnit : null,
                             isWeighable: !!line.isWeighable,
                             imageUrl: typeof line.imageUrl === 'string' ? line.imageUrl : null,
                             price: Number.isFinite(line.price) ? Number(line.price) : null,
@@ -201,7 +202,7 @@ export const persistReceiptPrices = async (
                     seenSpIds.add(spId);
                     return true;
                 });
-                return deduped.slice(0, MAX_CANDIDATES_PER_LINE).map((am: any): SwipeCandidate => ({
+                const candidates: SwipeCandidate[] = deduped.slice(0, MAX_CANDIDATES_PER_LINE).map((am: any): SwipeCandidate => ({
                     storeProductId: Number(am.storeProductId),
                     matchScore: Number.isFinite(am.confidence) ? Number(am.confidence) : 0,
                     autoMatched:
@@ -209,15 +210,25 @@ export const persistReceiptPrices = async (
                         lineSpId !== null &&
                         Number(am.storeProductId) === lineSpId,
                 }));
+                // For resolver-created SPs (e.g. Lidl lines that had no catalog match),
+                // the confirmed SP is never in altMatches so autoMatched stays false on
+                // every RSC row → slot1 sees 0 anchors and skips the receipt entirely.
+                // Inject it here so slot1 can pair it against cross-chain candidates.
+                if (
+                    line.matchConfirmed &&
+                    lineSpId !== null &&
+                    !deduped.some((am: any) => Number(am.storeProductId) === lineSpId)
+                ) {
+                    candidates.push({ storeProductId: lineSpId, matchScore: 1.0, autoMatched: true });
+                }
+                return candidates;
             }
         );
         await replaceSwipeCandidates(receiptId, candidatesByLine, connection);
 
-        // Count non-auto-matched candidates across all lines to set mandatory swipe count.
-        const nonAutoMatchedPairs = candidatesByLine.reduce((sum, lineCandidates) =>
-            sum + lineCandidates.filter(c => !c.autoMatched).length, 0
-        );
-        result.mandatorySwipesRequired = await initMandatorySwipeSession(receiptId, nonAutoMatchedPairs, connection);
+        // Mandatory count is always the full cap — Slot 1 cross-chain search
+        // generates enough pairs from confirmed SPs to fill it; lower tiers backfill.
+        result.mandatorySwipesRequired = await initMandatorySwipeSession(receiptId, MANDATORY_SWIPES_PER_RECEIPT, connection);
 
         if (awardPoints) {
             await awardReceiptPoints(userId, input.products.length, connection);
@@ -294,6 +305,13 @@ export const persistReceiptPrices = async (
                 false,
                 connection
             );
+            // Update latestMap so within-receipt duplicates of the same SP
+            // (e.g. parser bug generating 85 bands for one product) are
+            // caught on the next iteration without needing a DB round-trip.
+            latestMap.set(item.storeProductId, {
+                price: String(item.price),
+                promoPrice: item.promoPrice === null ? null : String(item.promoPrice),
+            });
             result.saved++;
 
             // Only queue fallback propagation for prices the user has
@@ -336,14 +354,78 @@ export const persistReceiptPrices = async (
         connection.release();
     }
 
+    // Fire-and-forget: seed OrphanSwipeCandidate rows for any 688-category SPs
+    // resolved during this upload so they surface in slot2a immediately.
+    const resolvedSpIds = (parsedData?.products ?? [])
+        .map((p: any) => Number(p?.storeProductId))
+        .filter((id: number) => Number.isFinite(id) && id > 0);
+
+    if (resolvedSpIds.length > 0) {
+        void (async () => {
+            try {
+                const [orphanRows]: any = await pool.query(
+                    `SELECT DISTINCT p.id AS productId
+                       FROM StoreProduct sp
+                       JOIN Product p ON p.id = sp.productId
+                      WHERE sp.id IN (?)
+                        AND p.categoryId = 688
+                        AND p.mergedIntoId IS NULL`,
+                    [resolvedSpIds],
+                );
+                const orphanProductIds = (orphanRows as any[]).map((r: any) => Number(r.productId));
+                if (orphanProductIds.length > 0) {
+                    // Retry once on deadlock — INSERT ... ON DUPLICATE KEY UPDATE
+                    // can deadlock transiently when two uploads run concurrently.
+                    for (let attempt = 1; attempt <= 2; attempt++) {
+                        try {
+                            await refillForOrphans(orphanProductIds);
+                            break;
+                        } catch (e: any) {
+                            if (e?.code === 'ER_LOCK_DEADLOCK' && attempt < 2) {
+                                await new Promise(r => setTimeout(r, 200));
+                                continue;
+                            }
+                            throw e;
+                        }
+                    }
+                }
+            } catch (e) {
+                console.warn('OrphanSwipeCandidate refill failed:', e);
+            }
+        })();
+    }
+
     // Fallback propagation runs fire-and-forget AFTER the HTTP response
     // would have returned. Previously ran one propagateFallbackPrices() per
     // product in parallel, producing N×M individual INSERTs that exhausted
     // the DB pool and blocked the swipe-queue query for 10–30 s.
     // Now runs as a single batch (3 queries total regardless of product count).
     if (toPropagate.length > 0) {
-        void propagateAllFallbackPrices(toPropagate, receiptId)
-            .catch(e => console.warn('Fallback propagation failed:', e));
+        void (async () => {
+            try {
+                // Skip category 688 (Nepriskirta) SPs — OCR garbage that slipped through
+                // the resolver. Propagating them fans out hundreds of identical fallback
+                // rows to every store in the chain.
+                const [catRows]: any = await pool.query(
+                    `SELECT sp.id AS spId, p.categoryId
+                       FROM StoreProduct sp
+                       JOIN Product p ON p.id = sp.productId
+                      WHERE sp.id IN (?)`,
+                    [toPropagate.map(t => t.storeProductId)],
+                );
+                const validSpIds = new Set<number>(
+                    (catRows as any[])
+                        .filter((r: any) => Number(r.categoryId) !== 688)
+                        .map((r: any) => Number(r.spId)),
+                );
+                const eligible = toPropagate.filter(t => validSpIds.has(t.storeProductId));
+                if (eligible.length > 0) {
+                    await propagateAllFallbackPrices(eligible, receiptId);
+                }
+            } catch (e) {
+                console.warn('Fallback propagation failed:', e);
+            }
+        })();
     }
 
     return result;

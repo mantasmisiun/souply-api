@@ -20,10 +20,9 @@ export const isBurstSwipe = (dwellMs: number): boolean => dwellMs < BURST_DWELL_
  */
 export const initMandatorySwipeSession = async (
     receiptId: number,
-    availablePairCount: number,
+    required: number,
     conn?: any
 ): Promise<number> => {
-    const required = Math.min(MANDATORY_SWIPES_PER_RECEIPT, availablePairCount);
     await setMandatorySwipesRequired(receiptId, required, conn);
     return required;
 };

@@ -133,6 +133,11 @@ const BROWSE_SELECT = `
         (SELECT JSON_ARRAYAGG(spi.imageUrl)
          FROM StoreProduct spi
          WHERE spi.productId = p.id AND spi.imageUrl IS NOT NULL) AS imageUrls,
+        (SELECT JSON_ARRAYAGG(JSON_OBJECT('chainId', cl.chainId, 'logoUrl', cl.miniLogoUrl))
+         FROM (SELECT DISTINCT sp2.chainId, sc2.miniLogoUrl
+               FROM StoreProduct sp2
+               JOIN StoreChain sc2 ON sc2.id = sp2.chainId
+               WHERE sp2.productId = p.id) cl) AS chainLogos,
         CAST(MIN(${AMOUNT_NORMALIZED_EXPR}) AS UNSIGNED) as minAmount,
         CAST(MAX(${AMOUNT_NORMALIZED_EXPR}) AS UNSIGNED) as maxAmount,
         'g' as unit,
@@ -300,6 +305,7 @@ export const getDiscountedProducts = async (opts: {
         `SELECT p.id, p.name, p.categoryId,
             c.parentCategoryId AS l2CategoryId,
             imgs.imageUrls,
+            chains.chainLogos,
             CAST(MIN(${DISCOUNT_AMOUNT_EXPR}) AS UNSIGNED) AS minAmount,
             CAST(MAX(${DISCOUNT_AMOUNT_EXPR}) AS UNSIGNED) AS maxAmount,
             'g' AS unit,
@@ -314,6 +320,13 @@ export const getDiscountedProducts = async (opts: {
              WHERE imageUrl IS NOT NULL
              GROUP BY productId
          ) imgs ON imgs.productId = p.id
+         LEFT JOIN (
+             SELECT sp2.productId,
+                    JSON_ARRAYAGG(JSON_OBJECT('chainId', sc.id, 'logoUrl', sc.miniLogoUrl)) AS chainLogos
+             FROM (SELECT DISTINCT productId, chainId FROM StoreProduct) sp2
+             JOIN StoreChain sc ON sc.id = sp2.chainId
+             GROUP BY sp2.productId
+         ) chains ON chains.productId = p.id
          INNER JOIN (
              SELECT spi2.productId, pr.promoPrice, pr.price
              FROM Price pr

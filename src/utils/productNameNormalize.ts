@@ -61,3 +61,37 @@ export function nameSimilarity(a: string, b: string): number {
   if (maxLen === 0) return 1;
   return 1 - levenshtein(na, nb) / maxLen;
 }
+
+// Chain-specific brand tokens that pollute cross-chain name comparisons.
+const CHAIN_TOKENS = /\b(rimi|maxima|iki|lidl|norfa|smart|barbora)\b/g;
+
+/**
+ * Normalise for cross-chain comparison.
+ * Intentionally does NOT strip numeric tokens so that pack-size differences
+ * ("32 vnt" vs "72 vnt") produce measurably lower similarity instead of
+ * collapsing to identical strings.
+ */
+function crossChainNormalize(name: string): string {
+  if (!name) return '';
+  return name
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(COMBINING_MARKS, '')
+    .replace(CHAIN_TOKENS, ' ')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Like nameSimilarity but strips chain-brand tokens and preserves numbers
+ * so pack-size variants ("32 vnt" vs "72 vnt") are not treated as identical.
+ */
+export function crossChainNameSimilarity(a: string, b: string): number {
+  const na = crossChainNormalize(a);
+  const nb = crossChainNormalize(b);
+  if (!na || !nb) return 0;
+  const maxLen = Math.max(na.length, nb.length);
+  if (maxLen === 0) return 1;
+  return 1 - levenshtein(na, nb) / maxLen;
+}

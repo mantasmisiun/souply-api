@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from "express";
-import { createReceipt, getReceiptsByUserId, getReceiptById, deleteReceipt, getReceiptItemsWithDetails, updateReceiptFilePath, getReceiptByReceiptNoAndUser } from "../models/receiptModel.js";
+import { createReceipt, getReceiptsByUserId, getReceiptById, deleteReceipt, getReceiptItemsWithDetails, updateReceiptFilePath, getReceiptByReceiptNoAndUser, completeMandatorySwipes } from "../models/receiptModel.js";
 import {
     getSwipeCandidatesWithDetails,
     getVerifiedStoreProductIdsForReceipt,
@@ -19,6 +19,17 @@ import {
     logFailedReceipt,
     type FailReason,
 } from "../models/failedReceiptLogModel.js";
+
+export const markSwipesDone = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const id = Number(req.params.id);
+        if (!Number.isFinite(id)) { res.status(400).json({ error: 'Invalid id' }); return; }
+        await completeMandatorySwipes(id);
+        res.json({ ok: true });
+    } catch (error) {
+        next(error);
+    }
+};
 
 export const fetchReceiptsByUserId = async (req: Request, res: Response, next: NextFunction) => {
     try {

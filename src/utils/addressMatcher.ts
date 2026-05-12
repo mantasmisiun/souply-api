@@ -97,8 +97,8 @@ export function findBestStoreMatch<T extends { address: string }>(
         const storeVariants = Array.from(
             new Set(
                 [
-                    normalizeAddress(store.address),
-                    normalizeAddress(store.address.split(',')[0]),
+                    normalizeAddress(store.address ?? ''),
+                    normalizeAddress((store.address ?? '').split(',')[0]),
                 ].filter((s) => s.length > 0)
             )
         );

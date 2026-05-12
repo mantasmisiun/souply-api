@@ -83,14 +83,17 @@ const batchGetLatestVerifiedPricesForStores = async (
                 lp.storeId, lp.price, lp.promoPrice
          FROM StoreProduct sp
          JOIN (
-             SELECT storeProductId, storeId, price, promoPrice,
-                    ROW_NUMBER() OVER (PARTITION BY storeProductId, storeId ORDER BY id DESC) AS rn
-             FROM Price
-             WHERE storeId IN (?)
-               AND priceVerified = 1
+             SELECT p.storeProductId, p.storeId, p.price, p.promoPrice,
+                    ROW_NUMBER() OVER (PARTITION BY p.storeProductId, p.storeId ORDER BY p.id DESC) AS rn
+             FROM Price p
+             WHERE p.storeId IN (?)
+               AND p.priceVerified = 1
+               AND p.storeProductId IN (
+                   SELECT id FROM StoreProduct WHERE productId IN (?)
+               )
          ) lp ON lp.storeProductId = sp.id AND lp.rn = 1
          WHERE sp.productId IN (?)`,
-        [storeIds, productIds]
+        [storeIds, productIds, productIds]
     );
     const result = new Map<number, Map<number, SpOption[]>>();
     for (const row of rows) {

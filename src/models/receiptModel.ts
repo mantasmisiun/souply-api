@@ -161,6 +161,13 @@ export const setMandatorySwipesRequired = async (id: number, count: number, conn
     await db.query('UPDATE Receipt SET mandatorySwipesRequired = ? WHERE id = ?', [count, id]);
 };
 
+export const completeMandatorySwipes = async (id: number): Promise<void> => {
+    await pool.query(
+        'UPDATE Receipt SET mandatorySwipesCompleted = mandatorySwipesRequired WHERE id = ?',
+        [id],
+    );
+};
+
 export const incrementMandatorySwipesCompleted = async (id: number, conn?: Connection) => {
     const db = conn || pool;
     await db.query(

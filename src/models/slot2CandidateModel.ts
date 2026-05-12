@@ -1,0 +1,248 @@
+import pool from '../config/db.js';
+import { nameSimilarity } from '../utils/productNameNormalize.js';
+import type { RawSlot2Row } from '../services/slot2QueueBuilder.js';
+
+const SLOT2_MIN_SCORE = 0.75;
+const SLOT2B_ANCHOR_MIN_SCORE = 0.85;
+/** Safety cap: orphans per chain fetched for Slot 2b similarity pass. */
+const MAX_ORPHANS_PER_CHAIN = 50;
+
+// ── Slot 2a ────────────────────────────────────────────────────────────────
+
+/**
+ * Slot 2a — Uncategorised product rescue via OrphanSwipeCandidate.
+ *
+ * For each auto-matched SP in the user's receipts that is orphaned
+ * (Product.categoryId = 688), surface the pre-computed rank-1 cross-chain
+ * candidate from OrphanSwipeCandidate (score ≥ 0.75). These pairs let the
+ * user confirm whether the orphan is the same product as its best candidate,
+ * rescuing it from the "Nepriskirta" bucket on community consensus.
+ */
+async function fetchSlot2aRows(userId: string): Promise<RawSlot2Row[]> {
+    const [rows]: any = await pool.query(
+        `SELECT DISTINCT
+             osp.id                                    AS orphanSpId,
+             osc.candidateSpId                         AS candidateSpId,
+             osc.similarityScore                       AS score,
+             (osp.chainId = csp.chainId)              AS sameChain,
+             op.id                                     AS orphanProductId,
+             COALESCE(osp.storeProductName, op.name)   AS orphanName,
+             osp.brandName                             AS orphanBrandName,
+             osp.imageUrl                              AS orphanImageUrl,
+             osp.unit                                  AS orphanUnit,
+             osp.chainId                               AS orphanChainId,
+             ochain.name                               AS orphanChainName,
+             ochain.logoUrl                            AS orphanChainLogoUrl,
+             op.categoryId                             AS orphanCategoryId,
+             oc.name                                   AS orphanCategoryName,
+             cp.id                                     AS candidateProductId,
+             COALESCE(csp.storeProductName, cp.name)   AS candidateName,
+             csp.brandName                             AS candidateBrandName,
+             csp.imageUrl                              AS candidateImageUrl,
+             csp.unit                                  AS candidateUnit,
+             csp.chainId                               AS candidateChainId,
+             cchain.name                               AS candidateChainName,
+             cchain.logoUrl                            AS candidateChainLogoUrl,
+             cp.categoryId                             AS candidateCategoryId,
+             cc.name                                   AS candidateCategoryName
+           FROM Receipt r
+           JOIN ReceiptSwipeCandidate rsc
+             ON rsc.receiptId   = r.id
+            AND rsc.autoMatched = 1
+           JOIN StoreProduct   osp    ON osp.id   = rsc.storeProductId
+           JOIN Product        op     ON op.id    = osp.productId
+            AND op.categoryId   = 688
+            AND op.mergedIntoId IS NULL
+           JOIN OrphanSwipeCandidate osc
+             ON osc.orphanSpId       = osp.id
+            AND osc.resolved         = 0
+            AND osc.rankPos          = 1
+            AND osc.similarityScore >= ?
+           JOIN StoreProduct   csp    ON csp.id   = osc.candidateSpId
+           JOIN Product        cp     ON cp.id    = csp.productId
+            AND cp.mergedIntoId IS NULL
+           JOIN StoreChain     ochain ON ochain.id = osp.chainId
+           JOIN StoreChain     cchain ON cchain.id = csp.chainId
+           JOIN Category       oc     ON oc.id    = op.categoryId
+           JOIN Category       cc     ON cc.id    = cp.categoryId
+          WHERE r.userId = ?`,
+        [SLOT2_MIN_SCORE, userId],
+    );
+
+    return (rows as any[]).map((r): RawSlot2Row => ({
+        source: '2a',
+        orphanSpId: Number(r.orphanSpId),
+        candidateSpId: Number(r.candidateSpId),
+        score: Number(r.score),
+        sameChain: !!r.sameChain,
+        orphan: {
+            productId: Number(r.orphanProductId),
+            name: String(r.orphanName),
+            brandName: r.orphanBrandName ?? null,
+            imageUrl: r.orphanImageUrl ?? null,
+            unit: r.orphanUnit ?? null,
+            chainId: Number(r.orphanChainId),
+            chainName: String(r.orphanChainName),
+            chainLogoUrl: r.orphanChainLogoUrl ?? null,
+            categoryId: Number(r.orphanCategoryId),
+            categoryName: String(r.orphanCategoryName),
+        },
+        candidate: {
+            productId: Number(r.candidateProductId),
+            name: String(r.candidateName),
+            brandName: r.candidateBrandName ?? null,
+            imageUrl: r.candidateImageUrl ?? null,
+            unit: r.candidateUnit ?? null,
+            chainId: Number(r.candidateChainId),
+            chainName: String(r.candidateChainName),
+            chainLogoUrl: r.candidateChainLogoUrl ?? null,
+            categoryId: Number(r.candidateCategoryId),
+            categoryName: String(r.candidateCategoryName),
+        },
+    }));
+}
+
+// ── Slot 2b ────────────────────────────────────────────────────────────────
+
+/**
+ * Slot 2b — Anchored rescue.
+ *
+ * For each well-matched, categorised SP in the user's receipts (score ≥ 0.85),
+ * find orphaned SPs (categoryId = 688) from the SAME chain whose name is
+ * similar (≥ 0.75) to the anchor. The anchor acts as a trusted reference:
+ * if the user confirms the orphan matches it, the orphan inherits the anchor's
+ * category (and possibly its image on same-chain votes).
+ *
+ * Name similarity is computed in JS; the DB provides the raw candidate pool.
+ */
+async function fetchSlot2bRows(userId: string): Promise<RawSlot2Row[]> {
+    // Step 1: anchor SPs — well-matched, categorised, from user's receipts.
+    const [anchorRows]: any = await pool.query(
+        `SELECT DISTINCT
+             rsc.storeProductId                        AS anchorSpId,
+             sp.chainId                                AS chainId,
+             COALESCE(sp.storeProductName, p.name)     AS anchorName,
+             sp.brandName                              AS anchorBrandName,
+             sp.imageUrl                               AS anchorImageUrl,
+             sp.unit                                   AS anchorUnit,
+             p.id                                      AS anchorProductId,
+             p.categoryId                              AS anchorCategoryId,
+             c.name                                    AS anchorCategoryName,
+             sc.name                                   AS chainName,
+             sc.logoUrl                                AS chainLogoUrl
+           FROM Receipt r
+           JOIN ReceiptSwipeCandidate rsc
+             ON rsc.receiptId   = r.id
+            AND rsc.autoMatched = 1
+            AND rsc.matchScore >= ?
+           JOIN StoreProduct sp ON sp.id = rsc.storeProductId
+           JOIN Product       p  ON p.id = sp.productId
+            AND p.categoryId  != 688
+            AND p.mergedIntoId IS NULL
+           JOIN StoreChain    sc ON sc.id = sp.chainId
+           JOIN Category      c  ON c.id  = p.categoryId
+          WHERE r.userId = ?`,
+        [SLOT2B_ANCHOR_MIN_SCORE, userId],
+    );
+
+    if ((anchorRows as any[]).length === 0) return [];
+
+    const anchorChainIds = [...new Set((anchorRows as any[]).map(r => Number(r.chainId)))];
+
+    // Step 2: orphan SPs from those chains.
+    const [orphanRows]: any = await pool.query(
+        `SELECT
+             sp.id                                    AS orphanSpId,
+             sp.chainId,
+             COALESCE(sp.storeProductName, p.name)    AS orphanName,
+             sp.brandName                             AS orphanBrandName,
+             sp.imageUrl                              AS orphanImageUrl,
+             sp.unit                                  AS orphanUnit,
+             p.id                                     AS orphanProductId,
+             sc.name                                  AS chainName,
+             sc.logoUrl                               AS chainLogoUrl,
+             oc.name                                  AS orphanCategoryName
+           FROM StoreProduct sp
+           JOIN Product    p  ON p.id  = sp.productId
+            AND p.categoryId   = 688
+            AND p.mergedIntoId IS NULL
+           JOIN StoreChain sc ON sc.id = sp.chainId
+           JOIN Category   oc ON oc.id = p.categoryId
+          WHERE sp.chainId IN (?)
+          LIMIT ?`,
+        [anchorChainIds, MAX_ORPHANS_PER_CHAIN * anchorChainIds.length],
+    );
+
+    if ((orphanRows as any[]).length === 0) return [];
+
+    // Group orphans by chain for efficient lookup.
+    const orphansByChain = new Map<number, any[]>();
+    for (const orphan of orphanRows as any[]) {
+        const chainId = Number(orphan.chainId);
+        if (!orphansByChain.has(chainId)) orphansByChain.set(chainId, []);
+        orphansByChain.get(chainId)!.push(orphan);
+    }
+
+    // Step 3: compute name similarities, keep highest-scoring anchor per orphan.
+    const bestPerOrphan = new Map<number, { score: number; row: RawSlot2Row }>();
+
+    for (const anchor of anchorRows as any[]) {
+        const chainId = Number(anchor.chainId);
+        const orphans = orphansByChain.get(chainId) ?? [];
+
+        for (const orphan of orphans) {
+            const score = nameSimilarity(String(anchor.anchorName), String(orphan.orphanName));
+            if (score < SLOT2_MIN_SCORE) continue;
+
+            const orphanSpId = Number(orphan.orphanSpId);
+            const existing = bestPerOrphan.get(orphanSpId);
+            if (existing && existing.score >= score) continue;
+
+            const row: RawSlot2Row = {
+                source: '2b',
+                orphanSpId,
+                candidateSpId: Number(anchor.anchorSpId),
+                score,
+                sameChain: true,
+                orphan: {
+                    productId: Number(orphan.orphanProductId),
+                    name: String(orphan.orphanName),
+                    brandName: orphan.orphanBrandName ?? null,
+                    imageUrl: orphan.orphanImageUrl ?? null,
+                    unit: orphan.orphanUnit ?? null,
+                    chainId,
+                    chainName: String(orphan.chainName),
+                    chainLogoUrl: orphan.chainLogoUrl ?? null,
+                    categoryId: 688,
+                    categoryName: String(orphan.orphanCategoryName),
+                },
+                candidate: {
+                    productId: Number(anchor.anchorProductId),
+                    name: String(anchor.anchorName),
+                    brandName: anchor.anchorBrandName ?? null,
+                    imageUrl: anchor.anchorImageUrl ?? null,
+                    unit: anchor.anchorUnit ?? null,
+                    chainId,
+                    chainName: String(anchor.chainName),
+                    chainLogoUrl: anchor.chainLogoUrl ?? null,
+                    categoryId: Number(anchor.anchorCategoryId),
+                    categoryName: String(anchor.anchorCategoryName),
+                },
+            };
+            bestPerOrphan.set(orphanSpId, { score, row });
+        }
+    }
+
+    return [...bestPerOrphan.values()].map(v => v.row);
+}
+
+// ── Public API ─────────────────────────────────────────────────────────────
+
+/** Fetch and merge Slot 2a and 2b raw rows for the given user. */
+export async function fetchAllSlot2Rows(userId: string): Promise<RawSlot2Row[]> {
+    const [rows2a, rows2b] = await Promise.all([
+        fetchSlot2aRows(userId),
+        fetchSlot2bRows(userId),
+    ]);
+    return [...rows2a, ...rows2b];
+}

@@ -23,8 +23,8 @@ export const findExactMatchingStoreProduct = async (
         `SELECT id FROM StoreProduct
           WHERE chainId = ?
             AND LOWER(storeProductName) = LOWER(?)
-            AND ((amount IS NULL AND ? IS NULL) OR amount = ?)
-            AND ((unit   IS NULL AND ? IS NULL) OR unit   = ?)
+            AND (amount IS NULL OR ? IS NULL OR amount = ?)
+            AND (unit   IS NULL OR ? IS NULL OR unit   = ?)
           LIMIT 1`,
         [chainId, name, amount, amount, unit, unit]
     );
