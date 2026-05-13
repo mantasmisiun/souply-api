@@ -97,7 +97,14 @@ export interface ClosestChainStore {
     chainId: number;
     chainName: string;
     chainLogoUrl: string | null;
+    /** Distance from the anchor store in kilometres (rounded to 2 dp). */
     distance: number;
+    /** Latitude / longitude of the store itself — used by the comparison
+     *  service to compute store-to-store haversine for the cluster-fallback
+     *  case (no cross-chain alt within the primary range, so we ground a
+     *  cluster around the closest alt). */
+    latitude: number;
+    longitude: number;
 }
 
 export const getClosestStorePerChainToStore = async (anchorStoreId: number): Promise<ClosestChainStore[]> => {
@@ -112,7 +119,8 @@ export const getClosestStorePerChainToStore = async (anchorStoreId: number): Pro
     const anchorLng = parseFloat(anchor.longitude);
 
     const [rows]: any = await pool.query(
-        `SELECT s.id, s.name, s.address, s.chainId, sc.name AS chainName, sc.logoUrl,
+        `SELECT s.id, s.name, s.address, s.chainId, s.latitude, s.longitude,
+                sc.name AS chainName, sc.logoUrl,
                 (6371 * ACOS(
                     COS(RADIANS(?)) * COS(RADIANS(s.latitude)) *
                     COS(RADIANS(s.longitude) - RADIANS(?)) +
@@ -135,6 +143,8 @@ export const getClosestStorePerChainToStore = async (anchorStoreId: number): Pro
                 chainName: row.chainName,
                 chainLogoUrl: row.logoUrl || null,
                 distance: parseFloat(Number(row.distance).toFixed(2)),
+                latitude: parseFloat(row.latitude),
+                longitude: parseFloat(row.longitude),
             });
         }
     }

@@ -44,6 +44,43 @@ type SpOption = {
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
+/**
+ * Default for the in-range cap. Lithuanian urban areas have meaningful
+ * cross-chain alternatives within ~5 km; 10 km is a generous default that
+ * still meaningfully prunes "drive 50 km to save 1 €" non-actionable
+ * comparisons. The mobile passes this as a query param so the constant
+ * is reachable from one place there too.
+ */
+const DEFAULT_MAX_DISTANCE_KM = 10;
+/**
+ * When the primary range has zero alternatives (rural / single-chain
+ * pocket), we don't just give up — we ground a cluster around the
+ * closest alternative anywhere, and include any other cross-chain
+ * stores within 5 km of THAT anchor. Turns "no neighbours" into a
+ * useful "the nearest cluster is 32 km away in Klaipėda, here's what
+ * shops there charge".
+ */
+const CLUSTER_RADIUS_KM = 5;
+
+/**
+ * Great-circle distance between two lat/lng points in kilometres.
+ * Used by the cluster-fallback path to compute distance from the
+ * visited store to cluster members without an extra SQL round-trip.
+ */
+const haversineKm = (
+    lat1: number, lng1: number, lat2: number, lng2: number,
+): number => {
+    const R = 6371;
+    const toRad = (deg: number) => (deg * Math.PI) / 180;
+    const dLat = toRad(lat2 - lat1);
+    const dLng = toRad(lng2 - lng1);
+    const a =
+        Math.sin(dLat / 2) ** 2 +
+        Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+            Math.sin(dLng / 2) ** 2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+};
+
 const normalizeUnit = (unit: string | null | undefined): string | null => {
     if (!unit) return null;
     return unit.trim().toLowerCase();
@@ -239,7 +276,17 @@ const buildStoreBaskets = async (
     return baskets;
 };
 
-export const getReceiptComparison = async (receiptId: number) => {
+export interface ReceiptComparisonOptions {
+    /** Hard cap on alternative-store distance from the visited store.
+     *  Falls back to DEFAULT_MAX_DISTANCE_KM when omitted. */
+    maxDistanceKm?: number;
+}
+
+export const getReceiptComparison = async (
+    receiptId: number,
+    opts: ReceiptComparisonOptions = {},
+) => {
+    const maxDistanceKm = opts.maxDistanceKm ?? DEFAULT_MAX_DISTANCE_KM;
     const receipt = await getReceiptById(receiptId);
     if (!receipt) {
         const err = new Error('Receipt not found');
@@ -299,7 +346,44 @@ export const getReceiptComparison = async (receiptId: number) => {
         (err as any).statusCode = 404;
         throw err;
     }
-    const alternativeStores = closestPerChain.filter((s) => s.chainId !== currentStore.chainId);
+    const crossChainStores = closestPerChain.filter((s) => s.chainId !== currentStore.chainId);
+
+    // B2.5: filter alternatives to within `maxDistanceKm` of the visited
+    // store. When that pool is empty, ground a cluster around the closest
+    // out-of-range alternative — pick stores within CLUSTER_RADIUS_KM of
+    // it (still cross-chain only, still one per chain).
+    let alternativeStores: ClosestChainStore[];
+    const withinRange = crossChainStores.filter((s) => s.distance <= maxDistanceKm);
+    if (withinRange.length > 0 || crossChainStores.length === 0) {
+        alternativeStores = withinRange;
+    } else {
+        // crossChainStores is sorted per-chain, but not globally — find
+        // the genuinely-closest alternative.
+        const anchor = crossChainStores.reduce(
+            (best, s) => (s.distance < best.distance ? s : best),
+            crossChainStores[0],
+        );
+        // The anchor itself is always included (it IS the closest). The
+        // rest of the cluster comes from a second per-chain query around
+        // the anchor, kept to within CLUSTER_RADIUS_KM. Distances on the
+        // returned alternatives are still relative to the *visited*
+        // store — that's what the user cares about ("how far from where
+        // I shopped"). The anchor-relative distance is internal.
+        const aroundAnchor = await getClosestStorePerChainToStore(anchor.storeId);
+        const visitedLat = currentStore.latitude;
+        const visitedLng = currentStore.longitude;
+        alternativeStores = aroundAnchor
+            .filter((s) => s.chainId !== currentStore.chainId)
+            .filter((s) => s.distance <= CLUSTER_RADIUS_KM)
+            .map((s) => ({
+                ...s,
+                // Recompute distance from the visited store, since `s.distance`
+                // currently means "distance from anchor".
+                distance: parseFloat(
+                    haversineKm(visitedLat, visitedLng, s.latitude, s.longitude).toFixed(2),
+                ),
+            }));
+    }
 
     const currentStoreForCalc: ClosestChainStore = {
         storeId: currentStore.id,
@@ -309,6 +393,8 @@ export const getReceiptComparison = async (receiptId: number) => {
         chainName: currentStore.chainName,
         chainLogoUrl: currentStore.logoUrl || null,
         distance: 0,
+        latitude: currentStore.latitude,
+        longitude: currentStore.longitude,
     };
 
     const allStores = [currentStoreForCalc, ...alternativeStores];

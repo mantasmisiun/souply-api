@@ -6,6 +6,7 @@ import {
     fetchReceiptImage,
     createReceiptFromOcr,
     updateReceiptFromOcr,
+    updateReceiptRegions,
     getReceiptUploadUrl,
     setReceiptFilePath,
     fetchReceiptComparison,
@@ -40,6 +41,11 @@ router.post('/receipts/log-fail', logAnalizeFailure);
 
 // Update an existing receipt after user edits (debounced auto-save)
 router.put('/receipts/:id', updateReceiptFromOcr);
+
+// Region-only rehydration: mobile re-OCRs a legacy receipt image to
+// recover per-field bboxes and PATCHes them in. Never touches products/
+// totals/etc., so user edits are preserved.
+router.patch('/receipts/:id/regions', updateReceiptRegions);
 
 // Upload helpers
 router.post('/receipts/upload-url', getReceiptUploadUrl);

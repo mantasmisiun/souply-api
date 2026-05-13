@@ -51,6 +51,8 @@ function makeCandidate(overrides: Partial<MatchCandidate> & { id: number; storeP
     return {
         productId: overrides.id,
         categoryId: 1,
+        categoryName: null,
+        categoryL2Name: null,
         brandName: null,
         amount: null,
         unit: null,

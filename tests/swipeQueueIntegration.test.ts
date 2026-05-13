@@ -58,7 +58,8 @@ beforeAll(async () => {
 
         // Seed reference data
         await conn.query(`INSERT INTO StoreChain (id, name) VALUES (?,?) ON DUPLICATE KEY UPDATE id=id`, [CHAIN_ID, 'SQ Test Chain']);
-        await conn.query(`INSERT INTO Store (id, chainId, name) VALUES (?,?,?) ON DUPLICATE KEY UPDATE id=id`, [STORE_ID, CHAIN_ID, 'SQ Test Store']);
+        // Store.address is NOT NULL in the schema.
+        await conn.query(`INSERT INTO Store (id, chainId, name, address) VALUES (?,?,?,?) ON DUPLICATE KEY UPDATE id=id`, [STORE_ID, CHAIN_ID, 'SQ Test Store', 'Test St. 1']);
         await conn.query(`INSERT INTO Category (id, name) VALUES (?,?) ON DUPLICATE KEY UPDATE id=id`, [CAT_ID, 'SQ Test Cat']);
         await conn.query(`INSERT INTO Product (id, categoryId, name) VALUES (?,?,?) ON DUPLICATE KEY UPDATE id=id`, [PROD_A, CAT_ID, 'SQ Product A']);
         await conn.query(`INSERT INTO Product (id, categoryId, name) VALUES (?,?,?) ON DUPLICATE KEY UPDATE id=id`, [PROD_B, CAT_ID, 'SQ Product B']);

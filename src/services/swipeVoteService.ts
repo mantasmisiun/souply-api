@@ -201,8 +201,10 @@ export const castSwipeVote = async (
     try {
         await connection.beginTransaction();
 
-        // Award 1 point per swipe regardless of burst.
-        await awardSwipePoint(input.userId, connection);
+        // awardSwipePoint moved to AFTER commit (fire-and-forget) — see
+        // receiptSaveService for the User-row contention rationale. The
+        // post-commit call fires regardless of burst (every non-rate-limited
+        // swipe still earns its point).
 
         // Burst swipes earn points but do NOT feed the personal layer or the
         // global aggregate. Users who burst-swipe have no intent to personalise
@@ -260,6 +262,9 @@ export const castSwipeVote = async (
         const linePriceEffect = await applyLinePriceEffect(input, lineSpId, connection);
 
         await connection.commit();
+        awardSwipePoint(input.userId).catch((e) =>
+            console.warn(`[swipeVoteService] points award failed for user ${input.userId}:`, e),
+        );
 
         return {
             ok: true,

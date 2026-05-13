@@ -82,7 +82,8 @@ beforeAll(async () => {
     try {
         await wipeAll(conn);
         await conn.query(`INSERT INTO StoreChain (id, name) VALUES (?,?) ON DUPLICATE KEY UPDATE id=id`, [CHAIN_ID, 'PL Test Chain']);
-        await conn.query(`INSERT INTO Store (id, chainId, name) VALUES (?,?,?) ON DUPLICATE KEY UPDATE id=id`, [STORE_ID, CHAIN_ID, 'PL Test Store']);
+        // Store.address is NOT NULL in the schema.
+        await conn.query(`INSERT INTO Store (id, chainId, name, address) VALUES (?,?,?,?) ON DUPLICATE KEY UPDATE id=id`, [STORE_ID, CHAIN_ID, 'PL Test Store', 'Test St. 1']);
         await conn.query(`INSERT INTO Category (id, name) VALUES (?,?) ON DUPLICATE KEY UPDATE id=id`, [CAT_ID, 'PL Test Cat']);
         // PROD_A has the shortest name "A" — it should always be elected root
         await conn.query(`INSERT INTO Product (id, categoryId, name) VALUES (?,?,?) ON DUPLICATE KEY UPDATE id=id`, [PROD_A, CAT_ID, 'A']);

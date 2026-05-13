@@ -117,6 +117,10 @@ jest.unstable_mockModule('../src/services/swipeSessionService.js', () => ({
     isBurstSwipe: jest.fn(),
     getMandatorySwipeCount: jest.fn(),
     decrementMandatorySwipeCount: jest.fn(),
+    // Re-exported because receiptSaveService imports it as a value
+    // (passes it to initMandatorySwipeSession). Keep in sync with the
+    // real export in src/services/swipeSessionService.ts.
+    MANDATORY_SWIPES_PER_RECEIPT: 3,
 }));
 
 // ---------------------------------------------------------------------------

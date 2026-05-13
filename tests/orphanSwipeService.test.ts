@@ -249,12 +249,35 @@ describe('castOrphanSwipeVote — success path', () => {
         );
     });
 
-    it('awards a swipe point inside the transaction', async () => {
+    it('awards a swipe point AFTER commit (fire-and-forget, no connection arg)', async () => {
+        // Points UPDATE used to live inside the transaction, which held the
+        // User row's X-lock for the duration of the vote pipeline and caused
+        // `/users/:id/profile` requests to time out. Now it's a post-commit
+        // fire-and-forget call with no connection — the pool handles its
+        // own brief lock window.
         await castOrphanSwipeVote({
             userId: 'u1', candidateId: 1, vote: 'identical', dwellMs: 1000,
         });
 
-        expect(mockAwardSwipePoint).toHaveBeenCalledWith('u1', mockConn);
+        expect(mockAwardSwipePoint).toHaveBeenCalledTimes(1);
+        expect(mockAwardSwipePoint).toHaveBeenCalledWith('u1'); // no connection arg
+        // Commit must already have happened before the points UPDATE runs.
+        const commitOrder = mockConn.commit.mock.invocationCallOrder[0];
+        const awardOrder = mockAwardSwipePoint.mock.invocationCallOrder[0];
+        expect(awardOrder).toBeGreaterThan(commitOrder);
+    });
+
+    it('points-award failure post-commit is swallowed (vote still succeeds)', async () => {
+        // The .catch on the fire-and-forget call must absorb the error —
+        // otherwise an unhandled rejection would propagate and Node would
+        // crash the API process under load.
+        mockAwardSwipePoint.mockRejectedValueOnce(new Error('User lock timeout'));
+
+        await expect(
+            castOrphanSwipeVote({ userId: 'u1', candidateId: 1, vote: 'identical', dwellMs: 1000 }),
+        ).resolves.toMatchObject({ ok: true });
+        // Let the rejected promise's catch handler run.
+        await new Promise((r) => setImmediate(r));
     });
 });
 
@@ -275,7 +298,10 @@ describe('castOrphanSwipeVote — transaction', () => {
     });
 
     it('rolls back, releases, and rethrows when an error occurs inside the transaction', async () => {
-        mockAwardSwipePoint.mockRejectedValue(new Error('DB failure'));
+        // Pick a mock that runs INSIDE the transaction. (awardSwipePoint used to
+        // be in-transaction; it now fires post-commit and a rejection there
+        // would NOT trigger rollback — covered by the dedicated test above.)
+        mockUpsertMatchVote.mockRejectedValueOnce(new Error('DB failure'));
 
         await expect(
             castOrphanSwipeVote({ userId: 'u1', candidateId: 1, vote: 'identical', dwellMs: 1000 })

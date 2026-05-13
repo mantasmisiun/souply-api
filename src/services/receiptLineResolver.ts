@@ -265,11 +265,17 @@ export const resolveReceiptLineStoreProduct = async (
                 };
             }
             // Fall through on rejection, but remember the reason so
-            // the caller can surface it in logs/metrics.
+            // the caller can surface it in logs/metrics. Pass
+            // `skipAltMatchProductReuse` so the fresh-product helper
+            // doesn't quietly link the new SP to the rejected cross-
+            // chain Product via `line.altMatchProductId` — that would
+            // defeat the gate decision at the Product level.
             if (!line.name || !line.name.trim()) {
                 throw new Error('Cannot resolve receipt line without a name');
             }
-            const fallback = await createFreshProductAndSp(chainId, line, db);
+            const fallback = await createFreshProductAndSp(chainId, line, db, {
+                skipAltMatchProductReuse: true,
+            });
             return { ...fallback, rejectReason: reject };
         }
         // SP id provided but row no longer exists (deleted mid-flow).
@@ -299,22 +305,24 @@ export const resolveReceiptLineStoreProduct = async (
  * Create a Product (or reuse altMatchProductId's Product) + new SP for
  * `line` in `chainId`. Used as the standard path when there's no SP to
  * reuse, and as the fallback when the cross-chain bootstrap gates fail.
+ *
+ * `altMatchProductId` reuse is the helper's main quirk: when the matcher
+ * surfaced a candidate Product (same-chain dedup clustering), we link
+ * the new SP to it so different OCR name variants of the same product
+ * collapse onto one `Product` row. Callers entering from a cross-chain
+ * gate REJECTION must pass `skipAltMatchProductReuse: true` — otherwise
+ * the rejected cross-chain match still leaks into the new SP via the
+ * altMatch's productId, defeating the gate at the Product level.
  */
 const createFreshProductAndSp = async (
     chainId: number,
     line: ReceiptLineInput,
-    db: Connection
+    db: Connection,
+    options: { skipAltMatchProductReuse?: boolean } = {},
 ): Promise<ResolveResult> => {
-    // Resolve category + (optionally) the existing Product to reuse.
-    // When the matcher surfaced an alt-match — same chain with a
-    // Product that looks like this line, OR a cross-chain fallback
-    // result — we borrow its categoryId. productId reuse for cross-
-    // chain altMatches happens in the main resolver's bootstrap
-    // branch; this helper only reuses Product identity when the
-    // altMatch is SAME-chain (dedup clustering).
     let productId: number | null = null;
     let categoryId: number | null = null;
-    if (line.altMatchProductId) {
+    if (line.altMatchProductId && !options.skipAltMatchProductReuse) {
         const [rows]: any = await db.query(
             'SELECT id, categoryId FROM Product WHERE id = ? LIMIT 1',
             [line.altMatchProductId]

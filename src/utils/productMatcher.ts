@@ -103,6 +103,14 @@ export interface MatchCandidate {
     id: number;
     productId: number;
     categoryId: number;
+    /** Category.name joined in by storeProductModel queries — used by
+     *  mobile C3 (category-spending breakdown) so it doesn't have to
+     *  carry a mirror of the server taxonomy. */
+    categoryName: string | null;
+    /** L2 ancestor (mid-level) name. Single source of truth for the
+     *  receipt breakdown so it matches Profilis (statsService uses the
+     *  same CASE). NULL when the product is filed directly at L1. */
+    categoryL2Name: string | null;
     storeProductName: string;
     brandName: string | null;
     amount: number | null;
@@ -115,6 +123,8 @@ export interface ProductMatch {
     storeProductId: number;
     productId: number;
     categoryId: number;
+    categoryName: string | null;
+    categoryL2Name: string | null;
     name: string;
     brandName: string | null;
     amount: number | null;
@@ -237,6 +247,8 @@ export function findBestProductMatches(
         storeProductId: cand.id,
         productId: cand.productId,
         categoryId: cand.categoryId,
+        categoryName: cand.categoryName,
+        categoryL2Name: cand.categoryL2Name,
         name: cand.storeProductName,
         brandName: cand.brandName,
         amount: cand.amount,

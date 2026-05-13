@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from "express";
+import pool from "../config/db.js";
 import { createReceipt, getReceiptsByUserId, getReceiptById, deleteReceipt, getReceiptItemsWithDetails, updateReceiptFilePath, getReceiptByReceiptNoAndUser, completeMandatorySwipes } from "../models/receiptModel.js";
 import {
     getSwipeCandidatesWithDetails,
@@ -15,6 +16,7 @@ import {
 import { getPresignedUrl } from "../services/storageService.js";
 import { persistReceiptPrices } from '../services/receiptSaveService.js';
 import { getReceiptComparison } from '../services/receiptComparisonService.js';
+import { hydrateReceiptCategoriesIfNeeded } from '../services/receiptHydrationService.js';
 import {
     logFailedReceipt,
     type FailReason,
@@ -53,7 +55,9 @@ export const fetchReceiptById = async (req: Request, res: Response, next: NextFu
             res.status(404).json({ error: 'Receipt not found' });
             return;
         }
-        res.json(receipt);
+        // Lazy migration for pre-redesign receipts (see service docstring).
+        const hydrated = await hydrateReceiptCategoriesIfNeeded(id, receipt);
+        res.json(hydrated);
     } catch (error) {
         next(error);
     }
@@ -204,24 +208,46 @@ export const updateReceiptFromOcr = async (req: Request, res: Response, next: Ne
             return;
         }
 
-        const result = await persistReceiptPrices(id, userId, parsedData, {
-            chainId: parsedData.header?.chainId,
-            storeId: parsedData.header?.storeId ?? null,
-            receiptNo: parsedData.footer?.receiptNo ?? null,
-            date: parsedData.footer?.date ?? null,
-            time: parsedData.footer?.time ?? null,
-            products: (parsedData.products || []).map((p: any) => ({
-                storeProductId: p.storeProductId ?? null,
-                matchConfirmed: !!p.matchConfirmed,
-                priceVerified: !!p.priceVerified,
-                price: p.price,
-                promoPrice: p.promoPrice,
-                quantity: p.quantity,
-                unit: p.unit,
-            })),
-        });
-
-        res.json({ id, ...result });
+        try {
+            const result = await persistReceiptPrices(id, userId, parsedData, {
+                chainId: parsedData.header?.chainId,
+                storeId: parsedData.header?.storeId ?? null,
+                receiptNo: parsedData.footer?.receiptNo ?? null,
+                date: parsedData.footer?.date ?? null,
+                time: parsedData.footer?.time ?? null,
+                products: (parsedData.products || []).map((p: any) => ({
+                    storeProductId: p.storeProductId ?? null,
+                    matchConfirmed: !!p.matchConfirmed,
+                    priceVerified: !!p.priceVerified,
+                    price: p.price,
+                    promoPrice: p.promoPrice,
+                    quantity: p.quantity,
+                    unit: p.unit,
+                })),
+            });
+            res.json({ id, ...result });
+        } catch (err: any) {
+            // Duplicate-receipt safety net for the update path. This
+            // fires when an auto-save would push the row into the
+            // (receiptNo, storeId, date) tuple owned by another
+            // Receipt — typically because two rows accidentally point
+            // at the same physical receipt (e.g. mobile re-OCR via
+            // rehydration finds the same identity fields as a
+            // pre-existing sibling row). Return 409 instead of 500
+            // so the client can detect the collision and decide what
+            // to do (we currently log + ignore on the client side —
+            // the local state still reflects the corrected values,
+            // and the user can manually delete the sibling row).
+            if (err?.code === 'ER_DUP_ENTRY' && /unique_receipt/i.test(String(err?.sqlMessage ?? ''))) {
+                res.status(409).json({
+                    error: 'duplicate',
+                    message: 'Receipt with this number already exists for the user at this store/date',
+                    receiptId: id,
+                });
+                return;
+            }
+            throw err;
+        }
     } catch (error) {
         next(error);
     }
@@ -304,6 +330,172 @@ export const setReceiptFilePath = async (req: Request, res: Response, next: Next
     }
 };
 
+// Minimal Region validator. Anything else on the object is ignored —
+// keeps the parser free to evolve without breaking the endpoint.
+const isRegion = (r: any): boolean =>
+    !!r &&
+    typeof r === 'object' &&
+    Number.isFinite(r.yTop) &&
+    Number.isFinite(r.yBottom) &&
+    Number.isFinite(r.xLeft) &&
+    Number.isFinite(r.xRight);
+
+// Allow-list for `kind` so a malformed client can't inject arbitrary
+// strings. Stays in sync with shared/parsers/rimiParser.ts RegionKind.
+const ALLOWED_KINDS = new Set([
+    'storeName',
+    'storeAddress',
+    'storeCode',
+    'total',
+    'date',
+    'time',
+    'dateTime',
+    'receiptNo',
+]);
+
+interface SanitisedRegion {
+    yTop: number;
+    yBottom: number;
+    xLeft: number;
+    xRight: number;
+    kind?: string;
+}
+
+const sanitiseRegions = (arr: any): SanitisedRegion[] | null => {
+    if (!Array.isArray(arr)) return null;
+    return arr.filter(isRegion).map((r: any) => {
+        const out: SanitisedRegion = {
+            yTop: Number(r.yTop),
+            yBottom: Number(r.yBottom),
+            xLeft: Number(r.xLeft),
+            xRight: Number(r.xRight),
+        };
+        if (typeof r.kind === 'string' && ALLOWED_KINDS.has(r.kind)) {
+            out.kind = r.kind;
+        }
+        return out;
+    });
+};
+
+/**
+ * PATCH /api/receipts/:id/regions
+ *
+ * Rehydration for pre-current-parser receipts. The mobile app re-runs
+ * OCR + parser locally on the cached receipt image and PATCHes the
+ * results here so the next open is free.
+ *
+ * Body:
+ *   {
+ *     headerLineRegions: Region[],
+ *     footerLineRegions: Region[],
+ *     regionsVersion?: string,
+ *     total?: number | null,
+ *     totalSavings?: number | null,
+ *   }
+ *
+ * Always merges `lineRegions` (parser-emitted bbox geometry — safe to
+ * overwrite). For `total` / `totalSavings`, applies the value ONLY
+ * when the stored value is null (i.e. original parse failed). This
+ * preserves any user edits while letting parser fixes for variant OCR
+ * (e.g. `ė`→`ê` substitution) backfill the missing data.
+ */
+export const updateReceiptRegions = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const id = Number(req.params.id);
+        if (isNaN(id)) {
+            res.status(400).json({ error: 'Invalid receipt ID' });
+            return;
+        }
+        const headerLineRegions = sanitiseRegions(req.body?.headerLineRegions);
+        const footerLineRegions = sanitiseRegions(req.body?.footerLineRegions);
+        if (headerLineRegions === null || footerLineRegions === null) {
+            res.status(400).json({ error: 'headerLineRegions and footerLineRegions must be arrays' });
+            return;
+        }
+
+        const receipt: any = await getReceiptById(id);
+        if (!receipt) {
+            res.status(404).json({ error: 'Receipt not found' });
+            return;
+        }
+
+        const parsedDataIsString = typeof receipt.parsedData === 'string';
+        let parsed: any;
+        try {
+            parsed = parsedDataIsString ? JSON.parse(receipt.parsedData) : receipt.parsedData;
+        } catch {
+            res.status(500).json({ error: 'Malformed parsedData' });
+            return;
+        }
+        if (!parsed || typeof parsed !== 'object') {
+            res.status(500).json({ error: 'Malformed parsedData' });
+            return;
+        }
+
+        parsed.header = parsed.header ?? {};
+        parsed.footer = parsed.footer ?? {};
+        if (headerLineRegions.length > 0) parsed.header.lineRegions = headerLineRegions;
+        if (footerLineRegions.length > 0) parsed.footer.lineRegions = footerLineRegions;
+
+        // Value + identity fields. The client only sends these when
+        // its local re-parse produced a value (REGIONS_VERSION bump
+        // triggered fresh parsing). Mirroring the mobile rule: when
+        // a value arrives, treat it as authoritative and overwrite
+        // any stale persisted value. This fixes:
+        //   • Receipts whose earlier parser revision stored a wrong
+        //     total (e.g. OCR-mangled Mokėti row → null fallback).
+        //   • Receipts pointing to a swapped image — common with the
+        //     dev batch tool, which can create multiple rows with
+        //     colliding filePath but different parsedData. Re-parsing
+        //     the actual image and persisting receiptNo/date/time
+        //     converges the row back to what the image shows.
+        // We leave a field alone when the client omits it (parser
+        // couldn't produce a value — preserves DB state).
+        const reqTotal = req.body?.total;
+        const reqSavings = req.body?.totalSavings;
+        const reqReceiptNo = req.body?.receiptNo;
+        const reqDate = req.body?.date;
+        const reqTime = req.body?.time;
+        if (typeof reqTotal === 'number' && Number.isFinite(reqTotal)) {
+            parsed.footer.total = reqTotal;
+        }
+        if (typeof reqSavings === 'number' && Number.isFinite(reqSavings)) {
+            parsed.footer.totalSavings = reqSavings;
+        }
+        // Identity fields capped at 64 chars to keep an abusive
+        // client from injecting unbounded text. Empty strings reject
+        // so the field doesn't get clobbered when the parser failed.
+        const isOkString = (s: any): s is string =>
+            typeof s === 'string' && s.length > 0 && s.length <= 64;
+        if (isOkString(reqReceiptNo)) {
+            parsed.footer.receiptNo = reqReceiptNo;
+        }
+        if (isOkString(reqDate)) {
+            parsed.footer.date = reqDate;
+        }
+        if (isOkString(reqTime)) {
+            parsed.footer.time = reqTime;
+        }
+
+        // Stamp the parser revision so the mobile client can detect
+        // when persisted bands came from an outdated parser and force
+        // another re-OCR. Accepts any short string; mobile owns the
+        // comparison logic (this endpoint just stores opaquely).
+        const versionRaw = req.body?.regionsVersion;
+        if (typeof versionRaw === 'string' && versionRaw.length > 0 && versionRaw.length <= 32) {
+            parsed.header.regionsVersion = versionRaw;
+        }
+
+        await pool.query(
+            'UPDATE Receipt SET parsedData = ? WHERE id = ?',
+            [JSON.stringify(parsed), id],
+        );
+        res.json({ id, ok: true });
+    } catch (error) {
+        next(error);
+    }
+};
+
 export const fetchReceiptComparison = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const id = Number(req.params.id);
@@ -311,8 +503,16 @@ export const fetchReceiptComparison = async (req: Request, res: Response, next: 
             res.status(400).json({ error: 'Invalid receipt ID' });
             return;
         }
+        // Optional `?maxDistanceKm=N` — clamped to [0, 200] to defend
+        // against pathological values. Service applies its own default
+        // when omitted.
+        const rawMax = req.query.maxDistanceKm;
+        const maxDistanceKm =
+            typeof rawMax === 'string' && rawMax.trim() !== '' && Number.isFinite(Number(rawMax))
+                ? Math.min(200, Math.max(0, Number(rawMax)))
+                : undefined;
 
-        const comparison = await getReceiptComparison(id);
+        const comparison = await getReceiptComparison(id, { maxDistanceKm });
         res.json(comparison);
     } catch (error: any) {
         if (error?.statusCode === 404) {

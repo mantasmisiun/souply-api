@@ -132,8 +132,10 @@ export const castSlot2Vote = async (
     try {
         await connection.beginTransaction();
 
-        // Award point for every swipe, even bursts — keeps engagement metrics honest.
-        await awardSwipePoint(input.userId, connection);
+        // awardSwipePoint moved to AFTER commit (fire-and-forget) — see
+        // receiptSaveService for the User-row contention rationale. The
+        // post-commit call fires regardless of burst so engagement metrics
+        // stay honest.
 
         if (!burst) {
             const equivalenceVerdict = input.vote === 'identical' ? 'same' : 'different';
@@ -203,6 +205,9 @@ export const castSlot2Vote = async (
         }
 
         await connection.commit();
+        awardSwipePoint(input.userId).catch((e) =>
+            console.warn(`[slot2VoteService] points award failed for user ${input.userId}:`, e),
+        );
         return { ok: true, effect: 'vote-recorded', isBurst: burst };
     } catch (e) {
         await connection.rollback();

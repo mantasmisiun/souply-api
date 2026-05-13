@@ -230,13 +230,23 @@ export const persistReceiptPrices = async (
         // generates enough pairs from confirmed SPs to fill it; lower tiers backfill.
         result.mandatorySwipesRequired = await initMandatorySwipeSession(receiptId, MANDATORY_SWIPES_PER_RECEIPT, connection);
 
-        if (awardPoints) {
-            await awardReceiptPoints(userId, input.products.length, connection);
-        }
+        // NB: `awardReceiptPoints` moved to AFTER commit (see end of function).
+        // Holding the User-row write lock inside this long transaction was
+        // causing `/users/:id/profile` requests (which call `updateLastActive`)
+        // to time out under load — every concurrent profile fetch piled up
+        // behind the receipt save's points UPDATE.
 
         // No resolved store → can't attach prices, but parsedData + candidates were saved.
         if (!input.storeId) {
             await connection.commit();
+            if (awardPoints) {
+                awardReceiptPoints(userId, input.products.length).catch((e) =>
+                    console.warn(
+                        `[persistReceiptPrices] points award failed for receipt ${receiptId}:`,
+                        e,
+                    ),
+                );
+            }
             return result;
         }
 
@@ -347,6 +357,18 @@ export const persistReceiptPrices = async (
         await updateReceiptSavedAmount(receiptId, savedAmount, connection);
 
         await connection.commit();
+        // Points award is fire-and-forget AFTER the receipt transaction
+        // commits. Holding this UPDATE inside the transaction made
+        // `/users/:id/profile` requests time out under load — see the
+        // long comment near the removed in-transaction call site.
+        if (awardPoints) {
+            awardReceiptPoints(userId, input.products.length).catch((e) =>
+                console.warn(
+                    `[persistReceiptPrices] points award failed for receipt ${receiptId}:`,
+                    e,
+                ),
+            );
+        }
     } catch (error) {
         await connection.rollback();
         throw error;

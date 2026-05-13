@@ -201,6 +201,53 @@ describe('resolveReceiptLineStoreProduct — cross-chain bootstrap', () => {
         expect(result.source).toBe('created');
         expect(result.rejectReason).toBe('amount_mismatch');
     });
+
+    it('on gate rejection, does NOT reuse altMatchProductId — creates a fresh Product instead', async () => {
+        // Regression guard for the cross-chain bootstrap inconsistency:
+        // previously the rejection path fell through to
+        // createFreshProductAndSp, which silently reused
+        // line.altMatchProductId, leaking the rejected cross-chain
+        // Product identity into the new SP. The fix passes
+        // skipAltMatchProductReuse=true on rejection, forcing a new
+        // Product so the gate decision sticks at the Product level too.
+        mockCreateProduct.mockResolvedValue(777);
+        mockCreateStoreProduct.mockResolvedValue(888);
+
+        const mockQuery = jest.fn<any>()
+            // getSpById → cross-chain SP (chainId=2, receipt is chainId=1)
+            .mockResolvedValueOnce([[makeSpLookup(2)]])
+            // getLatestPriceForSp → 10.00, line is 1.00 → ratio 0.10, out of band
+            .mockResolvedValueOnce([[{ price: '10.00' }]])
+            // findSpByChainProductSize (parallel, discarded on reject)
+            .mockResolvedValueOnce([[]]);
+        // No altMatchProductId DB lookup should fire — that's the whole
+        // point of the fix. If it does, we'd need a fourth mock and the
+        // test would still fail because of the expectations below.
+        const conn = { query: mockQuery };
+
+        const result = await resolveReceiptLineStoreProduct(
+            1,
+            makeLine({
+                storeProductId: 10,
+                price: 1.00,
+                altMatchProductId: 555, // cross-chain Product the matcher surfaced
+            }),
+            conn
+        );
+
+        // A fresh Product was created (proves altMatchProductId was NOT reused).
+        expect(mockCreateProduct).toHaveBeenCalledTimes(1);
+        // The new SP points at the freshly-created Product, NOT at 555.
+        expect(mockCreateStoreProduct).toHaveBeenCalledWith(
+            777,            // freshly-created productId, not altMatchProductId
+            1,              // receipt's chain
+            'Test Product', // line.name
+            null, false, null, null, null,
+            conn
+        );
+        expect(result.source).toBe('created');
+        expect(result.rejectReason).toBe('price_out_of_band');
+    });
 });
 
 // ---------------------------------------------------------------------------

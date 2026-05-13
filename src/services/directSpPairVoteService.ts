@@ -52,8 +52,10 @@ export const castDirectSpPairVote = async (
     try {
         await connection.beginTransaction();
 
-        // Award point for every non-rate-limited swipe, including bursts.
-        await awardSwipePoint(input.userId, connection);
+        // awardSwipePoint moved to AFTER commit (fire-and-forget) — see
+        // receiptSaveService for the User-row contention rationale. The
+        // post-commit call fires on BOTH commit paths below (burst + non-burst)
+        // so bursts still earn their point.
 
         if (!burst) {
             const { previousVote } = await upsertMatchVote(
@@ -92,10 +94,16 @@ export const castDirectSpPairVote = async (
             const merge = await reevaluateMerge(pair.spIdA, pair.spIdB, agg, connection, productIdA, productIdB);
 
             await connection.commit();
+            awardSwipePoint(input.userId).catch((e) =>
+                console.warn(`[directSpPairVoteService] points award failed for user ${input.userId}:`, e),
+            );
             return { ok: true, effect: 'vote-recorded', merge };
         }
 
         await connection.commit();
+        awardSwipePoint(input.userId).catch((e) =>
+            console.warn(`[directSpPairVoteService] points award failed for user ${input.userId}:`, e),
+        );
         return { ok: true, effect: 'vote-recorded', isBurst: true };
     } catch (e) {
         await connection.rollback();

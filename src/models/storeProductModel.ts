@@ -175,12 +175,29 @@ export const getChainIdByStoreProductId = async (storeProductId: number) => {
 };
 
 export const getStoreProductsByChainWithProductData = async (chainId: number) => {
+    // c.name joined so MatchCandidate / ProductMatch carry `categoryName`
+    // through to the client — used by C3's per-category spending breakdown
+    // (avoids the mobile having to mirror the server taxonomy).
+    //
+    // categoryL2Name applies the same CASE that statsService uses so the
+    // receipt-level breakdown and Profilis stats agree on labels:
+    //   c is L1 → NULL (excluded from breakdown)
+    //   c is L2 → c.name
+    //   c is L3 → c2.name (the L2 parent)
     const [rows]: any = await pool.query(
         `SELECT sp.id, sp.productId, sp.storeProductName, sp.brandName,
                 sp.isWeighable, sp.amount, sp.unit,
-                sp.imageUrl, p.categoryId, sp.chainId
+                sp.imageUrl, p.categoryId, c.name AS categoryName,
+                CASE
+                  WHEN c.parentCategoryId IS NULL  THEN NULL
+                  WHEN c2.parentCategoryId IS NULL THEN c.name
+                  ELSE c2.name
+                END AS categoryL2Name,
+                sp.chainId
          FROM StoreProduct sp
          JOIN Product p ON sp.productId = p.id
+         LEFT JOIN Category c  ON p.categoryId = c.id
+         LEFT JOIN Category c2 ON c2.id = c.parentCategoryId
          WHERE sp.chainId = ?`,
         [chainId]
     );
@@ -203,12 +220,24 @@ export const getStoreProductsByChainWithProductData = async (chainId: number) =>
  * established organically.
  */
 export const getStoreProductsCrossChainWithProductData = async (excludeChainId: number) => {
+    // c.name joined so cross-chain candidates also carry `categoryName`
+    // through to the client (see getStoreProductsByChainWithProductData).
+    // categoryL2Name resolved with the same CASE as the same-chain
+    // fetcher so both code paths emit identical breakdown labels.
     const [rows]: any = await pool.query(
         `SELECT sp.id, sp.productId, sp.storeProductName, sp.brandName,
                 sp.isWeighable, sp.amount, sp.unit,
-                sp.imageUrl, p.categoryId, sp.chainId
+                sp.imageUrl, p.categoryId, c.name AS categoryName,
+                CASE
+                  WHEN c.parentCategoryId IS NULL  THEN NULL
+                  WHEN c2.parentCategoryId IS NULL THEN c.name
+                  ELSE c2.name
+                END AS categoryL2Name,
+                sp.chainId
          FROM StoreProduct sp
          JOIN Product p ON sp.productId = p.id
+         LEFT JOIN Category c  ON p.categoryId = c.id
+         LEFT JOIN Category c2 ON c2.id = c.parentCategoryId
          JOIN (
              SELECT productId, MIN(id) AS repId
              FROM StoreProduct

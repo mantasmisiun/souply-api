@@ -28,19 +28,16 @@ describe('buildSlot3Queue', () => {
         expect(buildSlot3Queue([], new Set())).toEqual([]);
     });
 
-    it('excludes pair with score 0.749', () => {
-        const row = makeRow({ score: 0.749 });
-        expect(buildSlot3Queue([row], new Set())).toHaveLength(0);
-    });
-
-    it('includes pair with score exactly 0.75', () => {
-        const row = makeRow({ score: 0.75 });
-        expect(buildSlot3Queue([row], new Set())).toHaveLength(1);
-    });
-
-    it('includes pair with score above 0.75', () => {
-        const row = makeRow({ score: 0.90 });
-        expect(buildSlot3Queue([row], new Set())).toHaveLength(1);
+    // Slot 3's design intentionally has no minimum-score floor — see the
+    // comment in slot3CandidateModel.ts ("Keep only the single best match
+    // per anchor — no score floor"). The goal is "always anchor a card to
+    // the receipt" even when no pair scores above the older 0.75 threshold,
+    // so a low-confidence card beats zero cards.
+    it('includes pair regardless of score — no floor in v2', () => {
+        expect(buildSlot3Queue([makeRow({ score: 0.10 })], new Set())).toHaveLength(1);
+        expect(buildSlot3Queue([makeRow({ score: 0.749 })], new Set())).toHaveLength(1);
+        expect(buildSlot3Queue([makeRow({ score: 0.75 })], new Set())).toHaveLength(1);
+        expect(buildSlot3Queue([makeRow({ score: 0.99 })], new Set())).toHaveLength(1);
     });
 
     it('deduplicates symmetric pair (A-B same as B-A)', () => {
@@ -61,11 +58,23 @@ describe('buildSlot3Queue', () => {
     });
 
     it('sorts descending by score', () => {
-        const rows = [
-            makeRow({ spIdA: 1, spIdB: 2, score: 0.75 }),
-            makeRow({ spIdA: 3, spIdB: 4, score: 0.92 }),
-            makeRow({ spIdA: 5, spIdB: 6, score: 0.81 }),
-        ];
+        // makeRow's defaults assign left.productId=1 / right.productId=2 on
+        // every row — buildSlot3Queue dedupes by canonical product-pair, so
+        // multiple rows sharing the same product pair would collapse to one
+        // card. Give each row a distinct product pair so all three survive
+        // dedup and the test exercises the actual sort.
+        const distinctPair = (leftPid: number, rightPid: number): RawSlot3Row['left'] => ({
+            ...defaultSide,
+            productId: leftPid,
+        });
+        const rowFor = (n: number, score: number): RawSlot3Row => ({
+            spIdA: n * 10,
+            spIdB: n * 10 + 1,
+            score,
+            left: distinctPair(n * 100, n * 100 + 1),
+            right: { ...defaultSide, productId: n * 100 + 1, name: `R${n}`, chainId: 2, chainName: 'IKI' },
+        });
+        const rows = [rowFor(1, 0.75), rowFor(2, 0.92), rowFor(3, 0.81)];
         const result = buildSlot3Queue(rows, new Set());
         expect(result.map(r => r.score)).toEqual([0.92, 0.81, 0.75]);
     });

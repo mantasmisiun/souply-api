@@ -65,7 +65,8 @@ export const castOrphanSwipeVote = async (
     try {
         await connection.beginTransaction();
 
-        await awardSwipePoint(input.userId, connection);
+        // awardSwipePoint moved to AFTER commit (fire-and-forget) — see
+        // receiptSaveService for the User-row contention rationale.
 
         const { previousVote } = await upsertMatchVote(
             input.userId,
@@ -103,6 +104,9 @@ export const castOrphanSwipeVote = async (
         const merge = await reevaluateMerge(pair.spIdA, pair.spIdB, agg, connection, productIdA, productIdB);
 
         await connection.commit();
+        awardSwipePoint(input.userId).catch((e) =>
+            console.warn(`[orphanSwipeService] points award failed for user ${input.userId}:`, e),
+        );
         return { ok: true, effect: 'vote-recorded', merge };
     } catch (e) {
         await connection.rollback();

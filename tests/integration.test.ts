@@ -34,7 +34,9 @@ beforeAll(async () => {
     }
 
     await pool.query(`INSERT INTO StoreChain (id, name) VALUES (1,'Test Chain') ON DUPLICATE KEY UPDATE id=id`);
-    await pool.query(`INSERT INTO Store (id, chainId, name) VALUES (1,1,'Test Store') ON DUPLICATE KEY UPDATE id=id`);
+    // Store.address is NOT NULL in the schema — every seed needs it
+    // even if the test logic doesn't read it.
+    await pool.query(`INSERT INTO Store (id, chainId, name, address) VALUES (1,1,'Test Store','Test St. 1') ON DUPLICATE KEY UPDATE id=id`);
     await pool.query(`INSERT INTO Category (id, name) VALUES (1,'Test Cat') ON DUPLICATE KEY UPDATE id=id`);
     await pool.query(`INSERT INTO Product (id, categoryId, name) VALUES (1,1,'Test Product') ON DUPLICATE KEY UPDATE id=id`);
     await pool.query(`INSERT INTO Product (id, categoryId, name) VALUES (2,1,'Test Product 2') ON DUPLICATE KEY UPDATE id=id`);
@@ -139,8 +141,22 @@ describe('POST /api/receipts — points and savings', () => {
     });
 
     it('awards 1 point per item on the receipt', async () => {
-        const [rows]: any = await pool.query(`SELECT points FROM User WHERE id = ?`, [USER_A]);
-        expect(rows[0].points).toBe(1); // 1 product line = 1 point
+        // Points award is intentionally fire-and-forget after the receipt
+        // transaction commits (see receiptSaveService — moved out of the
+        // critical TX to avoid User-row lock contention). Poll for up to
+        // 1 s so the test isn't racy against the background UPDATE.
+        let points = 0;
+        const deadline = Date.now() + 1000;
+        while (Date.now() < deadline) {
+            const [rows]: any = await pool.query(
+                `SELECT points FROM User WHERE id = ?`,
+                [USER_A],
+            );
+            points = Number(rows[0]?.points ?? 0);
+            if (points === 1) break;
+            await new Promise((r) => setTimeout(r, 50));
+        }
+        expect(points).toBe(1); // 1 product line = 1 point
     });
 
     it('stores a non-null savedAmount on the Receipt row', async () => {

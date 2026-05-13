@@ -9,7 +9,8 @@ jest.setTimeout(20000);
 
 beforeAll(async () => {
     await pool.query(`INSERT INTO StoreChain (id, name) VALUES (1, 'Test Chain') ON DUPLICATE KEY UPDATE id=id`);
-    await pool.query(`INSERT INTO Store (id, chainId, name) VALUES (1, 1, 'Test Store') ON DUPLICATE KEY UPDATE id=id`);
+    // Store.address is NOT NULL in the schema.
+    await pool.query(`INSERT INTO Store (id, chainId, name, address) VALUES (1, 1, 'Test Store', 'Test St. 1') ON DUPLICATE KEY UPDATE id=id`);
     await pool.query(`INSERT INTO Category (id, name) VALUES (1, 'Test Category') ON DUPLICATE KEY UPDATE id=id`);
     await pool.query(`INSERT INTO Product (id, categoryId, name) VALUES (1, 1, 'Test Product') ON DUPLICATE KEY UPDATE id=id`);
     await pool.query(`INSERT INTO StoreProduct (id, productId, chainId, storeProductName) VALUES (10, 1, 1, 'Test Store Product') ON DUPLICATE KEY UPDATE id=id`);

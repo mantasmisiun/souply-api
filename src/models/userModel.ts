@@ -16,8 +16,31 @@ export const getUserById = async (id: string) => {
     return rows[0] || null;
 };
 
+/**
+ * Throttled "last seen" stamp. The `WHERE … AND lastActiveAt < NOW() - INTERVAL 5 MINUTE`
+ * clause makes the UPDATE match-but-no-op for the typical case (active
+ * user already stamped within the last 5 minutes), so MySQL doesn't hold
+ * the row's X-lock for the duration of the surrounding request handler
+ * or, worse, the duration of an unrelated long-running transaction.
+ *
+ * This used to be an unconditional UPDATE called from every
+ * `fetchUserProfile`, which serialised behind any concurrent transaction
+ * holding the User row (e.g. `awardReceiptPoints` inside the receipt
+ * save pipeline). Under batch uploads, profile fetches queued up and
+ * blew the `innodb_lock_wait_timeout`.
+ *
+ * 5 minutes is a UX-safe granularity for "last active" tracking — fine
+ * enough for analytics, coarse enough to eliminate the contention.
+ */
 export const updateLastActive = async (id: string) => {
-    await pool.query('UPDATE User SET lastActiveAt = NOW() WHERE id = ?', [id]);
+    await pool.query(
+        `UPDATE User
+            SET lastActiveAt = NOW()
+          WHERE id = ?
+            AND (lastActiveAt IS NULL
+                 OR lastActiveAt < NOW() - INTERVAL 5 MINUTE)`,
+        [id],
+    );
 };
 
 export const addPoints = async (id: string, delta: number, conn?: any) => {
