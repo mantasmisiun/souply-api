@@ -11,6 +11,7 @@ import { castSlot2Vote } from '../services/slot2VoteService.js';
 import { castDirectSpPairVote } from '../services/directSpPairVoteService.js';
 import type { SwipeVote } from '../services/swipeVoteService.js';
 import { getUserPointsProfile } from '../services/userPointsService.js';
+import { refillUserOrphansIfMissing } from '../services/orphanRefillService.js';
 
 const VALID_VOTES: SwipeVote[] = ['identical', 'similar', 'different'];
 
@@ -183,17 +184,38 @@ export const getSwipeQueue = async (
         const receiptIdParam = typeof req.query.receiptId === 'string' && req.query.receiptId.length > 0
             ? Number(req.query.receiptId)
             : undefined;
+        // `voluntary=1` is set by the Nepriskirta-modal pink button. All
+        // three slots still fire so the client's `capVoluntaryQueue` has a
+        // receipt-anchored pool to draw from (spec: 3 slot 2 → 3 slot 1 →
+        // 3 slot 3 → 1 global). We also fire an on-demand refill of
+        // OrphanSwipeCandidate for the user's missing orphans — the
+        // current response uses whatever OSC rows already exist; the
+        // refill benefits the next visit.
+        const voluntary = req.query.voluntary === '1' || req.query.voluntary === 'true';
 
-        resetSwipeLog(`swipe-queue userId=${userId} receiptId=${receiptIdParam ?? 'none'}`);
+        resetSwipeLog(`swipe-queue userId=${userId} receiptId=${receiptIdParam ?? 'none'} voluntary=${voluntary}`);
 
         if (receiptIdParam !== undefined) {
             await logReceiptPipeline(receiptIdParam);
         }
 
+        if (voluntary) {
+            // Fire-and-forget refill. Loading the snapshot (~100k Products +
+            // trigram index) is heavy and we don't want to block the queue
+            // response on it. The user will benefit from the refill on
+            // their NEXT request — the current response uses whatever OSC
+            // rows already exist. This is the right trade-off because
+            // most voluntary visits land on already-seeded orphans
+            // anyway (the seed script runs nightly).
+            refillUserOrphansIfMissing(userId)
+                .then(n => { if (n > 0) swipeLog(`[Voluntary] background refill produced ${n} OSC rows`); })
+                .catch(e => swipeLog(`[Voluntary] background refill failed: ${(e as Error).message}`));
+        }
+
         const [votedPairKeys, slot1Rows, slot2Rows, slot3Rows] = await Promise.all([
             fetchVotedPairKeys(userId),
             fetchSlot1Rows(userId, receiptIdParam),
-            fetchAllSlot2Rows(userId),
+            fetchAllSlot2Rows(userId, receiptIdParam),
             fetchSlot3Rows(userId, receiptIdParam),
         ]);
 

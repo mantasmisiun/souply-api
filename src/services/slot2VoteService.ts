@@ -138,7 +138,18 @@ export const castSlot2Vote = async (
         // stay honest.
 
         if (!burst) {
-            const equivalenceVerdict = input.vote === 'identical' ? 'same' : 'different';
+            // Personal equivalence for the user's own receipt view:
+            //   'identical' → same: full rescue (category + image)
+            //   'similar'   → same: category-only — matches the global
+            //                 Wilson 'similar' threshold (executeRescue
+            //                 with categoryOnly=true) so the user's
+            //                 personal view stays consistent with the
+            //                 community semantic. Treating it as
+            //                 'different' (previous behaviour) made
+            //                 "Panaši" swipes useless for Neatpažinta.
+            //   'different' → different
+            const equivalenceVerdict =
+                input.vote === 'identical' || input.vote === 'similar' ? 'same' : 'different';
             await upsertEquivalence(input.userId, spIdA, spIdB, equivalenceVerdict, connection);
 
             const { previousVote } = await upsertMatchVote(
