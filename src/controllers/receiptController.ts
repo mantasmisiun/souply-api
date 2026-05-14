@@ -56,7 +56,7 @@ export const fetchReceiptById = async (req: Request, res: Response, next: NextFu
             return;
         }
         // Lazy migration for pre-redesign receipts (see service docstring).
-        const hydrated = await hydrateReceiptCategoriesIfNeeded(id, receipt);
+        const hydrated = await hydrateReceiptCategoriesIfNeeded(id, receipt, req.locale);
         res.json(hydrated);
     } catch (error) {
         next(error);
@@ -107,7 +107,7 @@ export const fetchReceiptItems = async (req: Request, res: Response, next: NextF
             res.status(400).json({ error: 'Invalid receipt ID' });
             return;
         }
-        const items = await getReceiptItemsWithDetails(id);
+        const items = await getReceiptItemsWithDetails(id, req.locale);
         res.json(items);
     } catch (error) {
         next(error);

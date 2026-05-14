@@ -1,6 +1,7 @@
 import pool from '../config/db.js';
 import { nameSimilarity } from '../utils/productNameNormalize.js';
 import type { RawSlot2Row } from '../services/slot2QueueBuilder.js';
+import type { Locale } from '../middleware/locale.js';
 
 /**
  * Slot 2 candidate minimum similarity (cross-chain name match).
@@ -42,7 +43,7 @@ const MAX_GLOBAL_ORPHANS_PER_CHAIN = 50;
  * user confirm whether the orphan is the same product as its best candidate,
  * rescuing it from the "Nepriskirta" bucket on community consensus.
  */
-async function fetchSlot2aRows(userId: string, priorityReceiptId?: number): Promise<RawSlot2Row[]> {
+async function fetchSlot2aRows(userId: string, priorityReceiptId?: number, locale: Locale = 'lt'): Promise<RawSlot2Row[]> {
     // Optional receipt scoping. Mirrors slot 1/3 filter style: when a
     // receipt is in focus, only return orphans from THAT receipt so
     // the voluntary-mode swipe queue actually moves THIS receipt's
@@ -50,8 +51,8 @@ async function fetchSlot2aRows(userId: string, priorityReceiptId?: number): Prom
     // the user's history.
     const receiptFilter = priorityReceiptId !== undefined ? 'AND r.id = ?' : '';
     const params: any[] = priorityReceiptId !== undefined
-        ? [SLOT2_MIN_SCORE, userId, priorityReceiptId]
-        : [SLOT2_MIN_SCORE, userId];
+        ? [SLOT2_MIN_SCORE, locale, locale, userId, priorityReceiptId]
+        : [SLOT2_MIN_SCORE, locale, locale, userId];
     const [rows]: any = await pool.query(
         `SELECT DISTINCT
              osp.id                                    AS orphanSpId,
@@ -67,7 +68,7 @@ async function fetchSlot2aRows(userId: string, priorityReceiptId?: number): Prom
              ochain.name                               AS orphanChainName,
              ochain.logoUrl                            AS orphanChainLogoUrl,
              op.categoryId                             AS orphanCategoryId,
-             oc.name                                   AS orphanCategoryName,
+             COALESCE(oct.name, oc.name)               AS orphanCategoryName,
              cp.id                                     AS candidateProductId,
              COALESCE(csp.storeProductName, cp.name)   AS candidateName,
              csp.brandName                             AS candidateBrandName,
@@ -77,7 +78,7 @@ async function fetchSlot2aRows(userId: string, priorityReceiptId?: number): Prom
              cchain.name                               AS candidateChainName,
              cchain.logoUrl                            AS candidateChainLogoUrl,
              cp.categoryId                             AS candidateCategoryId,
-             cc.name                                   AS candidateCategoryName
+             COALESCE(cct.name, cc.name)               AS candidateCategoryName
            FROM Receipt r
            JOIN ReceiptSwipeCandidate rsc
              ON rsc.receiptId   = r.id
@@ -104,6 +105,8 @@ async function fetchSlot2aRows(userId: string, priorityReceiptId?: number): Prom
            JOIN StoreChain     cchain ON cchain.id = csp.chainId
            JOIN Category       oc     ON oc.id    = op.categoryId
            JOIN Category       cc     ON cc.id    = cp.categoryId
+           LEFT JOIN CategoryTranslation oct ON oct.categoryId = oc.id AND oct.locale = ?
+           LEFT JOIN CategoryTranslation cct ON cct.categoryId = cc.id AND cct.locale = ?
           WHERE r.userId = ?
           ${receiptFilter}`,
         params,
@@ -155,15 +158,15 @@ async function fetchSlot2aRows(userId: string, priorityReceiptId?: number): Prom
  *
  * Name similarity is computed in JS; the DB provides the raw candidate pool.
  */
-async function fetchSlot2bRows(userId: string, priorityReceiptId?: number): Promise<RawSlot2Row[]> {
+async function fetchSlot2bRows(userId: string, priorityReceiptId?: number, locale: Locale = 'lt'): Promise<RawSlot2Row[]> {
     // Step 1: anchor SPs — well-matched, categorised, from user's receipts.
     // When a receipt is in focus, restrict anchors to that receipt so the
     // candidate pool (orphans whose name fuzzy-matches an anchor) is
     // shaped by the user's current receipt context.
     const receiptFilter = priorityReceiptId !== undefined ? 'AND r.id = ?' : '';
     const anchorParams: any[] = priorityReceiptId !== undefined
-        ? [SLOT2B_ANCHOR_MIN_SCORE, userId, priorityReceiptId]
-        : [SLOT2B_ANCHOR_MIN_SCORE, userId];
+        ? [SLOT2B_ANCHOR_MIN_SCORE, locale, userId, priorityReceiptId]
+        : [SLOT2B_ANCHOR_MIN_SCORE, locale, userId];
     const [anchorRows]: any = await pool.query(
         `SELECT DISTINCT
              rsc.storeProductId                        AS anchorSpId,
@@ -174,7 +177,7 @@ async function fetchSlot2bRows(userId: string, priorityReceiptId?: number): Prom
              sp.unit                                   AS anchorUnit,
              p.id                                      AS anchorProductId,
              p.categoryId                              AS anchorCategoryId,
-             c.name                                    AS anchorCategoryName,
+             COALESCE(ct.name, c.name)                 AS anchorCategoryName,
              sc.name                                   AS chainName,
              sc.logoUrl                                AS chainLogoUrl
            FROM Receipt r
@@ -188,6 +191,7 @@ async function fetchSlot2bRows(userId: string, priorityReceiptId?: number): Prom
             AND p.mergedIntoId IS NULL
            JOIN StoreChain    sc ON sc.id = sp.chainId
            JOIN Category      c  ON c.id  = p.categoryId
+           LEFT JOIN CategoryTranslation ct ON ct.categoryId = c.id AND ct.locale = ?
           WHERE r.userId = ?
           ${receiptFilter}`,
         anchorParams,
@@ -212,8 +216,8 @@ async function fetchSlot2bRows(userId: string, priorityReceiptId?: number): Prom
     // their own in a covered chain.
     const userReceiptFilter = priorityReceiptId !== undefined ? 'AND r.id = ?' : '';
     const userOrphanParams: any[] = priorityReceiptId !== undefined
-        ? [userId, priorityReceiptId]
-        : [userId];
+        ? [locale, userId, priorityReceiptId]
+        : [locale, userId];
     const [userOrphanRows]: any = await pool.query(
         `SELECT DISTINCT
              sp.id                                    AS orphanSpId,
@@ -225,7 +229,7 @@ async function fetchSlot2bRows(userId: string, priorityReceiptId?: number): Prom
              p.id                                     AS orphanProductId,
              sc.name                                  AS chainName,
              sc.logoUrl                               AS chainLogoUrl,
-             oc.name                                  AS orphanCategoryName
+             COALESCE(oct.name, oc.name)              AS orphanCategoryName
            FROM Receipt r
            JOIN ReceiptSwipeCandidate rsc
              ON rsc.receiptId = r.id AND rsc.autoMatched = 1
@@ -235,6 +239,7 @@ async function fetchSlot2bRows(userId: string, priorityReceiptId?: number): Prom
             AND p.mergedIntoId IS NULL
            JOIN StoreChain sc ON sc.id = sp.chainId
            JOIN Category   oc ON oc.id = p.categoryId
+           LEFT JOIN CategoryTranslation oct ON oct.categoryId = oc.id AND oct.locale = ?
           WHERE r.userId = ?
             ${userReceiptFilter}`,
         userOrphanParams,
@@ -255,16 +260,17 @@ async function fetchSlot2bRows(userId: string, priorityReceiptId?: number): Prom
              p.id                                     AS orphanProductId,
              sc.name                                  AS chainName,
              sc.logoUrl                               AS chainLogoUrl,
-             oc.name                                  AS orphanCategoryName
+             COALESCE(oct.name, oc.name)              AS orphanCategoryName
            FROM StoreProduct sp
            JOIN Product    p  ON p.id  = sp.productId
             AND p.categoryId   = 688
             AND p.mergedIntoId IS NULL
            JOIN StoreChain sc ON sc.id = sp.chainId
            JOIN Category   oc ON oc.id = p.categoryId
+           LEFT JOIN CategoryTranslation oct ON oct.categoryId = oc.id AND oct.locale = ?
           WHERE sp.chainId IN (?)
           LIMIT ?`,
-        [anchorChainIds, MAX_GLOBAL_ORPHANS_PER_CHAIN * anchorChainIds.length],
+        [locale, anchorChainIds, MAX_GLOBAL_ORPHANS_PER_CHAIN * anchorChainIds.length],
     );
 
     // Merge: user orphans first (preferred match targets), then de-duped
@@ -347,10 +353,11 @@ async function fetchSlot2bRows(userId: string, priorityReceiptId?: number): Prom
 export async function fetchAllSlot2Rows(
     userId: string,
     priorityReceiptId?: number,
+    locale: Locale = 'lt',
 ): Promise<RawSlot2Row[]> {
     const [rows2a, rows2b] = await Promise.all([
-        fetchSlot2aRows(userId, priorityReceiptId),
-        fetchSlot2bRows(userId, priorityReceiptId),
+        fetchSlot2aRows(userId, priorityReceiptId, locale),
+        fetchSlot2bRows(userId, priorityReceiptId, locale),
     ]);
     return [...rows2a, ...rows2b];
 }

@@ -1,4 +1,5 @@
 import pool from '../config/db.js';
+import type { Locale } from '../middleware/locale.js';
 
 type Connection = typeof pool | any;
 
@@ -18,10 +19,11 @@ export const createReceipt = async (
 export const getReceiptsByUserId = async (userId: string) => {
     const [rows]: any = await pool.query(
         `SELECT r.*,
-                sc.name    AS chainName,
-                sc.logoUrl AS chainLogoUrl,
-                s.name     AS storeName,
-                s.address  AS storeAddress
+                sc.name         AS chainName,
+                sc.logoUrl      AS chainLogoUrl,
+                sc.miniLogoUrl  AS chainMiniLogoUrl,
+                s.name          AS storeName,
+                s.address       AS storeAddress
            FROM Receipt r
       LEFT JOIN Store      s  ON s.id        = r.storeId
       LEFT JOIN StoreChain sc ON sc.id       = s.chainId
@@ -83,13 +85,13 @@ export const getReceiptByReceiptNoAndUser = async (receiptNo: string, userId: st
     return rows[0] || null;
 };
 
-export const getReceiptItemsWithDetails = async (receiptId: number) => {
+export const getReceiptItemsWithDetails = async (receiptId: number, locale: Locale = 'lt') => {
     const [rows]: any = await pool.query(
-        `SELECT 
+        `SELECT
             sp.storeProductName as name,
             sp.brandName,
             p.categoryId,
-            c.name as categoryName,
+            COALESCE(ct.name, c.name) as categoryName,
             pr.price,
             pr.promoPrice,
             pr.id as priceId,
@@ -98,10 +100,11 @@ export const getReceiptItemsWithDetails = async (receiptId: number) => {
          JOIN StoreProduct sp ON pr.storeProductId = sp.id
          JOIN Product p ON sp.productId = p.id
          JOIN Category c ON p.categoryId = c.id
+         LEFT JOIN CategoryTranslation ct ON ct.categoryId = c.id AND ct.locale = ?
          JOIN Store s ON pr.storeId = s.id
          JOIN Receipt r ON r.storeId = s.id
          WHERE r.id = ? AND pr.receiptId = ?`,
-        [receiptId, receiptId]
+        [locale, receiptId, receiptId]
     );
     return rows;
 };

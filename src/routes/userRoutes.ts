@@ -1,5 +1,6 @@
 import { Router } from 'express';
-import { addUser, fetchUserById, updateUserLastActive, fetchUserProfile, fetchUserEquivalences, putUserEquivalence, deleteUserEquivalence, fetchUserProductMergeMap, fetchUserStats, fetchUserVoteHistory, editUserVotePair } from '../controllers/userController.js';
+import { addUser, fetchUserById, updateUserLastActive, fetchUserProfile, fetchUserEquivalences, putUserEquivalence, deleteUserEquivalence, fetchUserProductMergeMap, fetchUserStats, fetchUserVoteHistory, editUserVotePair, deleteSelfAccount } from '../controllers/userController.js';
+import { recoverAccount } from '../controllers/accountRecoveryController.js';
 
 const router = Router();
 
@@ -26,6 +27,24 @@ router.post('/users', addUser);
 
 /**
  * @swagger
+ * /api/users/recover:
+ *   post:
+ *     summary: Recover an account using 3 previously-uploaded receipts
+ *     description: |
+ *       Spec: Documentation/roadmap/user-accounts-recovery.md
+ *       Match key per receipt: receiptNo + date + total (within 0.01€).
+ *       All 3 must point to the same userId across at least 2 different
+ *       store chains. Rate-limited to 3 failures per 24h per device.
+ *       Any fresh-install activity is auto-merged into the recovered account.
+ *     tags: [User]
+ *     responses:
+ *       200: { description: 'JSON { status: success | failed | locked, ... }' }
+ *       400: { description: Bad request body }
+ */
+router.post('/users/recover', recoverAccount);
+
+/**
+ * @swagger
  * /api/users/{id}:
  *   get:
  *     summary: Get a user by ID
@@ -43,6 +62,29 @@ router.post('/users', addUser);
  *         description: User retrieved successfully
  */
 router.get('/users/:id', fetchUserById);
+
+/**
+ * @swagger
+ * /api/users/{id}:
+ *   delete:
+ *     summary: User-initiated self-delete (anonymize mode)
+ *     description: |
+ *       Deletes the User row, receipts, basket, and shopping list. Anonymises
+ *       vote rows (StoreProductMatchVote.userId → NULL) so the user's
+ *       contributions to the shared price catalog remain. PII is stripped
+ *       from receipt parsedData before deletion. Admin-only `purge` mode is
+ *       a separate endpoint under /admin/users/:id.
+ *     tags: [User]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         schema: { type: string, format: uuid }
+ *         required: true
+ *     responses:
+ *       204: { description: Account deleted }
+ *       404: { description: User not found }
+ */
+router.delete('/users/:id', deleteSelfAccount);
 
 /**
  * @swagger

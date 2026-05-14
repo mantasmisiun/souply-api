@@ -214,9 +214,9 @@ export const getSwipeQueue = async (
 
         const [votedPairKeys, slot1Rows, slot2Rows, slot3Rows] = await Promise.all([
             fetchVotedPairKeys(userId),
-            fetchSlot1Rows(userId, receiptIdParam),
-            fetchAllSlot2Rows(userId, receiptIdParam),
-            fetchSlot3Rows(userId, receiptIdParam),
+            fetchSlot1Rows(userId, receiptIdParam, req.locale),
+            fetchAllSlot2Rows(userId, receiptIdParam, req.locale),
+            fetchSlot3Rows(userId, receiptIdParam, req.locale),
         ]);
 
         const slot2Items = buildSlot2Queue(slot2Rows, votedPairKeys);

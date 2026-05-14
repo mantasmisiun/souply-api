@@ -17,7 +17,7 @@ export const addCategory = async (req: Request, res: Response, next: NextFunctio
 
 export const fetchAllCategories = async (req: Request, res: Response, next: NextFunction) => {
     try {
-        const categories = await getTopLevelCategories();
+        const categories = await getTopLevelCategories(req.locale);
         res.json(categories);
     } catch (error) {
         next(error);
@@ -31,7 +31,7 @@ export const fetchSubCategories = async (req: Request, res: Response, next: Next
             res.status(400).json({ error: 'Invalid category ID' });
             return;
         }
-        const category = await getSubCategories(id);
+        const category = await getSubCategories(id, req.locale);
         if (category.length === 0) {
             res.status(404).json({ error: 'No subcategories found' });
             return;
@@ -49,7 +49,7 @@ export const fetchCategoryById = async (req: Request, res: Response, next: NextF
             res.status(400).json({ error: 'Invalid category ID' });
             return;
         }
-        const category = await getCategoryById(id);
+        const category = await getCategoryById(id, req.locale);
         if (!category) {
             res.status(404).json({ error: 'Category not found' });
             return;
@@ -67,7 +67,7 @@ export const fetchCategoryPath = async (req: Request, res: Response, next: NextF
             res.status(400).json({ error: 'Invalid category ID' });
             return;
         }
-        const path = await getCategoryPath(id);
+        const path = await getCategoryPath(id, req.locale);
         res.json({ path });
     } catch (error) {
         next(error);
@@ -95,7 +95,7 @@ export const fetchCategoryAncestors = async (req: Request, res: Response, next: 
             res.status(400).json({ error: 'Invalid category ID' });
             return;
         }
-        const ancestors = await getCategoryAncestors(id);
+        const ancestors = await getCategoryAncestors(id, req.locale);
         res.json(ancestors);
     } catch (error) {
         next(error);
@@ -124,7 +124,7 @@ export const fetchL3CategorySearch = async (req: Request, res: Response, next: N
             res.status(400).json({ error: 'q is required' });
             return;
         }
-        const rows = await searchL3CategoriesByName(q);
+        const rows = await searchL3CategoriesByName(q, req.locale);
         res.json(rows);
     } catch (error) {
         next(error);
@@ -140,7 +140,7 @@ export const fetchL3CategorySearch = async (req: Request, res: Response, next: N
  */
 export const fetchAllL2Categories = async (req: Request, res: Response, next: NextFunction) => {
     try {
-        const categories = await getAllL2Categories();
+        const categories = await getAllL2Categories(req.locale);
         res.json(categories);
     } catch (error) {
         next(error);

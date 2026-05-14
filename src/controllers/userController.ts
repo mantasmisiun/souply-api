@@ -8,6 +8,7 @@ import { getEquivalencesForUser, upsertEquivalence, deleteEquivalence, getUserPr
 import { getUserStats } from '../services/statsService.js';
 import { getVoteHistory, orderPair, type MatchVote } from '../models/storeProductMatchModel.js';
 import { editVote } from '../services/swipeVoteService.js';
+import { deleteUser } from '../services/userDeletionService.js';
 
 export const addUser = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -153,7 +154,7 @@ export const fetchUserProductMergeMap = async (req: Request, res: Response, next
 export const fetchUserStats = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const userId = String(req.params.id);
-        const stats = await getUserStats(userId);
+        const stats = await getUserStats(userId, req.locale);
         res.json(stats);
     } catch (error) {
         next(error);
@@ -177,6 +178,37 @@ export const fetchUserVoteHistory = async (req: Request, res: Response, next: Ne
             vote: (['identical', 'similar', 'different'].includes(vote ?? '')) ? vote as any : undefined,
         });
         res.json(page);
+    } catch (error) {
+        next(error);
+    }
+};
+
+// DELETE /users/:id
+// User-initiated self-delete. Always runs in `anonymize` mode:
+//   - The User row + receipts + receipt images + basket + shopping list are deleted
+//   - StoreProductMatchVote.userId is nulled (vote contributions stay in the
+//     global price catalog, no longer attributable to the user)
+//   - Receipt parsedData has PII stripped (footer.rawText, header.rawText,
+//     products[].rawLines), though Receipt rows themselves CASCADE-delete
+//     via the User FK
+//
+// No auth gate: the userId in the path IS the requester's claim of identity
+// (device UUID stored in AsyncStorage). This matches the rest of the API
+// surface — same security posture as POST /users, GET /users/:id, etc.
+// The `purge` (bad-actor) mode stays gated behind /admin/users/:id.
+export const deleteSelfAccount = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const userId = String(req.params.id ?? '').trim();
+        if (!userId) {
+            res.status(400).json({ error: 'userId is required' });
+            return;
+        }
+        const result = await deleteUser(userId, 'anonymize');
+        if (!result.deleted) {
+            res.status(404).json({ error: 'User not found' });
+            return;
+        }
+        res.status(204).send();
     } catch (error) {
         next(error);
     }

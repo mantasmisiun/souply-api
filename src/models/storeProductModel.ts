@@ -1,5 +1,6 @@
 import pool from '../config/db.js';
 import { resolveEffectiveProductId } from '../services/storeProductMergeService.js';
+import type { Locale } from '../middleware/locale.js';
 
 type Connection = typeof pool | any;
 
@@ -174,7 +175,7 @@ export const getChainIdByStoreProductId = async (storeProductId: number) => {
     return rows[0]?.chainId || null;
 };
 
-export const getStoreProductsByChainWithProductData = async (chainId: number) => {
+export const getStoreProductsByChainWithProductData = async (chainId: number, locale: Locale = 'lt') => {
     // c.name joined so MatchCandidate / ProductMatch carry `categoryName`
     // through to the client — used by C3's per-category spending breakdown
     // (avoids the mobile having to mirror the server taxonomy).
@@ -187,19 +188,21 @@ export const getStoreProductsByChainWithProductData = async (chainId: number) =>
     const [rows]: any = await pool.query(
         `SELECT sp.id, sp.productId, sp.storeProductName, sp.brandName,
                 sp.isWeighable, sp.amount, sp.unit,
-                sp.imageUrl, p.categoryId, c.name AS categoryName,
+                sp.imageUrl, p.categoryId, COALESCE(ct.name, c.name) AS categoryName,
                 CASE
                   WHEN c.parentCategoryId IS NULL  THEN NULL
-                  WHEN c2.parentCategoryId IS NULL THEN c.name
-                  ELSE c2.name
+                  WHEN c2.parentCategoryId IS NULL THEN COALESCE(ct.name, c.name)
+                  ELSE COALESCE(ct2.name, c2.name)
                 END AS categoryL2Name,
                 sp.chainId
          FROM StoreProduct sp
          JOIN Product p ON sp.productId = p.id
          LEFT JOIN Category c  ON p.categoryId = c.id
          LEFT JOIN Category c2 ON c2.id = c.parentCategoryId
+         LEFT JOIN CategoryTranslation ct  ON ct.categoryId  = c.id  AND ct.locale  = ?
+         LEFT JOIN CategoryTranslation ct2 ON ct2.categoryId = c2.id AND ct2.locale = ?
          WHERE sp.chainId = ?`,
-        [chainId]
+        [locale, locale, chainId]
     );
     return rows.map((r: any) => ({
         ...r,
@@ -219,7 +222,7 @@ export const getStoreProductsByChainWithProductData = async (chainId: number) =>
  * receipt resolver — that's how cross-chain product identity gets
  * established organically.
  */
-export const getStoreProductsCrossChainWithProductData = async (excludeChainId: number) => {
+export const getStoreProductsCrossChainWithProductData = async (excludeChainId: number, locale: Locale = 'lt') => {
     // c.name joined so cross-chain candidates also carry `categoryName`
     // through to the client (see getStoreProductsByChainWithProductData).
     // categoryL2Name resolved with the same CASE as the same-chain
@@ -227,17 +230,19 @@ export const getStoreProductsCrossChainWithProductData = async (excludeChainId: 
     const [rows]: any = await pool.query(
         `SELECT sp.id, sp.productId, sp.storeProductName, sp.brandName,
                 sp.isWeighable, sp.amount, sp.unit,
-                sp.imageUrl, p.categoryId, c.name AS categoryName,
+                sp.imageUrl, p.categoryId, COALESCE(ct.name, c.name) AS categoryName,
                 CASE
                   WHEN c.parentCategoryId IS NULL  THEN NULL
-                  WHEN c2.parentCategoryId IS NULL THEN c.name
-                  ELSE c2.name
+                  WHEN c2.parentCategoryId IS NULL THEN COALESCE(ct.name, c.name)
+                  ELSE COALESCE(ct2.name, c2.name)
                 END AS categoryL2Name,
                 sp.chainId
          FROM StoreProduct sp
          JOIN Product p ON sp.productId = p.id
          LEFT JOIN Category c  ON p.categoryId = c.id
          LEFT JOIN Category c2 ON c2.id = c.parentCategoryId
+         LEFT JOIN CategoryTranslation ct  ON ct.categoryId  = c.id  AND ct.locale  = ?
+         LEFT JOIN CategoryTranslation ct2 ON ct2.categoryId = c2.id AND ct2.locale = ?
          JOIN (
              SELECT productId, MIN(id) AS repId
              FROM StoreProduct
@@ -245,7 +250,7 @@ export const getStoreProductsCrossChainWithProductData = async (excludeChainId: 
              GROUP BY productId
          ) rep ON rep.repId = sp.id
          WHERE sp.chainId <> ?`,
-        [excludeChainId, excludeChainId]
+        [locale, locale, excludeChainId, excludeChainId]
     );
     return rows.map((r: any) => ({
         ...r,

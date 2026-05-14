@@ -1,6 +1,7 @@
 import pool from '../config/db.js';
 import { crossChainNameSimilarity } from '../utils/productNameNormalize.js';
 import { swipeLog } from '../utils/swipeLogger.js';
+import type { Locale } from '../middleware/locale.js';
 
 /** Minimum match score for an anchor SP to be used as a Slot 1 source. */
 const SLOT1_ANCHOR_MIN_SCORE = 0.85;
@@ -55,7 +56,7 @@ export interface RawSlot1Row {
  * Votes feed the cross-chain StoreProductMatchVote table and ultimately drive
  * the price-comparison equivalence graph.
  */
-export async function fetchSlot1Rows(userId: string, priorityReceiptId?: number): Promise<RawSlot1Row[]> {
+export async function fetchSlot1Rows(userId: string, priorityReceiptId?: number, locale: Locale = 'lt'): Promise<RawSlot1Row[]> {
     swipeLog(`[Slot1] fetchSlot1Rows userId=${userId} priorityReceiptId=${priorityReceiptId ?? 'all'}`);
     // ── Step 1: anchor SPs ────────────────────────────────────────────────────
     // In mandatory mode restrict to the specific receipt so older receipts don't
@@ -64,8 +65,8 @@ export async function fetchSlot1Rows(userId: string, priorityReceiptId?: number)
         ? 'AND r.id = ?'
         : '';
     const anchorParams: any[] = priorityReceiptId !== undefined
-        ? [SLOT1_ANCHOR_MIN_SCORE, userId, priorityReceiptId]
-        : [SLOT1_ANCHOR_MIN_SCORE, userId];
+        ? [SLOT1_ANCHOR_MIN_SCORE, locale, userId, priorityReceiptId]
+        : [SLOT1_ANCHOR_MIN_SCORE, locale, userId];
 
     const [anchorRows]: any = await pool.query(
         `SELECT DISTINCT
@@ -79,7 +80,7 @@ export async function fetchSlot1Rows(userId: string, priorityReceiptId?: number)
              sp.imageUrl                                AS anchorImageUrl,
              sc.name                                    AS anchorChainName,
              sc.logoUrl                                 AS anchorChainLogoUrl,
-             c.name                                     AS anchorCategoryName
+             COALESCE(ct.name, c.name)                  AS anchorCategoryName
            FROM Receipt r
            JOIN ReceiptSwipeCandidate rsc
              ON rsc.receiptId   = r.id
@@ -91,6 +92,7 @@ export async function fetchSlot1Rows(userId: string, priorityReceiptId?: number)
             AND p.mergedIntoId IS NULL
            JOIN StoreChain    sc ON sc.id = sp.chainId
            JOIN Category      c  ON c.id  = p.categoryId
+           LEFT JOIN CategoryTranslation ct ON ct.categoryId = c.id AND ct.locale = ?
           WHERE r.userId = ?
           ${receiptFilter}`,
         anchorParams,
@@ -122,7 +124,7 @@ export async function fetchSlot1Rows(userId: string, priorityReceiptId?: number)
                    sp.imageUrl,
                    sc.name                                 AS chainName,
                    sc.logoUrl                              AS chainLogoUrl,
-                   c.name                                  AS categoryName,
+                   COALESCE(ct.name, c.name)               AS categoryName,
                    ROW_NUMBER() OVER (
                        PARTITION BY sp.chainId, p.categoryId ORDER BY p.id
                    ) AS rn
@@ -133,10 +135,11 @@ export async function fetchSlot1Rows(userId: string, priorityReceiptId?: number)
                   AND p.categoryId  IN (?)
                  JOIN StoreChain sc ON sc.id = sp.chainId
                  JOIN Category   c  ON c.id  = p.categoryId
+                 LEFT JOIN CategoryTranslation ct ON ct.categoryId = c.id AND ct.locale = ?
                 WHERE sp.chainId NOT IN (?)
            ) ranked
           WHERE rn <= ?`,
-        [anchorCategoryIds, anchorChainIds, MAX_CANDIDATES_PER_GROUP],
+        [anchorCategoryIds, locale, anchorChainIds, MAX_CANDIDATES_PER_GROUP],
     );
 
     swipeLog(`[Slot1] candidates fetched: ${(candidateRows as any[]).length} (chains: ${[...new Set((candidateRows as any[]).map((r: any) => `${r.chainName}(${r.chainId})`))].join(', ')})`);

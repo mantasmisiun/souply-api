@@ -2,6 +2,7 @@ import pool from '../config/db.js';
 import { nameSimilarity } from '../utils/productNameNormalize.js';
 import type { RawSlot3Row } from '../services/slot3QueueBuilder.js';
 import { swipeLog } from '../utils/swipeLogger.js';
+import type { Locale } from '../middleware/locale.js';
 
 const SLOT3_MIN_SCORE = 0.75;
 
@@ -17,14 +18,14 @@ const MAX_GLOBAL_PER_GROUP = 15;
  * receipts. One side of every pair is always a product from the user's receipts,
  * making these directly relevant to their price comparison.
  */
-async function fetchSlot3ReceiptRows(userId: string, receiptId?: number): Promise<RawSlot3Row[]> {
+async function fetchSlot3ReceiptRows(userId: string, receiptId?: number, locale: Locale = 'lt'): Promise<RawSlot3Row[]> {
     // Anchor from Price rows rather than ReceiptSwipeCandidate.
     // ReceiptSwipeCandidate contains the mobile app's cross-chain altMatches
     // (often Maxima/Barbora SPs for a Rimi receipt), which are filtered out by
     // the chain check. Price rows always reference the resolver-assigned SP in
     // the correct chain, so they're a reliable source of "what the user bought."
     const receiptFilter = receiptId !== undefined ? 'AND r.id = ?' : '';
-    const params: any[] = receiptId !== undefined ? [userId, receiptId] : [userId];
+    const params: any[] = receiptId !== undefined ? [locale, userId, receiptId] : [locale, userId];
 
     swipeLog(`[Slot3] fetchSlot3ReceiptRows userId=${userId} receiptId=${receiptId ?? 'all'}`);
 
@@ -39,7 +40,7 @@ async function fetchSlot3ReceiptRows(userId: string, receiptId?: number): Promis
              sp.brandName, sp.imageUrl,
              sc.name                                  AS chainName,
              sc.logoUrl                               AS chainLogoUrl,
-             c.name                                   AS categoryName
+             COALESCE(ct.name, c.name)                AS categoryName
            FROM Receipt r
            JOIN Price         pr ON pr.receiptId = r.id
            JOIN StoreProduct  sp ON sp.id = pr.storeProductId
@@ -48,6 +49,7 @@ async function fetchSlot3ReceiptRows(userId: string, receiptId?: number): Promis
             AND p.categoryId  != 688
            JOIN StoreChain    sc ON sc.id = sp.chainId
            JOIN Category      c  ON c.id  = p.categoryId
+           LEFT JOIN CategoryTranslation ct ON ct.categoryId = c.id AND ct.locale = ?
           WHERE r.userId = ?
           ${receiptFilter}`,
         params,
@@ -173,7 +175,7 @@ async function fetchSlot3ReceiptRows(userId: string, receiptId?: number): Promis
  * the given chain IDs. Capped at MAX_GLOBAL_PER_GROUP per group to bound JS
  * comparison work.
  */
-async function fetchSlot3GlobalRows(chainIds: number[]): Promise<RawSlot3Row[]> {
+async function fetchSlot3GlobalRows(chainIds: number[], locale: Locale = 'lt'): Promise<RawSlot3Row[]> {
     swipeLog(`[Slot3] fetchSlot3GlobalRows chainIds=${chainIds.join(',')}`);
     if (!chainIds.length) return [];
     const [rows]: any = await pool.query(
@@ -192,7 +194,7 @@ async function fetchSlot3GlobalRows(chainIds: number[]): Promise<RawSlot3Row[]> 
                    sp.imageUrl,
                    sc.name                               AS chainName,
                    sc.logoUrl                            AS chainLogoUrl,
-                   c.name                                AS categoryName,
+                   COALESCE(ct.name, c.name)             AS categoryName,
                    ROW_NUMBER() OVER (
                        PARTITION BY sp.chainId, p.categoryId
                        ORDER BY p.id
@@ -203,10 +205,11 @@ async function fetchSlot3GlobalRows(chainIds: number[]): Promise<RawSlot3Row[]> 
                   AND p.categoryId  != 688
                  JOIN StoreChain sc ON sc.id = sp.chainId
                  JOIN Category   c  ON c.id  = p.categoryId
+                 LEFT JOIN CategoryTranslation ct ON ct.categoryId = c.id AND ct.locale = ?
                 WHERE sp.chainId IN (?)
            ) ranked
           WHERE rn <= ?`,
-        [chainIds, MAX_GLOBAL_PER_GROUP],
+        [locale, chainIds, MAX_GLOBAL_PER_GROUP],
     );
 
     const groups = new Map<string, any[]>();
@@ -293,8 +296,8 @@ async function getReceiptChainIds(userId: string, receiptId?: number): Promise<n
  * user's receipts), then global same-chain duplicates as overflow. The
  * buildSlot3Queue builder deduplicates and filters voted pairs.
  */
-export async function fetchSlot3Rows(userId: string, receiptId?: number): Promise<RawSlot3Row[]> {
-    const receiptRows = await fetchSlot3ReceiptRows(userId, receiptId);
+export async function fetchSlot3Rows(userId: string, receiptId?: number, locale: Locale = 'lt'): Promise<RawSlot3Row[]> {
+    const receiptRows = await fetchSlot3ReceiptRows(userId, receiptId, locale);
 
     // Always fetch global rows as overflow — receipt-anchored pairs may all be
     // already voted, leaving slot3 empty without global. Receipt rows prepend
@@ -308,7 +311,7 @@ export async function fetchSlot3Rows(userId: string, receiptId?: number): Promis
 
     let globalRows: RawSlot3Row[] = [];
     if (chainIds.length > 0) {
-        globalRows = await fetchSlot3GlobalRows(chainIds);
+        globalRows = await fetchSlot3GlobalRows(chainIds, locale);
     }
 
     // Receipt-anchored pairs take priority; global rows fill overflow.

@@ -149,7 +149,7 @@ export const matchStoreProductByName = async (req: Request, res: Response, next:
 
         const amount = amountRaw !== undefined && amountRaw !== '' ? parseFloat(amountRaw) : null;
 
-        const candidates = await getStoreProductsByChainWithProductData(chainId);
+        const candidates = await getStoreProductsByChainWithProductData(chainId, req.locale);
 
         console.log('=== MATCH REQUEST ===');
         console.log(`chainId=${chainId}, name="${name}", amount=${amount}, unit=${unit}`);
@@ -169,7 +169,7 @@ export const matchStoreProductByName = async (req: Request, res: Response, next:
         // which is how cross-chain product identity bootstraps itself
         // organically as receipts get processed.
         if (matches.length === 0) {
-            const crossCandidates = await getStoreProductsCrossChainWithProductData(chainId);
+            const crossCandidates = await getStoreProductsCrossChainWithProductData(chainId, req.locale);
             console.log(`Cross-chain candidates fetched: ${crossCandidates.length}`);
             matches = findBestProductMatches(name, amount, unit, crossCandidates);
             crossChain = matches.length > 0;

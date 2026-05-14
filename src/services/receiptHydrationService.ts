@@ -1,4 +1,5 @@
 import pool from '../config/db.js';
+import type { Locale } from '../middleware/locale.js';
 
 /**
  * Read-time category enrichment for receipt responses.
@@ -74,6 +75,7 @@ const collectSpIds = (parsed: any): number[] => {
 const fetchUserPersonalRescues = async (
     userId: string,
     productIds: number[],
+    locale: Locale,
 ): Promise<Map<number, PersonalRescue>> => {
     const map = new Map<number, PersonalRescue>();
     if (productIds.length === 0) return map;
@@ -81,17 +83,17 @@ const fetchUserPersonalRescues = async (
         `SELECT
              CASE WHEN pA.categoryId = 688 THEN pA.id ELSE pB.id END AS orphanProductId,
              CASE WHEN pA.categoryId = 688 THEN pB.categoryId ELSE pA.categoryId END AS categoryId,
-             CASE WHEN pA.categoryId = 688 THEN cB.name ELSE cA.name END AS leafName,
+             CASE WHEN pA.categoryId = 688 THEN COALESCE(ctB.name, cB.name) ELSE COALESCE(ctA.name, cA.name) END AS leafName,
              CASE WHEN pA.categoryId = 688
                THEN CASE
                  WHEN cB.parentCategoryId IS NULL  THEN NULL
-                 WHEN cB2.parentCategoryId IS NULL THEN cB.name
-                 ELSE cB2.name
+                 WHEN cB2.parentCategoryId IS NULL THEN COALESCE(ctB.name, cB.name)
+                 ELSE COALESCE(ctB2.name, cB2.name)
                END
                ELSE CASE
                  WHEN cA.parentCategoryId IS NULL  THEN NULL
-                 WHEN cA2.parentCategoryId IS NULL THEN cA.name
-                 ELSE cA2.name
+                 WHEN cA2.parentCategoryId IS NULL THEN COALESCE(ctA.name, cA.name)
+                 ELSE COALESCE(ctA2.name, cA2.name)
                END
              END AS l2Name
            FROM UserStoreProductEquivalence e
@@ -103,11 +105,15 @@ const fetchUserPersonalRescues = async (
            LEFT JOIN Category cA2 ON cA2.id = cA.parentCategoryId
            LEFT JOIN Category cB  ON cB.id  = pB.categoryId
            LEFT JOIN Category cB2 ON cB2.id = cB.parentCategoryId
+           LEFT JOIN CategoryTranslation ctA  ON ctA.categoryId  = cA.id  AND ctA.locale  = ?
+           LEFT JOIN CategoryTranslation ctA2 ON ctA2.categoryId = cA2.id AND ctA2.locale = ?
+           LEFT JOIN CategoryTranslation ctB  ON ctB.categoryId  = cB.id  AND ctB.locale  = ?
+           LEFT JOIN CategoryTranslation ctB2 ON ctB2.categoryId = cB2.id AND ctB2.locale = ?
           WHERE e.userId = ?
             AND e.verdict = 'same'
             AND ((pA.categoryId = 688 AND pB.categoryId != 688 AND pA.id IN (?))
               OR (pB.categoryId = 688 AND pA.categoryId != 688 AND pB.id IN (?)))`,
-        [userId, productIds, productIds],
+        [locale, locale, locale, locale, userId, productIds, productIds],
     );
     for (const r of rows) {
         const pid = Number(r.orphanProductId);
@@ -121,7 +127,7 @@ const fetchUserPersonalRescues = async (
     return map;
 };
 
-const fetchSpCategories = async (spIds: number[]): Promise<Map<number, SpCategoryRow>> => {
+const fetchSpCategories = async (spIds: number[], locale: Locale): Promise<Map<number, SpCategoryRow>> => {
     const map = new Map<number, SpCategoryRow>();
     if (spIds.length === 0) return map;
     // Same CASE as statsService / storeProductModel — single source of
@@ -130,20 +136,26 @@ const fetchSpCategories = async (spIds: number[]): Promise<Map<number, SpCategor
     //   c is L1                       → L2 = NULL (excluded from breakdown)
     //   c is L2 (c2.parent IS NULL)   → L2 = c.name
     //   c is L3                       → L2 = c2.name (the L2 parent)
+    //
+    // Locale: leafName and l2Name resolve through CategoryTranslation
+    // with COALESCE fallback to the canonical LT name. Two locale params
+    // because both `c` and `c2` join independently.
     const [rows]: any = await pool.query(
         `SELECT sp.id AS spId, sp.productId, p.categoryId,
-                c.name AS leafName,
+                COALESCE(ct.name, c.name) AS leafName,
                 CASE
                   WHEN c.parentCategoryId IS NULL  THEN NULL
-                  WHEN c2.parentCategoryId IS NULL THEN c.name
-                  ELSE c2.name
+                  WHEN c2.parentCategoryId IS NULL THEN COALESCE(ct.name, c.name)
+                  ELSE COALESCE(ct2.name, c2.name)
                 END AS l2Name
            FROM StoreProduct sp
            JOIN Product p   ON p.id  = sp.productId
            LEFT JOIN Category c  ON c.id  = p.categoryId
            LEFT JOIN Category c2 ON c2.id = c.parentCategoryId
+           LEFT JOIN CategoryTranslation ct  ON ct.categoryId  = c.id  AND ct.locale  = ?
+           LEFT JOIN CategoryTranslation ct2 ON ct2.categoryId = c2.id AND ct2.locale = ?
           WHERE sp.id IN (?)`,
-        [spIds],
+        [locale, locale, spIds],
     );
     for (const r of rows) {
         map.set(Number(r.spId), {
@@ -166,11 +178,12 @@ const fetchSpCategories = async (spIds: number[]): Promise<Map<number, SpCategor
 export const hydrateReceiptCategoriesIfNeeded = async (
     _receiptId: number,
     receipt: any,
+    locale: Locale = 'lt',
 ): Promise<any> => {
-    return resolveReceiptCategoriesLive(receipt);
+    return resolveReceiptCategoriesLive(receipt, locale);
 };
 
-export const resolveReceiptCategoriesLive = async (receipt: any): Promise<any> => {
+export const resolveReceiptCategoriesLive = async (receipt: any, locale: Locale = 'lt'): Promise<any> => {
     if (!receipt?.parsedData) return receipt;
 
     const parsedDataIsString = typeof receipt.parsedData === 'string';
@@ -191,7 +204,7 @@ export const resolveReceiptCategoriesLive = async (receipt: any): Promise<any> =
     // global Product.categoryId. The global promotion threshold
     // (Wilson lower bound, 3+ voters) means a solo user never sees
     // Neatpažinta drop without this overlay.
-    const liveBySp = await fetchSpCategories(spIds);
+    const liveBySp = await fetchSpCategories(spIds, locale);
     const ownerUserId: string | null = typeof receipt.userId === 'string' ? receipt.userId : null;
     // Collect the Product ids behind the SPs we just resolved — personal
     // rescues are keyed by Product so a vote on one chain's SP rescues
@@ -202,7 +215,7 @@ export const resolveReceiptCategoriesLive = async (receipt: any): Promise<any> =
             .filter((id): id is number => id !== null && Number.isFinite(id)),
     ));
     const personalRescues = ownerUserId
-        ? await fetchUserPersonalRescues(ownerUserId, productIds)
+        ? await fetchUserPersonalRescues(ownerUserId, productIds, locale)
         : new Map<number, PersonalRescue>();
 
     // Overwrite cached categoryId / categoryName / categoryL2Name on

@@ -1,4 +1,5 @@
 import pool from '../config/db.js';
+import type { Locale } from '../middleware/locale.js';
 
 const CHAIN_COLORS: Record<string, string> = {
     'Rimi':   '#E31E2D',
@@ -133,7 +134,7 @@ export const computeReceiptSavings = async (
 // Stats aggregation for the profile screen
 // ---------------------------------------------------------------------------
 
-export const getUserStats = async (userId: string) => {
+export const getUserStats = async (userId: string, locale: Locale = 'lt') => {
     const [receipts]: any = await pool.query(
         `SELECT r.receiptDate, r.parsedData, sc.name AS chainName, sc.miniLogoUrl AS chainMiniLogoUrl
            FROM Receipt r
@@ -185,15 +186,17 @@ export const getUserStats = async (userId: string) => {
                 `SELECT sp.id AS spId, sp.productId,
                         CASE
                           WHEN c.parentCategoryId IS NULL  THEN NULL
-                          WHEN c2.parentCategoryId IS NULL THEN c.name
-                          ELSE c2.name
+                          WHEN c2.parentCategoryId IS NULL THEN COALESCE(ct.name, c.name)
+                          ELSE COALESCE(ct2.name, c2.name)
                         END AS categoryName
                    FROM StoreProduct sp
                    JOIN Product p  ON p.id  = sp.productId
                    JOIN Category c ON c.id  = p.categoryId
                    LEFT JOIN Category c2 ON c2.id = c.parentCategoryId
+                   LEFT JOIN CategoryTranslation ct  ON ct.categoryId  = c.id  AND ct.locale  = ?
+                   LEFT JOIN CategoryTranslation ct2 ON ct2.categoryId = c2.id AND ct2.locale = ?
                   WHERE sp.id IN (?)`,
-                [uniqueSpIds],
+                [locale, locale, uniqueSpIds],
             );
             for (const row of spRows) {
                 spCategoryMap.set(Number(row.spId), row.categoryName);

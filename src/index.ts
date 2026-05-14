@@ -8,6 +8,7 @@ import categoryRoutes from './routes/categoryRoutes.js';
 import storeProductRoutes from './routes/storeProductRoutes.js';
 import priceRoutes from './routes/priceRoutes.js';
 import { errorHandler } from './middleware/errorHandler.js';
+import { resolveLocale } from './middleware/locale.js';
 import userRoutes from './routes/userRoutes.js';
 import basketRoutes from './routes/basketRoutes.js';
 import basketItemRoutes from './routes/basketItemRoutes.js';
@@ -29,6 +30,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json({ limit: '10mb' }));
+app.use(resolveLocale);
 
 app.use('/api', storeRoutes);
 app.use('/api', categoryRoutes);
