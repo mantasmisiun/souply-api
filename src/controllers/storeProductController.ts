@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
+import pool from '../config/db.js';
 import {
   createStoreProduct, getStoreProductsByProductId, getStoreProductsForCluster, getStoreProductsByChainId,
   getStoreProductByName, getStoreProductByProductAndChain,
@@ -15,11 +16,35 @@ import { findBestProductMatches } from '../utils/productMatcher.js';
 
 export const addStoreProduct = async (req: Request, res: Response, next: NextFunction) => {
     try {
-        const { productId, chainId, storeProductName, brandName, isWeighable, amount, unit, imageUrl } = req.body;
+        const { productId, chainId, storeProductName, brandName, isWeighable, amount, unit, imageUrl, userId } = req.body;
         if (!productId || !chainId || !storeProductName) {
             res.status(400).json({ error: 'productId, chainId, and storeProductName are required' });
             return;
         }
+
+        // Gate: regular users can't write `imageUrl` directly — same rule
+        // as setStoreProductImage. Admin path passes through unchanged.
+        // Non-admin uploads go to PendingImageUpload after the SP is
+        // created, so the SP starts imageless and admin approval is
+        // required before the image goes public.
+        let directImageUrl: string | null = imageUrl ?? null;
+        let pendingUploadFilePath: string | null = null;
+
+        if (directImageUrl && userId) {
+            const [adminRows]: any = await pool.query(
+                `SELECT isAdmin FROM User WHERE id = ? LIMIT 1`, [userId],
+            );
+            const isAdmin = !!adminRows[0]?.isAdmin;
+            if (!isAdmin) {
+                pendingUploadFilePath = directImageUrl;
+                directImageUrl = null;
+            }
+        } else if (directImageUrl && !userId) {
+            // Unknown caller — treat as non-admin and quarantine.
+            pendingUploadFilePath = directImageUrl;
+            directImageUrl = null;
+        }
+
         const id = await createStoreProduct(
             productId,
             chainId,
@@ -28,9 +53,28 @@ export const addStoreProduct = async (req: Request, res: Response, next: NextFun
             isWeighable || false,
             amount || null,
             unit || null,
-            imageUrl || null
+            directImageUrl,
         );
-        res.status(201).json({ id, productId, chainId, storeProductName, isWeighable, amount, unit, imageUrl: imageUrl || null });
+
+        if (pendingUploadFilePath) {
+            await pool.query(
+                `INSERT INTO PendingImageUpload (spId, uploadedBy, filePath, status)
+                 VALUES (?, ?, ?, 'pending')`,
+                [id, userId ?? 'unknown', pendingUploadFilePath],
+            );
+        }
+
+        res.status(201).json({
+            id,
+            productId,
+            chainId,
+            storeProductName,
+            isWeighable,
+            amount,
+            unit,
+            imageUrl: directImageUrl,
+            imageQueued: !!pendingUploadFilePath,
+        });
     } catch (error) {
         next(error);
     }
@@ -231,10 +275,20 @@ export const getStoreProductUploadUrl = async (req: Request, res: Response, next
 
 /**
  * PATCH /api/store-products/:id/image
- * Body: { filePath }  // MinIO path returned by the upload-url helper.
+ * Body: { filePath, userId }  // MinIO path + uploader (non-admin path).
+ *       { filePath, adminId } // admin bypass — direct publish.
  *
- * Sets StoreProduct.imageUrl to the public URL corresponding to that path
- * and returns it so the mobile can update its thumbnail immediately.
+ * Routing:
+ *   - Regular users: file lands in `PendingImageUpload` with status='pending'.
+ *     The admin image-cleanup tab surfaces these alongside cross-chain
+ *     candidates. Client should toast "Nuotrauka išsiųsta peržiūrai".
+ *   - Admin users: bypass the pending queue and publish straight to
+ *     `StoreProduct.imageUrl` (logged in ImagePropagationLog as
+ *     `sourceType='admin_upload'`). Same endpoint to keep client logic
+ *     simple — the only routing input is whether the caller is an admin.
+ *
+ * The admin path checks `isAdmin` server-side; the client can't escalate
+ * by claiming to be an admin in the body.
  */
 export const setStoreProductImage = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -243,15 +297,48 @@ export const setStoreProductImage = async (req: Request, res: Response, next: Ne
       res.status(400).json({ error: 'Invalid store product ID' });
       return;
     }
-    const { filePath } = req.body ?? {};
-    if (!filePath || typeof filePath !== 'string') {
+    const { filePath, userId } = (req.body ?? {}) as { filePath?: unknown; userId?: unknown };
+    if (typeof filePath !== 'string' || !filePath) {
       res.status(400).json({ error: 'filePath is required' });
       return;
     }
-    // getPresignedProductImageUploadUrl already returns the full public URL
-    // as `filePath` — we just persist it verbatim.
-    await updateStoreProductImageUrl(id, filePath);
-    res.json({ id, imageUrl: filePath });
+    if (typeof userId !== 'string' || !userId) {
+      res.status(400).json({ error: 'userId is required' });
+      return;
+    }
+
+    // Admin gate: a caller is treated as admin only if isAdmin=1 in the DB.
+    // The pending-queue path is the default for everyone else.
+    const [adminRows]: any = await pool.query(
+      `SELECT isAdmin FROM User WHERE id = ? LIMIT 1`, [userId],
+    );
+    const isAdmin = !!adminRows[0]?.isAdmin;
+
+    if (isAdmin) {
+      // Admin bypass — publish straight to the SP, log the propagation.
+      const [spRows]: any = await pool.query(
+        `SELECT imageUrl FROM StoreProduct WHERE id = ? LIMIT 1`, [id],
+      );
+      const fromImageUrl = spRows[0]?.imageUrl ?? null;
+      await updateStoreProductImageUrl(id, filePath);
+      await pool.query(
+        `INSERT INTO ImagePropagationLog
+            (spId, sourceType, sourceSpId, fromImageUrl, toImageUrl, actor)
+         VALUES (?, 'admin_upload', NULL, ?, ?, ?)`,
+        [id, fromImageUrl, filePath, userId],
+      );
+      res.json({ id, imageUrl: filePath, queued: false });
+      return;
+    }
+
+    // Regular user path — land in pending queue. The SP's existing image
+    // (or empty placeholder) keeps showing until an admin approves.
+    await pool.query(
+      `INSERT INTO PendingImageUpload (spId, uploadedBy, filePath, status)
+       VALUES (?, ?, ?, 'pending')`,
+      [id, userId, filePath],
+    );
+    res.json({ id, queued: true });
   } catch (error) {
     next(error);
   }

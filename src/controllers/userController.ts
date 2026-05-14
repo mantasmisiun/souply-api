@@ -88,7 +88,15 @@ export const fetchUserProfile = async (req: Request, res: Response, next: NextFu
             updateLastActive(id),
         ]);
 
-        res.json({ ...pointsProfile, pendingSwipes: pendingSwipeCount > 0, pendingSwipeCount, showBurstWarning });
+        res.json({
+            ...pointsProfile,
+            pendingSwipes: pendingSwipeCount > 0,
+            pendingSwipeCount,
+            showBurstWarning,
+            // Surface the admin flag so the client can decide whether to
+            // show the "Pereiti į admin panelį" button on the Profilis tab.
+            isAdmin: !!(user as any).isAdmin,
+        });
     } catch (error) {
         next(error);
     }

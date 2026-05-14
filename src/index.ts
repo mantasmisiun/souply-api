@@ -98,4 +98,17 @@ if (process.env.NODE_ENV !== 'test') {
         console.log(`Server running on port ${PORT}`);
         warmDiscountsCache().catch(e => console.error('[Startup] Discounts cache warm failed:', e.message));
     });
+
+    // Admin work-queue lease sweeper. Runs hourly inside this process —
+    // expired leases get marked abandoned so their SPs return to the
+    // global queue for other admins. No separate cron because the work
+    // is one UPDATE.
+    const HOUR_MS = 60 * 60 * 1000;
+    const sweeper = setInterval(() => {
+        import('./models/adminLeaseModel.js')
+            .then(m => m.sweepExpiredLeases())
+            .then(n => { if (n > 0) console.log(`[adminLease] swept ${n} expired leases`); })
+            .catch(e => console.error('[adminLease] sweeper failed:', e.message));
+    }, HOUR_MS);
+    sweeper.unref();
 }

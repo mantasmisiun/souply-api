@@ -6,6 +6,7 @@ import { runRimiPromoScraper } from './rimi/index.js';
 import { runLidlPromoScraper } from './lidl/index.js';
 import { recalcGlobalScores } from '../models/productInteractionModel.js';
 import { warmDiscountsCache } from '../models/productModel.js';
+import { propagateCrossChainImages } from '../services/imagePropagationService.js';
 
 // Lithuanian store promo schedule (verified from store websites):
 //   IKI      Mon–Sun   → scrape Monday 06:00
@@ -56,4 +57,13 @@ cron.schedule('0 3 * * *', () => {
     recalcGlobalScores().catch(e => console.error('[Scheduler] Global score recalc failed:', e.message));
 }, { timezone: 'Europe/Vilnius' });
 
-console.log('[Scheduler] Cron jobs registered — Mon/Tue/Thu/Sat 06:00, daily 03:00 Europe/Vilnius');
+// Nightly 03:30 — propagate cross-chain images so newly-scraped chain
+// images flow to siblings that arrived earlier without one. Runs after
+// the score recalc so they don't race on the same DB connections.
+cron.schedule('30 3 * * *', () => {
+    propagateCrossChainImages()
+        .then(r => console.log(`[Scheduler] Image propagation: candidates=${r.candidatesFound} propagated=${r.propagated} skipped=${r.skipped} errors=${r.errors}`))
+        .catch(e => console.error('[Scheduler] Image propagation failed:', e.message));
+}, { timezone: 'Europe/Vilnius' });
+
+console.log('[Scheduler] Cron jobs registered — Mon/Tue/Thu/Sat 06:00, daily 03:00 + 03:30 Europe/Vilnius');
