@@ -28,12 +28,15 @@ export type AdminAction =
     | 'flag_dismiss'               // admin rejected the user's flags (no change warranted)
     | 'flag_skip'                  // admin skipped the flag card without action
     | 'flag_price_suspect'         // sub-flag: marked the receipt-line price as suspect (parser bug breadcrumb)
-    | 'flag_discount_suspect';     // sub-flag: same for the discount
+    | 'flag_discount_suspect'      // sub-flag: same for the discount
+    | 'uncategorised_set'          // assigned a category (+ optional name edit)
+    | 'uncategorised_delete'       // deleted a Product (and its SPs by FK cascade)
+    | 'uncategorised_skip';        // skipped without action — 90-day filter
 
 export interface LogActionArgs {
     adminUserId: string;
     action: AdminAction;
-    targetType: 'StoreProduct' | 'PendingImageUpload' | 'ImagePropagationLog' | 'ReceiptLineIssue';
+    targetType: 'StoreProduct' | 'PendingImageUpload' | 'ImagePropagationLog' | 'ReceiptLineIssue' | 'Product';
     targetId: number;
     valueBefore?: unknown;
     valueAfter?: unknown;

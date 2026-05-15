@@ -401,18 +401,158 @@ export const revertImageChange = async (req: Request, res: Response, next: NextF
 
 // ── GET /api/admin/audit ────────────────────────────────────────────
 // Paginated audit log, newest first. Used by the audit-log viewer.
+/**
+ * Audit log feed with optional action-family filtering + per-row
+ * target hydration (product name / image / chain / decoded
+ * ReceiptLineIssue) so the client renders human-readable cards
+ * instead of raw `targetType #targetId` lines.
+ *
+ *   ?page=N
+ *   ?pageSize=50
+ *   ?actions=a,b,c   — comma-separated AdminAction values; ALL if omitted
+ *
+ * The hydration runs in three batched queries (Product, StoreProduct,
+ * ReceiptLineIssue) — each touches only the ids that appear on the
+ * current page, so the cost stays O(pageSize) regardless of audit-
+ * log size.
+ */
 export const getAuditLog = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const page = Number(req.query.page ?? 0);
         const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize ?? 50)));
+
+        // Parse + validate the actions filter. Server-side filter is
+        // cheaper than fetching all rows and dropping client-side,
+        // and keeps pagination meaningful when the user wants only
+        // one family.
+        const actionsParam = typeof req.query.actions === 'string' ? req.query.actions : '';
+        const requestedActions = actionsParam
+            .split(',').map(s => s.trim()).filter(Boolean);
+        const actionsClause = requestedActions.length > 0
+            ? ` WHERE action IN (${requestedActions.map(() => '?').join(',')})`
+            : '';
+
         const [rows]: any = await pool.query(
             `SELECT id, adminUserId, action, targetType, targetId,
                     valueBefore, valueAfter, reversedAt, createdAt
                FROM AdminAuditLog
+               ${actionsClause}
               ORDER BY id DESC
               LIMIT ? OFFSET ?`,
-            [pageSize, page * pageSize],
+            [...requestedActions, pageSize, page * pageSize],
         );
-        res.json({ rows, page, pageSize });
+
+        // Group ids by targetType for batched hydration.
+        const productIds = new Set<number>();
+        const spIds = new Set<number>();
+        const receiptKeys: { receiptId: number; lineIdx: number }[] = [];
+        for (const r of rows as any[]) {
+            const id = Number(r.targetId);
+            if (r.targetType === 'Product') productIds.add(id);
+            else if (r.targetType === 'StoreProduct') spIds.add(id);
+            else if (r.targetType === 'ReceiptLineIssue') {
+                // targetId = receiptId * 1000 + lineIdx (encoding from adminFlagQueueModel)
+                receiptKeys.push({ receiptId: Math.floor(id / 1000), lineIdx: id % 1000 });
+            }
+        }
+
+        // Each batch is a single query against ids on this page only.
+        const productInfo = new Map<number, any>();
+        if (productIds.size > 0) {
+            const [pRows]: any = await pool.query(
+                `SELECT p.id, p.name,
+                        (SELECT MIN(sp.imageUrl) FROM StoreProduct sp
+                          WHERE sp.productId = p.id AND sp.imageUrl IS NOT NULL) AS imageUrl
+                   FROM Product p
+                  WHERE p.id IN (?)`,
+                [Array.from(productIds)],
+            );
+            for (const r of pRows as any[]) productInfo.set(Number(r.id), r);
+        }
+
+        const spInfo = new Map<number, any>();
+        if (spIds.size > 0) {
+            const [sRows]: any = await pool.query(
+                `SELECT sp.id,
+                        COALESCE(sp.storeProductName, p.name) AS name,
+                        sp.imageUrl,
+                        sc.name AS chainName
+                   FROM StoreProduct sp
+                   LEFT JOIN Product p ON p.id = sp.productId
+                   LEFT JOIN StoreChain sc ON sc.id = sp.chainId
+                  WHERE sp.id IN (?)`,
+                [Array.from(spIds)],
+            );
+            for (const r of sRows as any[]) spInfo.set(Number(r.id), r);
+        }
+
+        const receiptInfo = new Map<string, any>();
+        if (receiptKeys.length > 0) {
+            // Resolve each (receiptId, lineIdx) pair through parsedData
+            // to the SP, then to the Product name. One query per
+            // unique pair — receiptKeys is small (page-size bounded).
+            const pairKey = (r: number, l: number) => `${r}-${l}`;
+            const uniq = new Map<string, { receiptId: number; lineIdx: number }>();
+            for (const k of receiptKeys) uniq.set(pairKey(k.receiptId, k.lineIdx), k);
+            const pairs = Array.from(uniq.values());
+            const orClauses = pairs.map(() => '(rcpt.id = ? AND ? = ?)').join(' OR ');
+            const params: any[] = [];
+            for (const p of pairs) params.push(p.receiptId, p.lineIdx, p.lineIdx);
+            // Trick: bind lineIdx twice — once for the WHERE match, once
+            // for the JSON_EXTRACT path. Simpler than dynamic SQL.
+            for (const p of pairs) {
+                const [rRows]: any = await pool.query(
+                    `SELECT rcpt.id AS receiptId, ? AS lineIdx,
+                            COALESCE(sp.storeProductName, prd.name) AS name,
+                            sp.imageUrl,
+                            sc.name AS chainName
+                       FROM Receipt rcpt
+                       LEFT JOIN StoreProduct sp
+                              ON sp.id = CAST(JSON_UNQUOTE(JSON_EXTRACT(
+                                   rcpt.parsedData,
+                                   CONCAT('$.products[', ?, '].storeProductId')
+                               )) AS UNSIGNED)
+                       LEFT JOIN Product prd ON prd.id = sp.productId
+                       LEFT JOIN StoreChain sc ON sc.id = sp.chainId
+                      WHERE rcpt.id = ?
+                      LIMIT 1`,
+                    [p.lineIdx, p.lineIdx, p.receiptId],
+                );
+                if (rRows[0]) {
+                    receiptInfo.set(pairKey(p.receiptId, p.lineIdx), rRows[0]);
+                }
+            }
+            void params; // silence unused
+            void orClauses;
+        }
+
+        // Attach `context` to each row. Null when no joins resolved
+        // (e.g. the target was deleted — the audit row's valueBefore
+        // JSON still carries enough breadcrumbs for the client).
+        const hydrated = (rows as any[]).map(r => {
+            const id = Number(r.targetId);
+            let context: any = null;
+            if (r.targetType === 'Product') {
+                const p = productInfo.get(id);
+                if (p) context = { productName: p.name, imageUrl: p.imageUrl ?? null };
+            } else if (r.targetType === 'StoreProduct') {
+                const sp = spInfo.get(id);
+                if (sp) context = { spName: sp.name, imageUrl: sp.imageUrl ?? null, chainName: sp.chainName ?? null };
+            } else if (r.targetType === 'ReceiptLineIssue') {
+                const receiptId = Math.floor(id / 1000);
+                const lineIdx = id % 1000;
+                const rec = receiptInfo.get(`${receiptId}-${lineIdx}`);
+                context = {
+                    receiptId,
+                    lineIdx,
+                    spName: rec?.name ?? null,
+                    imageUrl: rec?.imageUrl ?? null,
+                    chainName: rec?.chainName ?? null,
+                };
+            }
+            return { ...r, context };
+        });
+
+        res.json({ rows: hydrated, page, pageSize });
     } catch (e) { next(e); }
 };

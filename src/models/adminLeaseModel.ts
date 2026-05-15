@@ -15,7 +15,7 @@ import pool from '../config/db.js';
  */
 
 export const LEASE_DURATION_HOURS = 2;
-export type QueueKind = 'image' | 'amount' | 'flag';
+export type QueueKind = 'image' | 'amount' | 'flag' | 'uncategorised';
 
 export interface ActiveLease {
     id: number;

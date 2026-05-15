@@ -34,6 +34,14 @@ import {
     adminProductSearch,
     adminCategorySearch,
 } from '../controllers/adminSearchController.js';
+import {
+    getUncategorisedQueue,
+    claimUncategorisedBatch,
+    releaseUncategorisedBatch,
+    confirmUncategorisedProduct,
+    deleteUncategorisedProduct,
+    skipUncategorisedProduct,
+} from '../controllers/adminUncategorisedController.js';
 
 const router = Router();
 
@@ -79,5 +87,14 @@ router.get('/admin/flags/receipts/:receiptId/:lineIdx/crop', requireAdmin, getFl
 // different Product, re-categorise). Both are pure reads.
 router.get('/admin/products/search', requireAdmin, adminProductSearch);
 router.get('/admin/categories/search', requireAdmin, adminCategorySearch);
+
+// Uncategorised tab — DB rescue queue for Products that fall outside
+// both user-driven (Žymos) and heuristic-driven (Nuotraukos / Kiekiai).
+router.get('/admin/uncategorised/queue', requireAdmin, getUncategorisedQueue);
+router.post('/admin/uncategorised/claim-batch', requireAdmin, claimUncategorisedBatch);
+router.post('/admin/uncategorised/release-batch', requireAdmin, releaseUncategorisedBatch);
+router.post('/admin/uncategorised/:productId/confirm', requireAdmin, adminRateLimit, confirmUncategorisedProduct);
+router.post('/admin/uncategorised/:productId/delete', requireAdmin, adminRateLimit, deleteUncategorisedProduct);
+router.post('/admin/uncategorised/:productId/skip', requireAdmin, adminRateLimit, skipUncategorisedProduct);
 
 export default router;
