@@ -58,39 +58,44 @@ export interface AdminImageQueueRow {
  * any currently-leased SPs excluded. Caller adds `LIMIT N`.
  */
 export function buildImageQueuePickSql(): { sql: string; params: any[] } {
+    // Heuristic-only queue: missing imageUrl. User-flagged image
+    // reports now route through the Flags tab — when this tab also
+    // pulled them, a flagged item could be resolved from either side
+    // and lead to double-counted audit entries. Single owner per flag
+    // type keeps the resolution semantics clean.
+    //
+    // Recent-purchase count comes from a GROUP BY join, not a
+    // correlated subquery — same perf trick the amount picker uses.
     return {
         sql: `
-            SELECT q.spId
-              FROM (
-                    SELECT pr.storeProductId AS spId,
-                           1 AS flaggedByUser
-                      FROM ReceiptLineIssue rli
-                      JOIN Price pr ON pr.receiptId = rli.receiptId
-                     WHERE JSON_EXTRACT(rli.flags, '$.image') = TRUE
-                       AND rli.status = 'pending'
-                    UNION ALL
-                    SELECT sp.id AS spId,
-                           0 AS flaggedByUser
-                      FROM StoreProduct sp
-                     WHERE sp.imageUrl IS NULL
-              ) q
-             WHERE NOT EXISTS (
-                 SELECT 1 FROM AdminCardLease l
-                  WHERE l.spId = q.spId
-                    AND l.queueKind = 'image'
-                    AND l.completedAt IS NULL
-                    AND l.abandonedAt IS NULL
-                    AND l.expiresAt > NOW()
-             )
-             GROUP BY q.spId
-             ORDER BY MAX(q.flaggedByUser) DESC,
-                      COALESCE((
-                          SELECT COUNT(*) FROM Price p
-                           WHERE p.storeProductId = q.spId
-                             AND p.receiptId IS NOT NULL
-                             AND p.date > NOW() - INTERVAL ${RECENT_PURCHASE_WINDOW_DAYS} DAY
-                      ), 0) DESC,
-                      q.spId ASC`,
+            SELECT sp.id AS spId
+              FROM StoreProduct sp
+              LEFT JOIN (
+                  SELECT storeProductId, COUNT(*) AS recentPurchaseCount
+                    FROM Price
+                   WHERE receiptId IS NOT NULL
+                     AND date > NOW() - INTERVAL ${RECENT_PURCHASE_WINDOW_DAYS} DAY
+                   GROUP BY storeProductId
+              ) pa ON pa.storeProductId = sp.id
+             WHERE sp.imageUrl IS NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM AdminCardLease l
+                    WHERE l.spId = sp.id
+                      AND l.queueKind = 'image'
+                      AND l.completedAt IS NULL
+                      AND l.abandonedAt IS NULL
+                      AND l.expiresAt > NOW()
+               )
+               -- Cede ownership to the Flags tab: any SP with a
+               -- pending image flag belongs there, not here.
+               AND NOT EXISTS (
+                   SELECT 1 FROM ReceiptLineIssue rli
+                    JOIN Price pr ON pr.receiptId = rli.receiptId
+                    WHERE pr.storeProductId = sp.id
+                      AND JSON_EXTRACT(rli.flags, '$.image') = TRUE
+                      AND rli.status = 'pending'
+               )
+             ORDER BY COALESCE(pa.recentPurchaseCount, 0) DESC, sp.id DESC`,
         params: [],
     };
 }
@@ -106,6 +111,116 @@ export function buildImageQueuePickSql(): { sql: string; params: any[] } {
  *   - flag presence (ReceiptLineIssue image=true)
  *   - recent purchase counts
  */
+/**
+ * Fetch image candidates for a list of SP ids: cross-chain siblings,
+ * BaseProductLink siblings, and pending user uploads. Exported so the
+ * Flags tab can reuse the same discovery without re-running the whole
+ * `hydrateImageQueueRows` payload (details, propagation, purchase
+ * counts) which it doesn't need.
+ *
+ * Returns a Map keyed by spId so callers can attach candidates to
+ * their own per-SP records.
+ */
+export async function fetchImageCandidatesBySpIds(
+    spIds: number[],
+): Promise<Map<number, AdminImageCandidate[]>> {
+    if (spIds.length === 0) return new Map();
+    const [[siblingRows], [linkRows], [pendingRows]]: any[] = await Promise.all([
+        pool.query(
+            `SELECT sp_missing.id AS forSpId,
+                    sp_src.id AS sourceSpId,
+                    sp_src.imageUrl AS imageUrl,
+                    sc_src.name AS sourceChainName
+               FROM StoreProduct sp_missing
+               JOIN StoreProduct sp_src ON sp_src.productId = sp_missing.productId
+                                      AND sp_src.id != sp_missing.id
+                                      AND sp_src.imageUrl IS NOT NULL
+               LEFT JOIN StoreChain sc_src ON sc_src.id = sp_src.chainId
+              WHERE sp_missing.id IN (?)`,
+            [spIds],
+        ),
+        pool.query(
+            `SELECT sp_missing.id AS forSpId,
+                    sp_src.id AS sourceSpId,
+                    sp_src.imageUrl AS imageUrl,
+                    sc_src.name AS sourceChainName
+               FROM StoreProduct sp_missing
+               JOIN Product p_missing ON p_missing.id = sp_missing.productId
+               JOIN BaseProductLink bpl ON bpl.bpIdA = p_missing.baseProductId
+               JOIN Product p_src ON p_src.baseProductId = bpl.bpIdB
+               JOIN StoreProduct sp_src ON sp_src.productId = p_src.id
+                                      AND sp_src.id != sp_missing.id
+                                      AND sp_src.imageUrl IS NOT NULL
+               LEFT JOIN StoreChain sc_src ON sc_src.id = sp_src.chainId
+              WHERE sp_missing.id IN (?) AND p_missing.baseProductId IS NOT NULL
+              UNION
+             SELECT sp_missing.id AS forSpId,
+                    sp_src.id AS sourceSpId,
+                    sp_src.imageUrl AS imageUrl,
+                    sc_src.name AS sourceChainName
+               FROM StoreProduct sp_missing
+               JOIN Product p_missing ON p_missing.id = sp_missing.productId
+               JOIN BaseProductLink bpl ON bpl.bpIdB = p_missing.baseProductId
+               JOIN Product p_src ON p_src.baseProductId = bpl.bpIdA
+               JOIN StoreProduct sp_src ON sp_src.productId = p_src.id
+                                      AND sp_src.id != sp_missing.id
+                                      AND sp_src.imageUrl IS NOT NULL
+               LEFT JOIN StoreChain sc_src ON sc_src.id = sp_src.chainId
+              WHERE sp_missing.id IN (?) AND p_missing.baseProductId IS NOT NULL`,
+            [spIds, spIds],
+        ),
+        pool.query(
+            `SELECT spId, id AS pendingUploadId, filePath, uploadedBy
+               FROM PendingImageUpload
+              WHERE spId IN (?) AND status = 'pending'
+              ORDER BY createdAt ASC`,
+            [spIds],
+        ),
+    ]);
+
+    // Dedupe per SP by imageUrl — the same image can surface from
+    // multiple sources (e.g. cross-chain Rimi has the same image as
+    // a BaseProductLink-similar Maxima sibling).
+    const candidatesBySpId = new Map<number, AdminImageCandidate[]>();
+    const seenImagesPerSp = new Map<number, Set<string>>();
+    const addCandidate = (spId: number, c: AdminImageCandidate) => {
+        if (!c.imageUrl) return;
+        let seen = seenImagesPerSp.get(spId);
+        if (!seen) { seen = new Set(); seenImagesPerSp.set(spId, seen); }
+        if (seen.has(c.imageUrl)) return;
+        seen.add(c.imageUrl);
+        let arr = candidatesBySpId.get(spId);
+        if (!arr) { arr = []; candidatesBySpId.set(spId, arr); }
+        arr.push(c);
+    };
+    for (const r of siblingRows as any[]) {
+        addCandidate(Number(r.forSpId), {
+            imageUrl: String(r.imageUrl),
+            sourceType: 'cross_chain_sibling',
+            sourceSpId: Number(r.sourceSpId),
+            sourceChainName: r.sourceChainName ?? undefined,
+        });
+    }
+    for (const r of linkRows as any[]) {
+        addCandidate(Number(r.forSpId), {
+            imageUrl: String(r.imageUrl),
+            sourceType: 'base_product_link',
+            sourceSpId: Number(r.sourceSpId),
+            sourceChainName: r.sourceChainName ?? undefined,
+        });
+    }
+    for (const r of pendingRows as any[]) {
+        addCandidate(Number(r.spId), {
+            imageUrl: String(r.filePath),
+            sourceType: 'pending_upload',
+            sourceSpId: null,
+            pendingUploadId: Number(r.pendingUploadId),
+            uploadedBy: r.uploadedBy ? String(r.uploadedBy).slice(-8) : undefined,
+        });
+    }
+    return candidatesBySpId;
+}
+
 export async function hydrateImageQueueRows(
     spIds: number[],
     locale: string = 'lt',

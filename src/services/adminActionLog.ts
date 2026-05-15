@@ -20,12 +20,20 @@ export type AdminAction =
     | 'image_remove'               // nulled out the SP's image
     | 'image_skip'                 // queue-only: dismissed the card without action
     | 'image_reject_pending'       // rejected a user's pending upload
-    | 'image_revert';              // reversed an earlier admin or auto action
+    | 'image_revert'               // reversed an earlier image admin or auto action
+    | 'amount_set'                 // set/changed amount + unit + isWeighable
+    | 'amount_skip'                // dismissed an amount card without action
+    | 'amount_revert'              // reversed an earlier amount change
+    | 'flag_resolve'               // admin confirmed flag card, applied any field edits
+    | 'flag_dismiss'               // admin rejected the user's flags (no change warranted)
+    | 'flag_skip'                  // admin skipped the flag card without action
+    | 'flag_price_suspect'         // sub-flag: marked the receipt-line price as suspect (parser bug breadcrumb)
+    | 'flag_discount_suspect';     // sub-flag: same for the discount
 
 export interface LogActionArgs {
     adminUserId: string;
     action: AdminAction;
-    targetType: 'StoreProduct' | 'PendingImageUpload' | 'ImagePropagationLog';
+    targetType: 'StoreProduct' | 'PendingImageUpload' | 'ImagePropagationLog' | 'ReceiptLineIssue';
     targetId: number;
     valueBefore?: unknown;
     valueAfter?: unknown;

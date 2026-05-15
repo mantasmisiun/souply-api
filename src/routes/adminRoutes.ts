@@ -14,6 +14,26 @@ import {
     revertImageChange,
     getAuditLog,
 } from '../controllers/adminImageController.js';
+import {
+    getAmountQueue,
+    claimAmountBatch,
+    releaseAmountBatch,
+    confirmAmount,
+    skipAmountCard,
+} from '../controllers/adminAmountController.js';
+import {
+    getFlagQueue,
+    claimFlagBatch,
+    releaseFlagBatch,
+    confirmFlag,
+    dismissFlag,
+    skipFlagCard,
+} from '../controllers/adminFlagController.js';
+import { getFlaggedReceiptCrop } from '../controllers/adminReceiptCropController.js';
+import {
+    adminProductSearch,
+    adminCategorySearch,
+} from '../controllers/adminSearchController.js';
 
 const router = Router();
 
@@ -35,5 +55,29 @@ router.post('/admin/images/:spId/reject-pending', requireAdmin, adminRateLimit, 
 router.post('/admin/images/revert/:auditId', requireAdmin, adminRateLimit, revertImageChange);
 router.post('/admin/issues/resolve', requireAdmin, adminRateLimit, resolveReceiptLineIssue);
 router.get('/admin/audit', requireAdmin, getAuditLog);
+
+// Amounts tab — same chassis as images.
+router.get('/admin/amounts/queue', requireAdmin, getAmountQueue);
+router.post('/admin/amounts/claim-batch', requireAdmin, claimAmountBatch);
+router.post('/admin/amounts/release-batch', requireAdmin, releaseAmountBatch);
+router.post('/admin/amounts/:spId/confirm', requireAdmin, adminRateLimit, confirmAmount);
+router.post('/admin/amounts/:spId/skip', requireAdmin, adminRateLimit, skipAmountCard);
+
+// Flags tab — unified inbox for ReceiptLineIssue rows. Same chassis;
+// :flagKey is `${receiptId}-${lineIdx}` instead of a bare spId.
+router.get('/admin/flags/queue', requireAdmin, getFlagQueue);
+router.post('/admin/flags/claim-batch', requireAdmin, claimFlagBatch);
+router.post('/admin/flags/release-batch', requireAdmin, releaseFlagBatch);
+router.post('/admin/flags/:flagKey/confirm', requireAdmin, adminRateLimit, confirmFlag);
+router.post('/admin/flags/:flagKey/dismiss', requireAdmin, adminRateLimit, dismissFlag);
+router.post('/admin/flags/:flagKey/skip', requireAdmin, adminRateLimit, skipFlagCard);
+// Receipt-line crop image — served on demand. Not rate-limited; pure
+// read, and a single card review can fire multiple if the admin re-pans.
+router.get('/admin/flags/receipts/:receiptId/:lineIdx/crop', requireAdmin, getFlaggedReceiptCrop);
+
+// Type-ahead pickers used by the Flags-tab card (re-link to a
+// different Product, re-categorise). Both are pure reads.
+router.get('/admin/products/search', requireAdmin, adminProductSearch);
+router.get('/admin/categories/search', requireAdmin, adminCategorySearch);
 
 export default router;

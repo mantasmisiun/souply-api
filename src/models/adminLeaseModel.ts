@@ -15,7 +15,7 @@ import pool from '../config/db.js';
  */
 
 export const LEASE_DURATION_HOURS = 2;
-export type QueueKind = 'image';
+export type QueueKind = 'image' | 'amount' | 'flag';
 
 export interface ActiveLease {
     id: number;
@@ -117,6 +117,56 @@ export async function claimBatch(args: {
             [args.adminId, args.queueKind, spIds],
         );
 
+        await conn.commit();
+        return (createdRows as any[]).map(r => ({
+            id: Number(r.id),
+            spId: Number(r.spId),
+            expiresAt: String(r.expiresAt),
+            leasedAt: String(r.leasedAt),
+        }));
+    } catch (e) {
+        try { await conn.rollback(); } catch { /* ignore */ }
+        throw e;
+    } finally {
+        conn.release();
+    }
+}
+
+/**
+ * Lease a known list of spIds for an admin. Used by queues whose
+ * picker needs JS post-filtering (e.g. the amount queue runs a regex
+ * parser before deciding which rows are claimable). Identical lease
+ * semantics to `claimBatch`, just bring-your-own picker.
+ */
+export async function claimSpIds(args: {
+    adminId: string;
+    queueKind: QueueKind;
+    spIds: number[];
+}): Promise<ActiveLease[]> {
+    if (args.spIds.length === 0) return [];
+    const conn = await pool.getConnection();
+    try {
+        await conn.beginTransaction();
+        const placeholders = args.spIds.map(() => '(?, ?, ?, NOW(), NOW() + INTERVAL ? HOUR)').join(',');
+        const values: any[] = [];
+        for (const spId of args.spIds) {
+            values.push(spId, args.adminId, args.queueKind, LEASE_DURATION_HOURS);
+        }
+        await conn.query(
+            `INSERT INTO AdminCardLease
+                (spId, leasedTo, queueKind, leasedAt, expiresAt)
+             VALUES ${placeholders}`,
+            values,
+        );
+        const [createdRows]: any = await conn.query(
+            `SELECT id, spId, expiresAt, leasedAt
+               FROM AdminCardLease
+              WHERE leasedTo = ? AND queueKind = ?
+                AND spId IN (?)
+                AND completedAt IS NULL AND abandonedAt IS NULL
+              ORDER BY id ASC`,
+            [args.adminId, args.queueKind, args.spIds],
+        );
         await conn.commit();
         return (createdRows as any[]).map(r => ({
             id: Number(r.id),

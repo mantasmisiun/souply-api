@@ -86,6 +86,42 @@ export const getProductsByCategory = async (categoryId: number) => {
     return products;
 };
 
+/**
+ * Slim product-search payload for admin type-ahead pickers (Flags-tab
+ * "this matched product is wrong" flow). Returns only the columns the
+ * dropdown renders + needs on commit: id, canonical name, current
+ * category id + name. No image arrays, no globalScore — those balloon
+ * the response on a typeahead loop. Locale parameter is honoured so
+ * the picker speaks the admin's language for category labels.
+ */
+export const searchProductsForAdmin = async (
+    query: string,
+    locale: 'lt' | 'en' = 'lt',
+    limit: number = 10,
+) => {
+    const trimmed = query.trim();
+    if (trimmed.length === 0) return [];
+    const [rows]: any = await pool.query(
+        `SELECT p.id,
+                p.name,
+                p.categoryId,
+                COALESCE(ct.name, c.name) AS categoryName
+           FROM Product p
+           LEFT JOIN Category c ON c.id = p.categoryId
+           LEFT JOIN CategoryTranslation ct ON ct.categoryId = c.id AND ct.locale = ?
+          WHERE p.name LIKE ?
+          ORDER BY p.globalScore DESC, p.id ASC
+          LIMIT ?`,
+        [locale, `%${trimmed}%`, limit],
+    );
+    return rows.map((r: any) => ({
+        id: Number(r.id),
+        name: String(r.name),
+        categoryId: r.categoryId !== null ? Number(r.categoryId) : null,
+        categoryName: r.categoryName ?? null,
+    }));
+};
+
 export const getProductByName = async (name: string) => {
     const [rows]: any = await pool.query(
         `SELECT ${PRODUCT_WITH_IMAGES_SELECT} FROM Product p WHERE p.name = ?`,

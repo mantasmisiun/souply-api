@@ -325,10 +325,14 @@ describe('admin image queue', () => {
         expect(propAfter[0].reversedAt).not.toBeNull();
     });
 
-    it('user-flagged image issues jump to the top of the claim-batch result', async () => {
-        // Add a flag for sp_p2_b — but the SP already has an image now,
-        // so without the flag it would NOT be in the queue. The flag
-        // pulls it back in at the top.
+    it('user-flagged image issues are excluded — Flags tab owns them', async () => {
+        // The Flags tab is the sole owner of user complaints across
+        // image, amount, name, price, discount. The image tab is
+        // strictly heuristic — missing-imageUrl only.
+        //
+        // sp_p1_b currently has imageUrl=null (revert test cleared
+        // it) so it would normally surface here. After adding an
+        // image flag for it, the picker must skip it.
         await pool.query(
             `INSERT INTO ReceiptLineIssue (receiptId, receiptLineIdx, userId, flags)
              VALUES (?, 0, ?, JSON_OBJECT('image', TRUE, 'name', FALSE, 'price', FALSE, 'amount', FALSE, 'discount', FALSE))`,
@@ -338,11 +342,10 @@ describe('admin image queue', () => {
         const res = await request(app)
             .post('/api/admin/images/claim-batch')
             .set('X-Admin-Id', ADMIN_ID)
-            .send({ size: 5 });
+            .send({ size: 50 });
 
-        expect(res.status).toBe(200);
-        const first = res.body.rows[0];
-        expect(first.flaggedByUser).toBe(true);
+        const spIds = res.body.rows.map((r: any) => r.spId);
+        expect(spIds).not.toContain(sp_p1_b);
     });
 
     it('rate limit blocks once 200 actions/hr exceeded', async () => {
