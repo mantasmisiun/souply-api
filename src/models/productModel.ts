@@ -1,5 +1,9 @@
 import pool from '../config/db.js';
 import { nameSimilarity } from '../utils/productNameNormalize.js';
+import {
+    loadCanonicalsForProducts,
+    attachCanonicalFields,
+} from '../services/productCanonical.js';
 
 type Connection = typeof pool | any;
 
@@ -283,7 +287,11 @@ export const getProductsByCategoryWithAmounts = async (
         products.push(...restored);
     }
 
-    return products;
+    // Attach canonical-unit fields (used by the client AmountPickerModal +
+    // basket +/- buttons to know the right step size + display unit).
+    const productIds = products.map(p => Number(p.id));
+    const canonicals = await loadCanonicalsForProducts(productIds);
+    return attachCanonicalFields(products, canonicals);
 };
 
 const DISCOUNT_AMOUNT_EXPR = `
@@ -383,9 +391,12 @@ export const getDiscountedProducts = async (opts: {
          ORDER BY bestDiscountPct DESC`,
         params,
     );
-    discountsCache.set(cacheKey, { data: rows, expiresAt: Date.now() + DISCOUNTS_CACHE_TTL });
+    const productIds = rows.map((r: any) => Number(r.id));
+    const canonicals = await loadCanonicalsForProducts(productIds);
+    const enriched = attachCanonicalFields(rows, canonicals);
+    discountsCache.set(cacheKey, { data: enriched, expiresAt: Date.now() + DISCOUNTS_CACHE_TTL });
     const { limit, offset = 0 } = opts;
-    return limit != null ? rows.slice(offset, offset + limit) : rows;
+    return limit != null ? enriched.slice(offset, offset + limit) : enriched;
 };
 
 export const getAllProductsByL2WithAmounts = async (
@@ -431,5 +442,7 @@ export const getAllProductsByL2WithAmounts = async (
         products.push(...restored);
     }
 
-    return products;
+    const productIds = products.map(p => Number(p.id));
+    const canonicals = await loadCanonicalsForProducts(productIds);
+    return attachCanonicalFields(products, canonicals);
 };

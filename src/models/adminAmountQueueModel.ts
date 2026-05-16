@@ -6,6 +6,7 @@ import {
     type ParsedAmount,
     type CanonicalUnit,
 } from '../utils/nameAmountParser.js';
+import { loadCanonicalsForProducts } from '../services/productCanonical.js';
 
 /**
  * Queue model for the admin amounts-cleanup tab.
@@ -47,15 +48,27 @@ export interface AdminAmountQueueRow {
     flagReceiptId: number | null;
     flagLineIdx: number | null;
     recentPurchaseCount: number;
-    /** Parsed amount + unit derived from the SP name. Always non-null
-     *  for rows that reach the admin tab — the picker filters out
-     *  unparseable names before claiming. */
+    /**
+     * Parsed amount + unit derived from the SP name. Non-null for rows
+     * surfaced by the parser-mismatch path. May be null for canonical
+     * outliers whose names don't carry parseable amount info — those
+     * rows still need admin attention, just for a different reason.
+     */
     suggestion: {
         amount: number;
         unit: CanonicalUnit;
         matched: string;
         isWeighable: boolean;
-    };
+    } | null;
+    /**
+     * Non-null when this SP belongs to a Product whose canonical unit
+     * family differs from the SP's own family — i.e. the matcher gate
+     * would refuse this merge today, but a legacy SP slipped through
+     * before the gate was in place. Surfaces with priority in the admin
+     * queue so the data team can split it into its own Product or fix
+     * the unit. Format: short machine code, e.g. "outlier:family".
+     */
+    outlierReason: string | null;
 }
 
 /**
@@ -74,6 +87,103 @@ export interface AdminAmountQueueRow {
  * non-trivial regex logic. Trying to embed it in SQL via REGEXP would
  * be slow and unreadable.
  */
+/**
+ * Find SPs that are canonical-unit outliers in their Product (e.g. a 1 vnt
+ * row in an otherwise all-kg cluster). Returns spIds sorted by
+ * recent-purchase count (priority), excluding rows that are already
+ * leased, currently flagged, or recently admin-resolved — same exclusion
+ * rules as the parser-mismatch path so a single SP can't appear twice.
+ */
+async function pickOutlierSpIds(args: {
+    limit: number;
+    excludeSpIds: number[];
+}): Promise<number[]> {
+    const { limit, excludeSpIds } = args;
+    if (limit <= 0) return [];
+
+    // Step 1: find candidate Products — those whose SP set spans more than
+    // one unit family. Done in SQL with a coarse family classifier so we
+    // only canonicalise the small set of multi-family Products, not every
+    // Product in the catalog.
+    const [productRows]: any = await pool.query(
+        `SELECT productId
+           FROM (
+               SELECT sp.productId,
+                      COUNT(DISTINCT
+                          CASE
+                              WHEN sp.unit IN ('kg','g','l','ml') THEN 'fluid'
+                              WHEN sp.unit IN ('vnt','pak','rit') THEN 'count'
+                          END
+                      ) AS familyCount
+                 FROM StoreProduct sp
+                 JOIN Product p ON p.id = sp.productId
+                WHERE p.mergedIntoId IS NULL
+                  AND sp.unit IS NOT NULL
+                GROUP BY sp.productId
+           ) ps
+          WHERE familyCount > 1
+          LIMIT 5000`,
+    );
+    if (!productRows.length) return [];
+
+    const productIds = (productRows as any[]).map(r => Number(r.productId));
+    const canonicals = await loadCanonicalsForProducts(productIds);
+    const outlierSpIds = new Set<number>();
+    for (const meta of canonicals.values()) {
+        if (!meta) continue;
+        for (const id of meta.outlierSpIds) outlierSpIds.add(id);
+    }
+    if (outlierSpIds.size === 0) return [];
+
+    // Step 2: drop excluded + already-actioned spIds. Same exclusion rules
+    // as the parser-mismatch path — leased to anyone, pending flag, or
+    // resolved in the last 90 days.
+    const excludedSet = new Set(excludeSpIds);
+    const candidateIds = [...outlierSpIds].filter(id => !excludedSet.has(id));
+    if (candidateIds.length === 0) return [];
+
+    const [filterRows]: any = await pool.query(
+        `SELECT sp.id AS spId,
+                COALESCE(pa.recentPurchaseCount, 0) AS recentPurchaseCount
+           FROM StoreProduct sp
+           LEFT JOIN (
+                SELECT storeProductId, COUNT(*) AS recentPurchaseCount
+                  FROM Price
+                 WHERE receiptId IS NOT NULL
+                   AND date > NOW() - INTERVAL ? DAY
+                 GROUP BY storeProductId
+           ) pa ON pa.storeProductId = sp.id
+          WHERE sp.id IN (?)
+            AND NOT EXISTS (
+                SELECT 1 FROM AdminCardLease l
+                 WHERE l.spId = sp.id
+                   AND l.queueKind = 'amount'
+                   AND l.completedAt IS NULL
+                   AND l.abandonedAt IS NULL
+                   AND l.expiresAt > NOW()
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM ReceiptLineIssue rli
+                 JOIN Price pr ON pr.receiptId = rli.receiptId
+                 WHERE pr.storeProductId = sp.id
+                   AND JSON_EXTRACT(rli.flags, '$.amount') = TRUE
+                   AND rli.status = 'pending'
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM AdminAuditLog a
+                 WHERE a.targetType = 'StoreProduct'
+                   AND a.targetId = sp.id
+                   AND a.action IN ('amount_set', 'amount_skip')
+                   AND a.reversedAt IS NULL
+                   AND a.createdAt > NOW() - INTERVAL 90 DAY
+            )
+          ORDER BY recentPurchaseCount DESC, sp.id DESC
+          LIMIT ?`,
+        [RECENT_PURCHASE_WINDOW_DAYS, candidateIds, limit],
+    );
+    return (filterRows as any[]).map(r => Number(r.spId));
+}
+
 export async function pickAmountQueueSpIds(args: {
     batchSize: number;
     excludeSpIds?: number[];      // already-leased to this admin in a previous step (resume case)
@@ -81,6 +191,20 @@ export async function pickAmountQueueSpIds(args: {
     const wanted = Math.max(1, args.batchSize);
     const poolSize = Math.min(MAX_POOL_SIZE, Math.max(MIN_POOL_SIZE, wanted * POOL_MULTIPLIER));
     const excluded = (args.excludeSpIds ?? []).filter(n => Number.isInteger(n));
+
+    // PRIORITY: canonical outliers. These are SPs that the matcher gate
+    // would block today but slipped in before the gate existed. They block
+    // the calc service from offering them as the cheapest option (calc
+    // filters outliers out), so resolving them unlocks better price hits.
+    //
+    // Cap outliers at half the batch so the parser-mismatch path doesn't
+    // starve when many outliers exist — admins still want a mix of card
+    // types per session, not 25 outliers in a row.
+    const outlierCap = Math.max(1, Math.ceil(wanted / 2));
+    const outlierHits = await pickOutlierSpIds({ limit: outlierCap, excludeSpIds: excluded });
+    const remaining = wanted - outlierHits.length;
+    if (remaining <= 0) return outlierHits;
+    const outlierSet = new Set(outlierHits);
 
     // Two perf-critical decisions here:
     //
@@ -158,6 +282,8 @@ export async function pickAmountQueueSpIds(args: {
 
     const hits: number[] = [];
     for (const r of rows as any[]) {
+        const spId = Number(r.spId);
+        if (outlierSet.has(spId)) continue;                     // already in outlier hits
         const parsed = parseAmountFromName(String(r.name ?? ''));
         if (!parsed) continue;                                  // unparseable → skip
         const storedAmountNum = r.storedAmount !== null && r.storedAmount !== undefined
@@ -168,10 +294,10 @@ export async function pickAmountQueueSpIds(args: {
             unit: r.storedUnit ?? null,
         });
         if (agrees) continue;                                   // matched → no admin work
-        hits.push(Number(r.spId));
-        if (hits.length >= wanted) break;
+        hits.push(spId);
+        if (hits.length >= remaining) break;
     }
-    return hits;
+    return [...outlierHits, ...hits];
 }
 
 /**
@@ -247,15 +373,37 @@ export async function hydrateAmountQueueRows(
         purchaseCountBySpId.set(Number(r.spId), Number(r.n));
     }
 
+    // Build a set of outlier spIds (those whose Product canonical family
+    // doesn't include them) so hydrate can flag them with `outlierReason`
+    // even when the name parser doesn't fire. We fetch canonical-aware
+    // Products for the SPs in scope.
+    const productIdsForSps = new Set<number>();
+    {
+        const [pidRows]: any = await pool.query(
+            `SELECT id, productId FROM StoreProduct WHERE id IN (?)`,
+            [spIds],
+        );
+        for (const r of pidRows as any[]) productIdsForSps.add(Number(r.productId));
+    }
+    const canonicalsForOutlierCheck = productIdsForSps.size > 0
+        ? await loadCanonicalsForProducts([...productIdsForSps])
+        : new Map();
+    const outlierSpSet = new Set<number>();
+    for (const meta of canonicalsForOutlierCheck.values()) {
+        if (!meta) continue;
+        for (const id of meta.outlierSpIds) outlierSpSet.add(id);
+    }
+
     const out: AdminAmountQueueRow[] = [];
     for (const spId of spIds) {
         const d = detailBySpId.get(spId);
         if (!d) continue;
         const parsed: ParsedAmount | null = parseAmountFromName(String(d.name ?? ''));
-        // Sanity: a row in the lease without a parser hit shouldn't be
-        // possible (the picker filtered them out), but if a name was
-        // edited between claim and hydrate, skip gracefully.
-        if (!parsed) continue;
+        const isOutlier = outlierSpSet.has(spId);
+        // Skip rows where neither signal applies (e.g. a name edit between
+        // claim and hydrate dropped the parser hit AND the SP isn't an
+        // outlier — neither path has anything actionable to show).
+        if (!parsed && !isOutlier) continue;
         const flag = flagBySpId.get(spId);
         out.push({
             spId,
@@ -273,12 +421,15 @@ export async function hydrateAmountQueueRows(
             flagReceiptId: flag ? flag.receiptId : null,
             flagLineIdx: flag ? flag.receiptLineIdx : null,
             recentPurchaseCount: purchaseCountBySpId.get(spId) ?? 0,
-            suggestion: {
-                amount: parsed.amount,
-                unit: parsed.unit,
-                matched: parsed.matched,
-                isWeighable: isWeighableForUnit(parsed.unit),
-            },
+            suggestion: parsed
+                ? {
+                    amount: parsed.amount,
+                    unit: parsed.unit,
+                    matched: parsed.matched,
+                    isWeighable: isWeighableForUnit(parsed.unit),
+                }
+                : null,
+            outlierReason: isOutlier ? 'outlier:family' : null,
         });
     }
     return out;

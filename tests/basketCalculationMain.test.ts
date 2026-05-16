@@ -82,15 +82,20 @@ function makePriceDbRow(storeId: number, price: string, overrides: Record<string
 
 /**
  * Queue the mock pool responses for a calculateBasketForStores call
- * (single chain, single product, N stores):
+ * (single chain, single product, N stores). After the canonical-unit
+ * refactor the query order is:
  *
- *   Call 1  — batchFetchTier12Prices step 1: find matching StoreProducts
- *   Call 2  — batchFetchTier12Prices step 2: fetchLatestPrices for those SPs
- *             (only queued if spRows.length > 0)
- *   Call 3  — batchFetchTier3Substitutes LIKE candidate query (empty by default)
- *   Call 4  — approximateCrossChain step 1: SP rows for the product
- *   Call 5  — approximateCrossChain step 2: fetchLatestPrices for tier-4 SPs
- *             (only queued if tier4SpRows.length > 0)
+ *   Call 1  — fetchAllSpMetadata: every SP across every chain for the
+ *             basket Products. Drives canonical-unit computation and
+ *             feeds tier-4 cross-chain averaging.
+ *   Call 2  — batchFetchTier12Prices step 1: SPs at relevant chains for
+ *             the basket Products.
+ *   Call 3  — batchFetchTier12Prices step 2: latest prices for those SPs
+ *             at the user's stores (only if spRows.length > 0).
+ *   Call 4  — batchFetchTier3Substitutes: LIKE candidate query (empty
+ *             by default).
+ *   Call 5  — approximateCrossChain: latest prices for tier-4 SPs (only
+ *             when fetchAllSpMetadata returned anything).
  */
 function setupTiers(
     spRows: any[],
@@ -99,13 +104,32 @@ function setupTiers(
     tier4SpRows: any[] = [],
     tier4PriceRows: any[] = [],
 ) {
+    // Combine tier-1/2 SPs with tier-4-only SPs into a single SP-metadata
+    // result. Both are SPs of the basket Products; tier-1/2 is the
+    // chain-filtered subset, tier-4 is anything stocked elsewhere.
+    const seen = new Set<number>();
+    const allSps: any[] = [];
+    for (const r of [...spRows, ...tier4SpRows]) {
+        const id = Number(r.id);
+        if (seen.has(id)) continue;
+        seen.add(id);
+        allSps.push({
+            id,
+            productId: r.productId ?? 100,
+            amount: r.amount,
+            unit: r.unit,
+            isWeighable: r.isWeighable,
+        });
+    }
+    mockPoolQuery.mockResolvedValueOnce([allSps]);
+
     mockPoolQuery.mockResolvedValueOnce([spRows]);
     if (spRows.length > 0) {
         mockPoolQuery.mockResolvedValueOnce([priceRows]);
     }
     mockPoolQuery.mockResolvedValueOnce([tier3Rows]);
-    mockPoolQuery.mockResolvedValueOnce([tier4SpRows]);
-    if (tier4SpRows.length > 0) {
+    // tier-4 prices query fires once per Product that has any SP metadata.
+    if (allSps.length > 0) {
         mockPoolQuery.mockResolvedValueOnce([tier4PriceRows]);
     }
 }

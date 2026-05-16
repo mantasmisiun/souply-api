@@ -3,6 +3,7 @@
 // Indexes are loaded once per scraper run and updated as new rows are created.
 
 import pool from '../../config/db.js';
+import { unitFamily } from '../../services/canonicalUnit.js';
 
 export interface ProductEntry { id: number; categoryId: number; normName: string; }
 export interface SpEntry     { id: number; productId: number; normName: string; amount: number | null; unit: string | null; }
@@ -168,9 +169,36 @@ export function addSpToIndex(chainId: number, entry: SpEntry) {
 }
 
 /**
+ * Family-compatibility gate. Returns true if two units can safely belong
+ * to the same Product:
+ *   - either side unknown → allow (don't block when info is missing)
+ *   - same family (fluid vs count) → allow
+ *   - different known families → block (refuse the merge)
+ *
+ * The transitional fluid-family simplification (kg ≈ l) means a milk SP in
+ * 'l' and a yogurt SP in 'kg' are still considered compatible. The block
+ * only kicks in for genuinely incompatible cases like a 1 vnt bag joining
+ * an otherwise all-kg cluster — exactly the data-pollution path the
+ * canonical-unit system was designed to prevent at calc time. Catching it
+ * at match time stops the bad merge from happening in the first place;
+ * the new SP then gets its own Product, and admin can resolve via the
+ * amounts queue ("Kiekis").
+ */
+function unitFamiliesCompatible(a: string | null, b: string | null): boolean {
+    const fa = unitFamily(a);
+    const fb = unitFamily(b);
+    if (fa === null || fb === null) return true;
+    return fa === fb;
+}
+
+/**
  * Fuzzy match within chain. Threshold 0.80 (looser than cross-chain because
  * same-chain names are more similar). If amount+unit also match we lower the
  * name threshold further to 0.65 to catch "Žemaitijos pienas" vs full catalog name.
+ *
+ * After fuzzy-name matching, the match is rejected if the incoming SP's
+ * unit family doesn't match the matched SP's family — see
+ * unitFamiliesCompatible() for the rule.
  */
 export async function fuzzyMatchSp(
     chainId: number,
@@ -184,7 +212,9 @@ export async function fuzzyMatchSp(
 
     // Try standard threshold first.
     const result = findBest(norm, index, threshold);
-    if (result) return result.entry;
+    if (result && unitFamiliesCompatible(result.entry.unit, unit)) {
+        return result.entry;
+    }
 
     // Lower threshold when amount+unit match exactly (e.g. promo short names).
     if (amount !== null && unit !== null) {
@@ -192,6 +222,7 @@ export async function fuzzyMatchSp(
         if (loose) {
             const e = loose.entry;
             if (e.unit === unit && e.amount !== null && Math.abs(e.amount - amount) < 0.01) {
+                // exact unit+amount match already implies same family
                 return e;
             }
         }
@@ -202,6 +233,9 @@ export async function fuzzyMatchSp(
 /**
  * Returns up to maxK SP matches within the chain sorted by score descending.
  * Used for "N rūšių" aggregated products where one promo price covers N variants.
+ *
+ * Family gate: only keeps matches whose unit family is compatible with the
+ * incoming unit (see unitFamiliesCompatible).
  */
 export async function fuzzyMatchSpMulti(
     chainId: number,
@@ -214,7 +248,11 @@ export async function fuzzyMatchSpMulti(
     const index = await getSpIndex(chainId);
     const norm = normalizeName(name);
     const results = findTopKResults(norm, index, threshold, maxK);
-    if (results.length) return results.map(r => r.entry);
+    if (results.length) {
+        return results
+            .map(r => r.entry)
+            .filter(e => unitFamiliesCompatible(e.unit, unit));
+    }
 
     if (amount !== null && unit !== null) {
         const loose = findTopKResults(norm, index, 0.65, maxK);

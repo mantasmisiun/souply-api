@@ -2,6 +2,12 @@ import { getClosestStores } from '../models/storeModel.js';
 import { getBasketProductIds } from '../models/basketModel.js';
 import pool from '../config/db.js';
 import { MatchThresholds } from '../config/matchThresholds.js';
+import { toCanonicalAmount, type CanonicalMeta } from './canonicalUnit.js';
+import {
+    fetchAllSpMetadata,
+    computeCanonicalByProduct,
+    type SpMetaRow,
+} from './productCanonical.js';
 
 const VILNIUS_LAT = 54.6872;
 const VILNIUS_LNG = 25.2797;
@@ -189,12 +195,14 @@ function getCheapestFromCache(
     storeId: number,
     productId: number,
     matchMode: MatchMode,
+    userQuantity: number,
+    canonical: CanonicalMeta | null,
 ): (SpRow & { effectivePrice: number }) | null {
     const direct = cache.sku.get(storeId)?.get(productId) ?? [];
     const cluster = matchMode === 'base'
         ? (cache.cluster.get(storeId)?.get(productId) ?? [])
         : [];
-    return pickCheapest([...direct, ...cluster]);
+    return pickCheapestForQuantity([...direct, ...cluster], userQuantity, canonical);
 }
 
 /**
@@ -237,6 +245,13 @@ export const calculateBasketForStores = async (
     const chainIds  = [...new Set(validStores.map((s: any) => Number(s.chainId)))] as number[];
     const productIds = [...new Set(basketItems.map((i: any) => Number(i.productId)))] as number[];
 
+    // Pre-fetch SP metadata for every basket Product across ALL chains. Used
+    // both to derive each Product's canonical unit/family (single source of
+    // truth for the picker UI + the calc math) and to feed tier-4
+    // cross-chain averaging without an extra per-product SP query.
+    const productSpData = await fetchAllSpMetadata(productIds);
+    const canonicalByProduct = computeCanonicalByProduct(productSpData);
+
     // Tier 1/2: single batch query — sync lookup inside the loop.
     const tier12Cache = await batchFetchTier12Prices(storeIds, chainIds, productIds);
 
@@ -244,20 +259,24 @@ export const calculateBasketForStores = async (
     // Results keyed as "chainId:productId" → best-substitute SpRow per store.
     const tier3Cache = await batchFetchTier3Substitutes(productIds, basketItems, storeIds, chainIds);
 
-    // Tier 4: one cross-chain average query per productId, not per (store × productId).
+    // Tier 4: cross-chain average per productId. Reuses the SP metadata
+    // already loaded above — only the latest-prices query is per-product.
     const tier4Cache = new Map<number, (SpRow & { effectivePrice: number }) | null>();
     await Promise.all(
         productIds.map(async pid => {
-            tier4Cache.set(pid, await approximateCrossChain(pid, storeIds));
+            const canonical = canonicalByProduct.get(pid) ?? null;
+            const spMeta = productSpData.get(pid) ?? [];
+            tier4Cache.set(pid, await approximateCrossChain(pid, storeIds, spMeta, canonical));
         })
     );
 
     const storeResults = await Promise.all(
         validStores.map(async (store: any): Promise<StoreResult> => {
             const itemResults = await Promise.all(
-                basketItems.map((basketItem: any) =>
-                    resolveItemAtStore(
-                        Number(basketItem.productId),
+                basketItems.map((basketItem: any) => {
+                    const pid = Number(basketItem.productId);
+                    return resolveItemAtStore(
+                        pid,
                         parseFloat(basketItem.quantity),
                         String(basketItem.name),
                         basketItem.matchMode === 'base' ? 'base' : 'sku',
@@ -266,8 +285,9 @@ export const calculateBasketForStores = async (
                         tier12Cache,
                         tier3Cache,
                         tier4Cache,
-                    )
-                )
+                        canonicalByProduct.get(pid) ?? null,
+                    );
+                })
             );
 
             const missingItemNames = itemResults
@@ -332,26 +352,32 @@ async function resolveItemAtStore(
     tier12Cache: Tier12Cache,
     tier3Cache: Map<string, (SpRow & { effectivePrice: number }) | null>,
     tier4Cache: Map<number, (SpRow & { effectivePrice: number }) | null>,
+    canonical: CanonicalMeta | null,
 ): Promise<ItemResult> {
-    // Tier 1 / 2: served from the pre-fetched cache — no DB call.
-    const direct = getCheapestFromCache(tier12Cache, storeId, productId, matchMode);
+    // Tier 1 / 2: served from the pre-fetched cache — no DB call. Pricing
+    // is per-total: for non-weighable items with multiple pack sizes, the
+    // cheapest per-pack-unit SP can be wasteful when the user wants a
+    // small quantity (e.g. 4-pack at 0.40 beats 30-pack at 2.50 for a
+    // basket of 5). pickCheapestForQuantity computes the actual basket
+    // cost per SP and picks the cheapest total.
+    const direct = getCheapestFromCache(tier12Cache, storeId, productId, matchMode, userQuantity, canonical);
     if (direct) {
         return priceItem(productId, userQuantity, productName, matchMode, direct,
-            { isSubstituted: false, isCrossChainAverage: false });
+            { isSubstituted: false, isCrossChainAverage: false }, canonical);
     }
 
     // Tier 3: pre-computed best substitute for this (chain, product) pair.
     const substitute = tier3Cache.get(`${chainId}:${productId}`) ?? null;
     if (substitute) {
         return priceItem(productId, userQuantity, productName, matchMode, substitute,
-            { isSubstituted: true, isCrossChainAverage: false });
+            { isSubstituted: true, isCrossChainAverage: false }, canonical);
     }
 
     // Tier 4: pre-computed cross-chain average — no DB call.
     const synthetic = tier4Cache.get(productId) ?? null;
     if (synthetic) {
         const priced = priceItem(productId, userQuantity, productName, matchMode, synthetic,
-            { isSubstituted: false, isCrossChainAverage: true });
+            { isSubstituted: false, isCrossChainAverage: true }, canonical);
         return { ...priced, storeProductName: null, storeProductId: null, resolvedProductId: null };
     }
 
@@ -560,71 +586,68 @@ async function fetchNearestNameSubstitute(
  * runs this through priceItem() so pack-vs-weighable math stays
  * consistent with Tiers 1-3.
  *
- * Pack size handling: if SPs across stores have different pack sizes
- * (rare — e.g. 80g at Maxima vs 100g at Rimi), the rows are bucketed
- * by (amount, unit, isWeighable) and the largest bucket wins. This
- * avoids the prior bug where averaging mixed pack sizes via per-kg
- * collapsed back into nonsense when multiplied by a pack count.
+ * SP metadata is supplied by the caller (pre-fetched once for all basket
+ * products in fetchAllSpMetadata). Outlier SPs (different unit family
+ * than the Product's canonical) are excluded so cross-chain averaging
+ * stays apples-to-apples.
+ *
+ * Pack size handling: SPs are bucketed by (canonical amount, isWeighable)
+ * after normalising to the canonical unit. Largest bucket wins. This
+ * means a Product with mostly 1L SPs and a stray 500ml SP averages over
+ * the 1L bucket only.
  */
 async function approximateCrossChain(
     productId: number,
     nearbyStoreIds: number[],
+    spMeta: SpMetaRow[],
+    canonical: CanonicalMeta | null,
 ): Promise<(SpRow & { effectivePrice: number }) | null> {
-    if (!nearbyStoreIds.length) return null;
+    if (!nearbyStoreIds.length || !spMeta.length) return null;
 
-    // Step 1: find all SPs for this product (small result)
-    const [spRows]: any = await pool.query(
-        `SELECT id, amount, unit, isWeighable FROM StoreProduct WHERE productId = ?`,
-        [productId],
-    );
-    if (!spRows.length) return null;
-    const spIds = (spRows as any[]).map(r => Number(r.id));
+    // Filter to in-family SPs; outliers shouldn't influence the average.
+    const inFamily = canonical
+        ? spMeta.filter(sp => canonical.inFamilySpIds.has(sp.id))
+        : spMeta;
+    if (!inFamily.length) return null;
 
-    // Step 2: fetch latest prices for those SPs at nearby stores
+    const spIds = inFamily.map(sp => sp.id);
     const priceMap = await fetchLatestPrices(spIds, nearbyStoreIds);
 
-    // Flatten into rows
-    const rows: any[] = [];
-    for (const sp of spRows as any[]) {
-        const storePrices = priceMap.get(Number(sp.id));
-        if (!storePrices) continue;
-        for (const [storeId, pd] of storePrices.entries()) {
-            if (pd.price == null) continue;
-            rows.push({
-                amount: sp.amount,
-                unit: sp.unit,
-                isWeighable: sp.isWeighable,
-                // Use the regular price for cross-chain estimation: a promo at
-                // one chain doesn't imply the same discount at a chain that
-                // doesn't even stock this product.
-                effectivePrice: parseFloat(pd.price),
-                storeId,
-            });
-        }
-    }
-    if (!rows.length) return null;
-
     interface Bucket {
-        amount: number;
-        unit: string | null;
+        canonAmount: number;
+        unit: string;
         isWeighable: boolean;
-        // storeId → cheapest per-pack effective price seen at that store
+        // storeId → cheapest effective price seen at that store
         prices: Map<number, number>;
     }
     const buckets = new Map<string, Bucket>();
-    for (const row of rows as any[]) {
-        const amount = row.amount ? parseFloat(row.amount) : 1;
-        const unit = row.unit ?? null;
-        const isWeighable = !!row.isWeighable;
-        const key = `${amount}|${unit ?? ''}|${isWeighable ? 1 : 0}`;
+    for (const sp of inFamily) {
+        const storePrices = priceMap.get(sp.id);
+        if (!storePrices) continue;
+        const rawAmount = sp.amount == null ? 1 : parseFloat(String(sp.amount));
+        const canonAmt = canonical
+            ? (toCanonicalAmount(rawAmount, sp.unit ?? '', canonical) ?? rawAmount)
+            : rawAmount;
+        const isWeighable = !!sp.isWeighable;
+        const key = `${canonAmt}|${isWeighable ? 1 : 0}`;
         let bucket = buckets.get(key);
         if (!bucket) {
-            bucket = { amount, unit, isWeighable, prices: new Map() };
+            bucket = {
+                canonAmount: canonAmt,
+                unit: canonical?.unit ?? (sp.unit ?? ''),
+                isWeighable,
+                prices: new Map(),
+            };
             buckets.set(key, bucket);
         }
-        const eff = parseFloat(row.effectivePrice);
-        const current = bucket.prices.get(row.storeId);
-        if (current === undefined || eff < current) bucket.prices.set(row.storeId, eff);
+        for (const [storeId, pd] of storePrices.entries()) {
+            if (pd.price == null) continue;
+            // Cross-chain uses regular price (not promo) — a promo at one
+            // chain doesn't imply the same discount at another.
+            const eff = parseFloat(pd.price);
+            const current = bucket.prices.get(storeId);
+            if (current === undefined || eff < current) bucket.prices.set(storeId, eff);
+        }
     }
 
     // Largest bucket wins (most common pack size across nearby stores).
@@ -643,7 +666,7 @@ async function approximateCrossChain(
         productId,
         storeProductName: '',
         isWeighable: chosen.isWeighable,
-        amount: chosen.amount,
+        amount: chosen.canonAmount,
         unit: chosen.unit,
         price: String(avgEffective),
         promoPrice: null,
@@ -652,6 +675,73 @@ async function approximateCrossChain(
     };
 }
 
+/**
+ * Pick the SP that yields the lowest basket-line total for the user's
+ * requested quantity.
+ *
+ *   Weighable: total = userQuantity × (effectivePrice / canonicalAmount)
+ *              — picking per-canonical-unit is optimal because the cost
+ *              scales linearly with weight.
+ *
+ *   Non-weighable: total = ceil(userQuantity / canonicalAmount) × price
+ *                  — pack rounding means per-canonical-unit can be
+ *                  wasteful for small quantities (4-pack at 0.40 may beat
+ *                  30-pack at 2.50 when the user wants 5, even though the
+ *                  30-pack is cheaper per egg). Compute the actual basket
+ *                  cost per SP and pick the minimum.
+ *
+ * Outlier SPs (different unit family than the Product's canonical) are
+ * excluded — they shouldn't compete against in-family SPs whose math the
+ * user can reason about. If no SP is in-family (canonical=null), falls
+ * back to legacy per-pack pricing without unit normalisation.
+ */
+export function pickCheapestForQuantity(
+    rows: SpRow[],
+    userQuantity: number,
+    canonical: CanonicalMeta | null,
+): (SpRow & { effectivePrice: number }) | null {
+    const priced = rows.filter(r => r.price !== null);
+    if (!priced.length) return null;
+
+    const eligible = canonical
+        ? priced.filter(r => canonical.inFamilySpIds.has(Number(r.id)))
+        : priced;
+    // Fall back to all-priced when canonical exists but no in-family SPs
+    // are stocked at this store (rare — e.g. only outlier SPs available).
+    const candidates = eligible.length > 0 ? eligible : priced;
+
+    let best: (SpRow & { effectivePrice: number }) | null = null;
+    let bestTotal = Infinity;
+
+    for (const sp of candidates) {
+        const effectivePrice = sp.promoPrice
+            ? parseFloat(String(sp.promoPrice))
+            : parseFloat(String(sp.price));
+        const rawAmount = sp.amount ? parseFloat(String(sp.amount)) : 1;
+        const canonAmount = canonical
+            ? (toCanonicalAmount(rawAmount, sp.unit ?? '', canonical) ?? rawAmount)
+            : rawAmount;
+        const isWeighable = sp.isWeighable === 1 || sp.isWeighable === true;
+
+        const total = isWeighable
+            ? userQuantity * (effectivePrice / Math.max(canonAmount, 1e-9))
+            : Math.max(1, Math.ceil(userQuantity / Math.max(canonAmount, 1e-9))) * effectivePrice;
+
+        if (total < bestTotal) {
+            bestTotal = total;
+            best = { ...sp, effectivePrice };
+        }
+    }
+    return best;
+}
+
+/**
+ * Back-compat wrapper for the legacy pickCheapest signature (per-unit
+ * pricing, no quantity input). Used only by paths that pick a single
+ * candidate from a one-element list — e.g. fetchNearestNameSubstitute
+ * resolves the best name-similar SP then asks for its effectivePrice.
+ * New call sites should use pickCheapestForQuantity.
+ */
 export function pickCheapest(rows: SpRow[]): (SpRow & { effectivePrice: number }) | null {
     const priced = rows.filter(r => r.price !== null);
     if (!priced.length) return null;
@@ -677,35 +767,38 @@ export function priceItem(
     productName: string,
     matchMode: MatchMode,
     chosen: SpRow & { effectivePrice: number },
-    flags: { isSubstituted: boolean; isCrossChainAverage: boolean }
+    flags: { isSubstituted: boolean; isCrossChainAverage: boolean },
+    canonical: CanonicalMeta | null = null,
 ): ItemResult {
     const effectivePrice = chosen.effectivePrice;
     const spAmount = chosen.amount ? parseFloat(String(chosen.amount)) : 1;
     const spUnit = chosen.unit;
     const isWeighable = chosen.isWeighable === 1 || chosen.isWeighable === true;
 
+    // Canonical amount = SP's amount expressed in the Product's canonical
+    // unit. For fluid items: g/ml → ÷1000; kg/l pass through. For count:
+    // matches when sub-unit matches (vnt vs vnt). When no canonical (e.g.
+    // tier-3 substitute from a different Product), use the raw amount —
+    // matches the legacy single-Product behaviour.
+    const canonAmount = canonical && spUnit
+        ? (toCanonicalAmount(spAmount, spUnit, canonical) ?? spAmount)
+        : spAmount;
+
     let packsNeeded: number;
     let actualAmount: number;
     let totalPrice: number;
     if (isWeighable) {
-        // Weighable: userQuantity is a weight typed by the user.
-        // Normalize to match the SP's unit. If user said "2" for an SP
-        // priced per gram, they meant 2 kg = 2000 g; if they said "1500"
-        // for an SP in kg, they meant 1500 g = 1.5 kg.
-        let normalizedQuantity = userQuantity;
-        if (spUnit === 'g' && userQuantity < 10) normalizedQuantity = userQuantity * 1000;
-        else if (spUnit === 'kg' && userQuantity > 10) normalizedQuantity = userQuantity / 1000;
-
+        // Weighable: userQuantity is in canonical units (kg or l). Cost
+        // scales linearly with weight at the per-canonical-unit price.
         packsNeeded = 1;
-        actualAmount = normalizedQuantity;
-        totalPrice = normalizedQuantity * (effectivePrice / Math.max(spAmount, 1));
+        actualAmount = userQuantity;
+        totalPrice = userQuantity * (effectivePrice / Math.max(canonAmount, 1e-9));
     } else {
-        // Non-weighable: userQuantity is a pack count from the basket UI's
-        // +/- buttons, NOT a weight. Charge for each pack at the shelf
-        // price; round any fractional input up to the next whole pack
-        // (you can't buy half an ice cream).
-        packsNeeded = Math.ceil(userQuantity);
-        actualAmount = packsNeeded * spAmount;
+        // Non-weighable: userQuantity is in canonical units (kg, l, or
+        // pack count). Round up to the nearest SP-pack multiple — you
+        // can't buy half a pack.
+        packsNeeded = Math.max(1, Math.ceil(userQuantity / Math.max(canonAmount, 1e-9)));
+        actualAmount = packsNeeded * canonAmount;
         totalPrice = packsNeeded * effectivePrice;
     }
     totalPrice = Math.round(totalPrice * 100) / 100;
