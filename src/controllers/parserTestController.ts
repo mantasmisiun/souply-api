@@ -10,9 +10,25 @@
  */
 import { Request, Response, NextFunction } from 'express';
 import * as fs from 'fs/promises';
+import * as fsSync from 'fs';
 import * as path from 'path';
 
 const RESULTS_DIR = path.resolve(process.cwd(), '../shared/receipts/_results');
+const DEVLOG_FILE = path.resolve(process.cwd(), 'receipts/_logs/_devlog.log');
+
+export const appendDevLog = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const body = req.body ?? {};
+        const tag = String(body.tag ?? '').trim() || 'untagged';
+        const payload = body.payload;
+        const line = `${new Date().toISOString()}\t${tag}\t${JSON.stringify(payload ?? {})}\n`;
+        fsSync.mkdirSync(path.dirname(DEVLOG_FILE), { recursive: true });
+        fsSync.appendFileSync(DEVLOG_FILE, line);
+        res.json({ ok: true });
+    } catch (e) {
+        next(e);
+    }
+};
 
 export const saveParserTestResult = async (
     req: Request,

@@ -6,9 +6,10 @@
  *   Saves to shared/receipts/_results/<runId>.json for offline diffing.
  */
 import { Router } from 'express';
-import { saveParserTestResult } from '../controllers/parserTestController.js';
+import { saveParserTestResult, appendDevLog } from '../controllers/parserTestController.js';
 
 const router = Router();
 router.post('/parser-test/results', saveParserTestResult);
+router.post('/dev-log', appendDevLog);
 
 export default router;

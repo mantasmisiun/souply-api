@@ -10,6 +10,8 @@
     "receipts:batch": "tsx src/scripts/receiptBatch/importReceiptBatch.ts",
     "receipts:stage": "tsx src/scripts/receiptBatch/stageReceiptsOnDevice.ts",
     "receipts:cleanup": "tsx src/scripts/receiptBatch/cleanupTestReceipts.ts",
+    "truths:bootstrap": "tsx src/scripts/bootstrapTruthsFromLogs.ts",
+    "truths:review": "tsx src/scripts/reviewProvisionalTruth.ts",
     "scrape:rimi": "tsx src/scrapers/runRimi.ts",
     "scrape:iki": "tsx src/scrapers/runIki.ts",
     "scrape:barbora": "tsx src/scrapers/runBarbora.ts",

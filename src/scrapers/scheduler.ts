@@ -7,6 +7,7 @@ import { runLidlPromoScraper } from './lidl/index.js';
 import { recalcGlobalScores } from '../models/productInteractionModel.js';
 import { warmDiscountsCache } from '../models/productModel.js';
 import { propagateCrossChainImages } from '../services/imagePropagationService.js';
+import { sendDailyReceiptIssuesReport } from '../services/adminDailyReportService.js';
 
 // Lithuanian store promo schedule (verified from store websites):
 //   IKI      Mon–Sun   → scrape Monday 06:00
@@ -66,4 +67,13 @@ cron.schedule('30 3 * * *', () => {
         .catch(e => console.error('[Scheduler] Image propagation failed:', e.message));
 }, { timezone: 'Europe/Vilnius' });
 
-console.log('[Scheduler] Cron jobs registered — Mon/Tue/Thu/Sat 06:00, daily 03:00 + 03:30 Europe/Vilnius');
+// Daily 20:00 — Telegram digest of pending user-flagged
+// ReceiptLineIssue rows so the admin gets a daily prompt to clear
+// the Žymos inbox. Service skips the send when no rows are pending
+// (no Telegram spam on quiet days).
+cron.schedule('0 20 * * *', () => {
+    sendDailyReceiptIssuesReport()
+        .catch(e => console.error('[Scheduler] Daily admin digest failed:', e?.message ?? e));
+}, { timezone: 'Europe/Vilnius' });
+
+console.log('[Scheduler] Cron jobs registered — Mon/Tue/Thu/Sat 06:00, daily 03:00 + 03:30 + 20:00 Europe/Vilnius');
