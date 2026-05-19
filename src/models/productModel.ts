@@ -302,49 +302,16 @@ const DISCOUNT_AMOUNT_EXPR = `
     END
 `;
 
-const discountsCache = new Map<string, { data: any[]; expiresAt: number }>();
-const DISCOUNTS_CACHE_TTL = 2 * 60 * 60 * 1000; // 2 hours
-
-export const invalidateDiscountsCache = () => discountsCache.clear();
-
-export const warmDiscountsCache = async () => {
-    discountsCache.clear();
-    await getDiscountedProducts({});
-};
-
-export const getDiscountedProducts = async (opts: {
-    l2CategoryId?: number;
-    search?: string;
-    limit?: number;
-    offset?: number;
-} = {}) => {
-    const cacheKey = `${opts.l2CategoryId ?? ''}|${opts.search ?? ''}`;
-    const cached = discountsCache.get(cacheKey);
-    if (cached && Date.now() < cached.expiresAt) {
-        const { limit, offset = 0 } = opts;
-        return limit != null ? cached.data.slice(offset, offset + limit) : cached.data;
-    }
-
-    const conditions: string[] = [
-        'p.mergedIntoId IS NULL',
-        'p.baseProductId IS NULL',
-    ];
-    const params: any[] = [];
-
-    if (opts.l2CategoryId != null) {
-        conditions.push(
-            '(p.categoryId IN (SELECT id FROM Category WHERE parentCategoryId = ?) OR p.categoryId = ?)',
-        );
-        params.push(opts.l2CategoryId, opts.l2CategoryId);
-    }
-
-    if (opts.search) {
-        conditions.push('p.name LIKE ?');
-        params.push(`%${opts.search}%`);
-    }
-
-    const where = conditions.join(' AND ');
-
+/**
+ * Recompute the DiscountedProductSummary table from current Product + Price state.
+ * Runs the heavy aggregation query once and writes the result into a flat,
+ * pre-joined table so the request-time endpoint becomes a simple indexed read.
+ *
+ * Called on server boot, after every scraper batch, and daily at 00:30 to
+ * drop promos that expired overnight. Idempotent — TRUNCATE + bulk INSERT.
+ */
+export const refreshDiscountedSummary = async (): Promise<void> => {
+    const t0 = Date.now();
     const [rows]: any = await pool.query(
         `SELECT p.id, p.name, p.categoryId,
             c.parentCategoryId AS l2CategoryId,
@@ -377,7 +344,7 @@ export const getDiscountedProducts = async (opts: {
              JOIN StoreProduct spi2 ON spi2.id = pr.storeProductId
              INNER JOIN (
                  SELECT storeProductId, MAX(id) AS maxId
-                 FROM Price
+                 FROM Price FORCE INDEX (idx_price_promo_end)
                  WHERE promoEnd > NOW()
                    AND promoPrice IS NOT NULL
                  GROUP BY storeProductId
@@ -385,18 +352,103 @@ export const getDiscountedProducts = async (opts: {
              WHERE pr.promoPrice < pr.price
                AND pr.price > 0
          ) d ON d.productId = p.id
-         WHERE ${where}
+         WHERE p.mergedIntoId IS NULL
+           AND p.baseProductId IS NULL
          GROUP BY p.id
          HAVING bestDiscountPct > 0
          ORDER BY bestDiscountPct DESC`,
-        params,
     );
+
     const productIds = rows.map((r: any) => Number(r.id));
     const canonicals = await loadCanonicalsForProducts(productIds);
     const enriched = attachCanonicalFields(rows, canonicals);
-    discountsCache.set(cacheKey, { data: enriched, expiresAt: Date.now() + DISCOUNTS_CACHE_TTL });
-    const { limit, offset = 0 } = opts;
-    return limit != null ? enriched.slice(offset, offset + limit) : enriched;
+
+    const conn = await pool.getConnection();
+    try {
+        await conn.beginTransaction();
+        await conn.query('DELETE FROM DiscountedProductSummary');
+        if (enriched.length > 0) {
+            const values = enriched.map((r: any) => [
+                r.id,
+                r.name,
+                r.categoryId ?? null,
+                r.l2CategoryId ?? null,
+                r.imageUrls ? JSON.stringify(r.imageUrls) : null,
+                r.chainLogos ? JSON.stringify(r.chainLogos) : null,
+                r.minAmount ?? null,
+                r.maxAmount ?? null,
+                r.unit ?? 'g',
+                r.hasWeighable ?? 0,
+                r.bestDiscountPct,
+                r.canonicalUnit,
+                r.canonicalStep,
+                r.canonicalFamily,
+            ]);
+            await conn.query(
+                `INSERT INTO DiscountedProductSummary
+                 (productId, name, categoryId, l2CategoryId, imageUrls, chainLogos,
+                  minAmount, maxAmount, unit, hasWeighable, bestDiscountPct,
+                  canonicalUnit, canonicalStep, canonicalFamily)
+                 VALUES ?`,
+                [values],
+            );
+        }
+        await conn.commit();
+    } catch (e) {
+        await conn.rollback();
+        throw e;
+    } finally {
+        conn.release();
+    }
+
+    console.log(`[DiscountsSummary] refreshed ${enriched.length} rows in ${Date.now() - t0} ms`);
+};
+
+/**
+ * Return the latest summary updatedAt as a unix-ms timestamp for ETag generation.
+ * Returns 0 when the table is empty.
+ */
+export const getDiscountsSummaryUpdatedAt = async (): Promise<number> => {
+    const [rows]: any = await pool.query(
+        `SELECT UNIX_TIMESTAMP(MAX(updatedAt)) * 1000 AS ts FROM DiscountedProductSummary`,
+    );
+    return Number(rows[0]?.ts ?? 0);
+};
+
+export const getDiscountedProducts = async (opts: {
+    l2CategoryId?: number;
+    search?: string;
+    limit?: number;
+    offset?: number;
+} = {}) => {
+    const conditions: string[] = [];
+    const params: any[] = [];
+
+    if (opts.l2CategoryId != null) {
+        conditions.push('l2CategoryId = ?');
+        params.push(opts.l2CategoryId);
+    }
+    if (opts.search) {
+        conditions.push('name LIKE ?');
+        params.push(`%${opts.search}%`);
+    }
+
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const limitClause = opts.limit != null
+        ? `LIMIT ${Number(opts.limit)} OFFSET ${Number(opts.offset ?? 0)}`
+        : '';
+
+    const [rows]: any = await pool.query(
+        `SELECT productId AS id, name, categoryId, l2CategoryId,
+                imageUrls, chainLogos, minAmount, maxAmount, unit, hasWeighable,
+                bestDiscountPct, canonicalUnit, canonicalStep, canonicalFamily
+           FROM DiscountedProductSummary
+           ${where}
+           ORDER BY bestDiscountPct DESC
+           ${limitClause}`,
+        params,
+    );
+    return rows;
 };
 
 export const getAllProductsByL2WithAmounts = async (

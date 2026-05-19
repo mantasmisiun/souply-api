@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { createProduct, searchProduct, getProductById, getProductsByCategory, getProductsByCategoryWithAmounts, getAllProductsByL2WithAmounts, getDiscountedProducts } from '../models/productModel.js';
+import { createProduct, searchProduct, getProductById, getProductsByCategory, getProductsByCategoryWithAmounts, getAllProductsByL2WithAmounts, getDiscountedProducts, getDiscountsSummaryUpdatedAt } from '../models/productModel.js';
 
 export const addProduct = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -106,7 +106,20 @@ export const fetchDiscountedProducts = async (req: Request, res: Response, next:
             : undefined;
         const limit = req.query.limit ? Math.min(Number(req.query.limit), 500) : undefined;
         const offset = req.query.offset ? Number(req.query.offset) : 0;
+
+        // Weak ETag from summary's last refresh + filter params. Same input,
+        // same hash; any scrape/cron refresh bumps it. Lets the client skip
+        // the JSON body on pull-to-refresh when nothing has changed.
+        const ts = await getDiscountsSummaryUpdatedAt();
+        const etag = `W/"d-${ts}-${l2CategoryId ?? ''}-${search ?? ''}-${limit ?? ''}-${offset}"`;
+        if (req.headers['if-none-match'] === etag) {
+            res.status(304).end();
+            return;
+        }
+
         const products = await getDiscountedProducts({ l2CategoryId, search, limit, offset });
+        res.setHeader('ETag', etag);
+        res.setHeader('Cache-Control', 'public, max-age=300, stale-while-revalidate=3600');
         res.json(products);
     } catch (error) {
         next(error);

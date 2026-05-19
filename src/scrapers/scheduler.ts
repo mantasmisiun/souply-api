@@ -5,7 +5,7 @@ import { runNorfaPromoScraper } from './norfa/index.js';
 import { runRimiPromoScraper } from './rimi/index.js';
 import { runLidlPromoScraper } from './lidl/index.js';
 import { recalcGlobalScores } from '../models/productInteractionModel.js';
-import { warmDiscountsCache } from '../models/productModel.js';
+import { refreshDiscountedSummary } from '../models/productModel.js';
 import { propagateCrossChainImages } from '../services/imagePropagationService.js';
 import { sendDailyReceiptIssuesReport } from '../services/adminDailyReportService.js';
 
@@ -31,9 +31,9 @@ async function run(label: string, scrapers: (() => Promise<any>)[]) {
     console.log(`[Scheduler] ${label}: starting…`);
     try {
         for (const scraper of scrapers) await scraper();
-        console.log(`[Scheduler] ${label}: finished. Warming discounts cache…`);
-        await warmDiscountsCache();
-        console.log(`[Scheduler] ${label}: discounts cache warmed.`);
+        console.log(`[Scheduler] ${label}: finished. Refreshing discounts summary…`);
+        await refreshDiscountedSummary();
+        console.log(`[Scheduler] ${label}: discounts summary refreshed.`);
     } catch (e: any) {
         console.error(`[Scheduler] ${label}: failed —`, e.message);
     } finally {
@@ -67,6 +67,14 @@ cron.schedule('30 3 * * *', () => {
         .catch(e => console.error('[Scheduler] Image propagation failed:', e.message));
 }, { timezone: 'Europe/Vilnius' });
 
+// Daily 00:30 — drop promos that expired overnight from the
+// DiscountedProductSummary. Without this the table holds rows until
+// the next scrape (could be days away), and users would see promos
+// that ended hours ago.
+cron.schedule('30 0 * * *', () => {
+    refreshDiscountedSummary().catch(e => console.error('[Scheduler] Daily discounts refresh failed:', e.message));
+}, { timezone: 'Europe/Vilnius' });
+
 // Daily 20:00 — Telegram digest of pending user-flagged
 // ReceiptLineIssue rows so the admin gets a daily prompt to clear
 // the Žymos inbox. Service skips the send when no rows are pending
@@ -76,4 +84,4 @@ cron.schedule('0 20 * * *', () => {
         .catch(e => console.error('[Scheduler] Daily admin digest failed:', e?.message ?? e));
 }, { timezone: 'Europe/Vilnius' });
 
-console.log('[Scheduler] Cron jobs registered — Mon/Tue/Thu/Sat 06:00, daily 03:00 + 03:30 + 20:00 Europe/Vilnius');
+console.log('[Scheduler] Cron jobs registered — Mon/Tue/Thu/Sat 06:00, daily 00:30 + 03:00 + 03:30 + 20:00 Europe/Vilnius');
