@@ -43,6 +43,11 @@ export interface SpUnitInput {
     id: number;
     amount: number | string | null;
     unit: string | null;
+    /** True when this SP is sold by weight at the deli counter (not in
+     *  fixed packs). The presence of any weighable SP in the dominant
+     *  family overrides the pack-derived step down to 0.1 — the deli
+     *  granularity — so the picker can ask for arbitrary weights. */
+    isWeighable?: number | boolean | null;
 }
 
 export interface CanonicalMeta {
@@ -183,9 +188,12 @@ export function canonicalize(sps: SpUnitInput[]): CanonicalMeta | null {
         }
     }
 
-    // Step = smallest in-family SP amount in canonical units. Ignore
-    // null/non-positive amounts (degenerate rows from bad scrapes).
+    // Step computation walks the in-family SPs and looks at their canonical
+    // amounts. Used both as the smallest-pack baseline and to count how
+    // many distinct pack sizes exist (single-pack vs multi-pack drives
+    // different UX rules below).
     let step = Infinity;
+    const distinctCanonAmounts = new Set<number>();
     for (const sp of inFamilySps) {
         const amt = sp.amount == null ? null : parseFloat(String(sp.amount));
         if (amt === null || !Number.isFinite(amt) || amt <= 0) continue;
@@ -193,8 +201,32 @@ export function canonicalize(sps: SpUnitInput[]): CanonicalMeta | null {
             ? toFluidBase(amt, sp.unit!)
             : amt;
         if (canonAmt < step) step = canonAmt;
+        // Round to 3 decimals before set-keying so 0.330000001 and 0.33
+        // count as one. Pack sizes in this catalogue never need finer.
+        distinctCanonAmounts.add(Math.round(canonAmt * 1000) / 1000);
     }
     if (!Number.isFinite(step)) step = 1;
+
+    // Weighable override: when ANY in-family SP is sold by weight, the
+    // picker should step in deli-counter granularity (0.1 kg/l), not in
+    // whatever pack size a co-clustered pre-packed SP carries. The
+    // basket calc service already prices weighable items by exact
+    // quantity (no pack rounding), so this only widens the user's
+    // freedom of choice on the UI side. Restricted to the fluid family
+    // — 0.1 doesn't make sense for count units (vnt / pak / rit).
+    if (dominantFamily === 'fluid' && inFamilySps.some(sp => !!sp.isWeighable)) {
+        step = Math.min(step, 0.1);
+    } else if (dominantFamily === 'fluid' && distinctCanonAmounts.size > 1) {
+        // Multi-pack fluid (e.g. Pepsi with 0.33 / 0.5 / 1 / 1.5 L SPs):
+        // stepping by the smallest pack (0.33) gives the picker
+        // confusing increments (0.33, 0.66, 0.99…). Widen to a
+        // shopping-friendly 0.5L step. Single-pack-only Products keep
+        // their actual pack size — they have no flexibility, so the
+        // step must equal what's buyable. The basket calc continues to
+        // pick the cheapest combination of SPs regardless of step, so
+        // the picker step is purely a UX choice here.
+        step = Math.max(step, 0.5);
+    }
 
     return {
         family: dominantFamily,
