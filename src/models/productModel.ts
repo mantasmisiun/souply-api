@@ -76,10 +76,13 @@ export const searchProduct = async (query: string) => {
 
 export const getProductById = async (id: number) => {
     const [products]: any = await pool.query(
-        `SELECT ${PRODUCT_WITH_IMAGES_SELECT} FROM Product p WHERE p.id = ?`,
+        `${BROWSE_SELECT} WHERE p.id = ? GROUP BY p.id`,
         [id]
     );
-    return products[0] || null;
+    const product = products[0] || null;
+    if (!product) return null;
+    const canonicals = await loadCanonicalsForProducts([product.id]);
+    return attachCanonicalFields([product], canonicals)[0];
 };
 
 export const getProductsByCategory = async (categoryId: number) => {
