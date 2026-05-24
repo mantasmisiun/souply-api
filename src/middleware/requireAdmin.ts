@@ -1,10 +1,16 @@
 import { Request, Response, NextFunction } from 'express';
 import pool from '../config/db.js';
+import { auditLog } from '../models/adminInviteModel.js';
 
 /**
- * Gate for admin-only endpoints. Reads the X-Admin-Id request header and
- * verifies the user has isAdmin = 1 in the database. Returns 401 when the
- * header is missing and 403 when the user is not an admin or does not exist.
+ * Gate for admin-only endpoints.
+ *
+ * Hard-revoked users (isAdmin = 0) → 403.
+ * Shadow-banned users (isAdmin = 1, shadowBanned = 1):
+ *   - GET requests pass through normally so the UI looks intact.
+ *   - All write methods (POST/PUT/PATCH/DELETE) are silently swallowed:
+ *     the attempt is logged to AdminAuditLog and a fake 200 {} is returned.
+ *     The user cannot tell their writes are being ignored.
  */
 export const requireAdmin = async (
     req: Request,
@@ -16,12 +22,32 @@ export const requireAdmin = async (
         res.status(401).json({ error: 'X-Admin-Id header required' });
         return;
     }
+
     const [rows]: any = await pool.query(
-        `SELECT isAdmin FROM User WHERE id = ? LIMIT 1`, [adminId.trim()],
+        `SELECT isAdmin, shadowBanned FROM User WHERE id = ? LIMIT 1`,
+        [adminId.trim()],
     );
-    if (!rows[0]?.isAdmin) {
+    const user = rows[0];
+
+    if (!user?.isAdmin) {
         res.status(403).json({ error: 'Forbidden' });
         return;
     }
+
+    if (user.shadowBanned) {
+        const method = req.method.toUpperCase();
+        if (method !== 'GET') {
+            // Log silently — the banned user never sees this
+            auditLog({
+                userId: adminId.trim(),
+                action: 'shadow_blocked',
+                detail: { method, path: req.path, body: req.body },
+            }).catch(() => {});
+            res.json({});
+            return;
+        }
+        // GET: fall through — reads work normally so the panel looks functional
+    }
+
     next();
 };

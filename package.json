@@ -18,6 +18,7 @@
     "scrape:norfa": "tsx src/scrapers/runNorfa.ts",
     "scrape:lidl": "tsx src/scrapers/runLidl.ts",
     "scrape:all": "tsx src/scrapers/runAll.ts",
+    "admin": "tsx src/scripts/adminCli.ts",
     "type": "module",
     "test": "NODE_ENV=test NODE_OPTIONS=--experimental-vm-modules jest"
   },
@@ -33,9 +34,11 @@
     "minio": "^8.0.7",
     "mysql2": "^3.20.0",
     "node-cron": "^4.2.1",
+    "nodemailer": "^8.0.8",
     "playwright": "^1.59.1",
     "playwright-extra": "^4.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "qrcode-terminal": "^0.12.0",
     "sharp": "^0.34.5",
     "swagger-jsdoc": "^6.2.8",
     "swagger-ui-express": "^5.0.1",
@@ -48,6 +51,8 @@
     "@types/jest": "^30.0.0",
     "@types/node": "^25.5.0",
     "@types/node-cron": "^3.0.11",
+    "@types/nodemailer": "^8.0.0",
+    "@types/qrcode-terminal": "^0.12.2",
     "@types/supertest": "^7.2.0",
     "@types/swagger-jsdoc": "^6.0.4",
     "@types/swagger-ui-express": "^4.1.8",
@@ -57,7 +62,7 @@
     "supertest": "^7.2.2",
     "ts-jest": "^29.4.9",
     "ts-node": "^10.9.2",
-    "tsx": "^4.21.0",
+    "tsx": "^4.22.3",
     "typescript": "^6.0.2"
   }
 }
