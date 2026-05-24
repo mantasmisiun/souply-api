@@ -31,7 +31,8 @@ export type AdminAction =
     | 'flag_discount_suspect'      // sub-flag: same for the discount
     | 'uncategorised_set'          // assigned a category (+ optional name edit)
     | 'uncategorised_delete'       // deleted a Product (and its SPs by FK cascade)
-    | 'uncategorised_skip';        // skipped without action — 90-day filter
+    | 'uncategorised_skip'         // skipped without action — 90-day filter
+    | 'uncategorised_split';       // split a merged receipt line into two products
 
 export interface LogActionArgs {
     adminUserId: string;
