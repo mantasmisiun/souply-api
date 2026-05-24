@@ -41,7 +41,12 @@ import {
     confirmUncategorisedProduct,
     deleteUncategorisedProduct,
     skipUncategorisedProduct,
+    getCategorySuggestions,
 } from '../controllers/adminUncategorisedController.js';
+import {
+    getSourceReceipt,
+    applySplit,
+} from '../controllers/adminReceiptSplitController.js';
 
 const router = Router();
 
@@ -96,5 +101,8 @@ router.post('/admin/uncategorised/release-batch', requireAdmin, releaseUncategor
 router.post('/admin/uncategorised/:productId/confirm', requireAdmin, adminRateLimit, confirmUncategorisedProduct);
 router.post('/admin/uncategorised/:productId/delete', requireAdmin, adminRateLimit, deleteUncategorisedProduct);
 router.post('/admin/uncategorised/:productId/skip', requireAdmin, adminRateLimit, skipUncategorisedProduct);
+router.get('/admin/uncategorised/:productId/category-suggestions', requireAdmin, getCategorySuggestions);
+router.get('/admin/uncategorised/:productId/source-receipt', requireAdmin, getSourceReceipt);
+router.post('/admin/uncategorised/:productId/split', requireAdmin, adminRateLimit, applySplit);
 
 export default router;

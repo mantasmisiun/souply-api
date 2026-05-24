@@ -25,7 +25,7 @@ import { getPresignedUrl } from '../services/storageService.js';
  * gracefully to "no preview available".
  */
 
-const VERTICAL_PADDING_PCT = 0.3;
+const VERTICAL_PADDING_PCT = 0.08;
 
 export const getFlaggedReceiptCrop = async (req: Request, res: Response, next: NextFunction) => {
     try {

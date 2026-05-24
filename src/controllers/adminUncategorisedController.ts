@@ -4,6 +4,7 @@ import {
     pickUncategorisedProductIds,
     hydrateUncategorisedRows,
     checkProductDeleteBlockers,
+    suggestCategoriesForProduct,
 } from '../models/adminUncategorisedQueueModel.js';
 import {
     claimSpIds,
@@ -211,6 +212,31 @@ export const deleteUncategorisedProduct = async (req: Request, res: Response, ne
         await completeLease({ adminId, queueKind: 'uncategorised', spId: productId });
 
         res.json({ productId, deleted: true });
+    } catch (e) { next(e); }
+};
+
+// ── GET /api/admin/uncategorised/:productId/category-suggestions ────
+export const getCategorySuggestions = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const productId = Number(req.params.productId);
+        if (!Number.isFinite(productId)) {
+            res.status(400).json({ error: 'invalid productId' });
+            return;
+        }
+        const [[product]]: any = await pool.query(
+            `SELECT name FROM Product WHERE id = ? LIMIT 1`,
+            [productId],
+        );
+        if (!product) {
+            res.status(404).json({ error: 'product not found' });
+            return;
+        }
+        const suggestions = await suggestCategoriesForProduct(
+            productId,
+            String(product.name ?? ''),
+            (req as any).locale ?? 'lt',
+        );
+        res.json({ suggestions });
     } catch (e) { next(e); }
 };
 
