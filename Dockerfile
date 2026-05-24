@@ -56,8 +56,9 @@ RUN npm ci --omit=dev && npm cache clean --force
 # Must run after npm ci so the playwright CLI is available.
 RUN npx playwright install chromium --with-deps
 
-# Compiled output.
+# Compiled output + static assets (email logo, etc.)
 COPY --from=builder /app/basket-api/dist ./dist
+COPY basket-api/assets ./dist/basket-api/assets
 
 # Tini as PID 1 so the container handles SIGTERM cleanly on
 # docker stop (Node alone can be stubborn about signals).
