@@ -65,6 +65,9 @@ app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 // rootDir. Concretely: dev → /…/basket-api/src/index.ts; prod →
 // /…/basket-api/dist/basket-api/src/index.js — different `../`
 // counts. cwd sidesteps that.
+const ASSETS_DIR = path.resolve(process.cwd(), 'assets');
+app.use('/assets', express.static(ASSETS_DIR));
+
 const RECEIPTS_STAGING_DIR = path.resolve(process.cwd(), 'receipts/_batch_staging');
 app.use('/receipts-batch', express.static(RECEIPTS_STAGING_DIR, { fallthrough: false }));
 

@@ -1,9 +1,7 @@
 import nodemailer from 'nodemailer';
-import path from 'path';
-import { fileURLToPath } from 'url';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const LOGO_PATH = path.resolve(__dirname, '../../assets/logo.png');
+const publicUrl = () =>
+    (process.env.API_PUBLIC_URL ?? `http://localhost:${process.env.PORT ?? 3000}`).replace(/\/$/, '');
 
 const transporter = nodemailer.createTransport({
     host:   process.env.SMTP_HOST,
@@ -42,7 +40,7 @@ export async function sendAdminVerificationEmail(opts: {
     <tr><td align="center">
       <table width="100%" style="max-width:480px;background:#fff;border-radius:16px;padding:40px 32px;box-shadow:0 4px 24px rgba(0,0,0,.08)">
         <tr><td align="center" style="padding-bottom:24px">
-          <img src="cid:logo" alt="Souply" width="72" height="72" style="border-radius:16px;display:block">
+          <img src="${publicUrl()}/assets/logo.png" alt="Souply" width="72" height="72" style="border-radius:16px;display:block">
         </td></tr>
         <tr><td style="font-size:20px;font-weight:700;color:#111;text-align:center;padding-bottom:12px">
           Admin access invite
@@ -69,8 +67,5 @@ export async function sendAdminVerificationEmail(opts: {
   </table>
 </body>
 </html>`,
-        attachments: [
-            { filename: 'logo.png', path: LOGO_PATH, cid: 'logo' },
-        ],
     });
 }
