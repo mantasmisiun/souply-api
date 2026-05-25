@@ -21,6 +21,7 @@
  */
 
 import { levenshtein } from './addressMatcher.js';
+import { extractPackSize } from '../../../shared/parsers/rimiParser.js';
 
 /**
  * Strip OCR prefixes that hold no product signal but often leak through
@@ -226,12 +227,42 @@ export function findBestProductMatches(
         const charContribution = charScore >= 0.6 ? charScore * 0.95 : 0;
         let confidence = Math.max(tokenScore, charContribution);
 
-        if (ocrAmount !== null && ocrUnit && cand.amount !== null && cand.unit) {
-            const amountMatches = Math.abs(ocrAmount - cand.amount) < 0.01;
-            const unitMatches = sameUnit(ocrUnit, cand.unit);
+        // Symmetric size extraction: many catalog SPs have size info in
+        // the name but null `amount` / `unit` columns (data-quality
+        // legacy). Without this fallback, ZEWA-class cases — where the
+        // candidate names are "ZEWA EVERYDAY, 12 rit." / "8 rit." /
+        // "4 rit." but all stored amount=null — never trigger the
+        // size-mismatch penalty, so name-similarity alone returns the
+        // wrong pack at confidence 1.0. Falling back to name-extraction
+        // closes the loop until the catalog data is backfilled.
+        let candAmount = cand.amount;
+        let candUnit = cand.unit;
+        if ((candAmount === null || !candUnit) && cand.storeProductName) {
+            const extracted = extractPackSize(cand.storeProductName);
+            if (extracted.amount !== null && extracted.unit) {
+                candAmount = candAmount ?? extracted.amount;
+                candUnit = candUnit ?? extracted.unit;
+            }
+        }
+
+        if (ocrAmount !== null && ocrUnit && candAmount !== null && candUnit) {
+            const amountMatches = Math.abs(ocrAmount - candAmount) < 0.01;
+            const unitMatches = sameUnit(ocrUnit, candUnit);
             if (amountMatches && unitMatches) {
                 confidence = Math.min(1, confidence + 0.15);
-            } else if (!amountMatches || !unitMatches) {
+            } else if (unitMatches && !amountMatches) {
+                // Same unit, different pack size — strong negative signal.
+                // Multiple same-named pack variants (e.g. ZEWA EVERYDAY
+                // 12/16/24/32 rit.) are the case this catches: name
+                // similarity is identical so without a real penalty the
+                // matcher picks the first variant at confidence 1.0.
+                // Scale by relative size error so a near-match (32 vs 30)
+                // hurts less than a wild miss (32 vs 12).
+                const relErr = Math.abs(ocrAmount - candAmount) / Math.max(ocrAmount, candAmount, 1);
+                const penalty = Math.min(0.45, 0.20 + 0.30 * relErr);
+                confidence = Math.max(0, confidence - penalty);
+            } else if (!unitMatches) {
+                // Different unit family — usually a different product.
                 confidence = Math.max(0, confidence - 0.2);
             }
         }

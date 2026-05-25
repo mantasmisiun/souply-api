@@ -68,10 +68,25 @@ const PRODUCT_WITH_IMAGES_SELECT = `
 
 export const searchProduct = async (query: string) => {
     const [products]: any = await pool.query(
-        `SELECT ${PRODUCT_WITH_IMAGES_SELECT} FROM Product p WHERE p.name LIKE ? ORDER BY p.globalScore DESC`,
+        `${BROWSE_SELECT}
+         JOIN Category cat ON cat.id = p.categoryId AND cat.name NOT LIKE 'Nepriskirt%'
+         WHERE p.name LIKE ?
+           AND p.mergedIntoId IS NULL
+         GROUP BY p.id
+         ORDER BY p.globalScore DESC
+         LIMIT 50`,
         [`%${query}%`]
     );
-    return products;
+    if (products.length === 0) return [];
+    const categoryIds = [...new Set((products as any[]).map((p: any) => p.categoryId).filter(Boolean))];
+    const [catRows]: any = categoryIds.length
+        ? await pool.query(`SELECT id, name FROM Category WHERE id IN (?)`, [categoryIds])
+        : [[]];
+    const catNameMap: Record<number, string> = Object.fromEntries((catRows as any[]).map((r: any) => [r.id, r.name]));
+    const productsWithCat = (products as any[]).map((p: any) => ({ ...p, categoryName: catNameMap[p.categoryId] ?? null }));
+    const productIds = productsWithCat.map((p: any) => p.id);
+    const canonicals = await loadCanonicalsForProducts(productIds);
+    return attachCanonicalFields(productsWithCat, canonicals);
 };
 
 export const getProductById = async (id: number) => {

@@ -56,6 +56,55 @@ const collectSpIds = (parsed: any): number[] => {
     return Array.from(ids);
 };
 
+/** Top-level storeProductId on each products[i] (the user-confirmed match,
+ *  not just the candidate altMatches). Different set from collectSpIds —
+ *  used for the "user rejected this match" overlay. */
+const collectLineSpIds = (parsed: any): number[] => {
+    const ids = new Set<number>();
+    if (!parsed || !Array.isArray(parsed.products)) return [];
+    for (const p of parsed.products) {
+        const id = Number(p?.storeProductId);
+        if (Number.isFinite(id) && id > 0) ids.add(id);
+    }
+    return Array.from(ids);
+};
+
+/**
+ * SPs the user voted 'different' against another SP currently sharing the
+ * same Product. Those receipt lines should drop their match metadata so
+ * the Prekės tab reflects the user's rejection ("you said these are
+ * different products — we won't keep showing the match").
+ *
+ * The same-Product check is intentional: a 'different' vote between SPs
+ * that no longer share a Product (admin moved them, time passed) no
+ * longer expresses rejection of the current line's productId binding.
+ * Returns the set of line SP ids to un-match.
+ */
+const fetchUserRejectedLineSps = async (
+    userId: string,
+    lineSpIds: number[],
+): Promise<Set<number>> => {
+    const out = new Set<number>();
+    if (lineSpIds.length === 0) return out;
+    const [rows]: any = await pool.query(
+        `SELECT DISTINCT
+                CASE WHEN spA.id IN (?) THEN spA.id ELSE spB.id END AS lineSpId
+           FROM UserStoreProductEquivalence e
+           JOIN StoreProduct spA ON spA.id = e.spIdA
+           JOIN StoreProduct spB ON spB.id = e.spIdB
+          WHERE e.userId = ?
+            AND e.verdict = 'different'
+            AND spA.productId = spB.productId
+            AND (spA.id IN (?) OR spB.id IN (?))`,
+        [lineSpIds, userId, lineSpIds, lineSpIds],
+    );
+    for (const r of rows) {
+        const id = Number(r.lineSpId);
+        if (Number.isFinite(id) && id > 0) out.add(id);
+    }
+    return out;
+};
+
 /**
  * For a given user, resolve orphan Products (categoryId=688) through their
  * personal "identical" votes. The global promotion path requires a
@@ -218,6 +267,15 @@ export const resolveReceiptCategoriesLive = async (receipt: any, locale: Locale 
         ? await fetchUserPersonalRescues(ownerUserId, productIds, locale)
         : new Map<number, PersonalRescue>();
 
+    // Apply the user's 'different' verdicts: when they voted that the
+    // matched SP and another SP under the same Product are different,
+    // the saved match no longer reflects their belief. Clear the match
+    // fields so the line renders as "needs rematch" rather than keep
+    // showing the rejected name + image.
+    const rejectedLineSps = ownerUserId
+        ? await fetchUserRejectedLineSps(ownerUserId, collectLineSpIds(parsed))
+        : new Set<number>();
+
     // Overwrite cached categoryId / categoryName / categoryL2Name on
     // every altMatches[*] whose SP we resolved. SPs that have been
     // deleted between upload and now are skipped — we preserve the
@@ -226,17 +284,32 @@ export const resolveReceiptCategoriesLive = async (receipt: any, locale: Locale 
     // strictly more informative than null. Personal rescues win over
     // the global resolution when both are present.
     for (const p of parsed.products) {
-        if (!Array.isArray(p?.altMatches)) continue;
-        for (const am of p.altMatches) {
-            const spId = Number(am?.storeProductId);
-            if (!Number.isFinite(spId) || spId <= 0) continue;
-            const live = liveBySp.get(spId);
-            if (!live) continue;
-            const personal = live.productId !== null ? personalRescues.get(live.productId) : undefined;
-            const source: { categoryId: number | null; leafName: string | null; l2Name: string | null } = personal ?? live;
-            am.categoryId = source.categoryId;
-            am.categoryName = source.leafName;
-            am.categoryL2Name = source.l2Name;
+        if (Array.isArray(p?.altMatches)) {
+            for (const am of p.altMatches) {
+                const spId = Number(am?.storeProductId);
+                if (!Number.isFinite(spId) || spId <= 0) continue;
+                const live = liveBySp.get(spId);
+                if (!live) continue;
+                const personal = live.productId !== null ? personalRescues.get(live.productId) : undefined;
+                const source: { categoryId: number | null; leafName: string | null; l2Name: string | null } = personal ?? live;
+                am.categoryId = source.categoryId;
+                am.categoryName = source.leafName;
+                am.categoryL2Name = source.l2Name;
+            }
+        }
+        // Drop the saved match metadata when the user has explicitly
+        // rejected the productId binding via a 'different' swipe vote.
+        // The original OCR name + altMatches stay so the user can
+        // re-resolve from the per-line UI; the cached "matchedName"
+        // disappears so the rejection is visible.
+        const lineSpId = Number(p?.storeProductId);
+        if (Number.isFinite(lineSpId) && rejectedLineSps.has(lineSpId)) {
+            p.storeProductId = null;
+            p.matchedName = null;
+            p.storeProductImageUrl = null;
+            p.matchConfirmed = false;
+            p.priceVerified = false;
+            p.userRejectedMatch = true;
         }
     }
 
