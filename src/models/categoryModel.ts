@@ -84,6 +84,23 @@ export const getSubCategories = async (parentCategoryId: number, locale: Locale 
     return rows;
 };
 
+export const getSubCategoriesWithProductCounts = async (parentCategoryId: number, locale: Locale = 'lt') => {
+    const tr = localizedCategoryNameSql(locale);
+    const [rows]: any = await pool.query(
+        `SELECT c.id, c.parentCategoryId,
+                ${tr.nameSql} AS name,
+                c.name AS nameKey,
+                COUNT(p.id) AS productCount
+         FROM Category c
+         ${tr.joinSql}
+         LEFT JOIN Product p ON p.categoryId = c.id AND p.mergedIntoId IS NULL
+         WHERE c.parentCategoryId = ? AND c.isHidden = 0
+         GROUP BY c.id`,
+        [tr.localeParam, parentCategoryId],
+    );
+    return rows;
+};
+
 export const getAllCategories = async (locale: Locale = 'lt') => {
     const tr = localizedCategoryNameSql(locale);
     const [rows]: any = await pool.query(
@@ -284,6 +301,7 @@ export const searchL3CategoriesByName = async (query: string, locale: Locale = '
         `SELECT c3.id,
                 ${tr3.nameSql} AS name,
                 c3.name        AS nameKey,
+                c2.id          AS l2Id,
                 ${tr2.nameSql} AS l2Name,
                 ${tr1.nameSql} AS l1Name
          FROM Category c3
@@ -303,6 +321,8 @@ export const searchL3CategoriesByName = async (query: string, locale: Locale = '
         id: r.id,
         name: r.name,
         nameKey: r.nameKey,
+        l2Id: Number(r.l2Id),
+        l2Name: r.l2Name,
         path: `${r.l1Name} > ${r.l2Name} > ${r.name}`,
     }));
 };

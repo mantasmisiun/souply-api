@@ -187,7 +187,7 @@ const AMOUNT_NORMALIZED_EXPR = `
 `;
 
 const BROWSE_SELECT = `
-    SELECT p.id, p.name, p.categoryId,
+    SELECT p.id, p.name, p.categoryId, p.globalScore,
         (SELECT JSON_ARRAYAGG(spi.imageUrl)
          FROM StoreProduct spi
          WHERE spi.productId = p.id AND spi.imageUrl IS NOT NULL) AS imageUrls,

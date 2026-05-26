@@ -96,6 +96,7 @@ export const fetchUserProfile = async (req: Request, res: Response, next: NextFu
             // Surface the admin flag so the client can decide whether to
             // show the "Pereiti į admin panelį" button on the Profilis tab.
             isAdmin: !!(user as any).isAdmin,
+            role: (user as any).adminRole ?? null,
         });
     } catch (error) {
         next(error);

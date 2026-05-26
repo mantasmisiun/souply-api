@@ -47,6 +47,13 @@ import {
     getSourceReceipt,
     applySplit,
 } from '../controllers/adminReceiptSplitController.js';
+import { mergeProductsHandler, moveProductsHandler, renameProductHandler } from '../controllers/adminCatalogController.js';
+import {
+    getAdminProductDetail,
+    deleteAdminStoreProduct,
+    editAdminStoreProduct,
+    moveAdminStoreProduct,
+} from '../controllers/adminStoreProductController.js';
 
 const router = Router();
 
@@ -88,10 +95,19 @@ router.post('/admin/flags/:flagKey/skip', requireAdmin, adminRateLimit, skipFlag
 // read, and a single card review can fire multiple if the admin re-pans.
 router.get('/admin/flags/receipts/:receiptId/:lineIdx/crop', requireAdmin, getFlaggedReceiptCrop);
 
-// Type-ahead pickers used by the Flags-tab card (re-link to a
-// different Product, re-categorise). Both are pure reads.
+// Catalog tab — superadmin-only product operations.
+// requireAdmin gates the outer shell; handlers enforce superadmin role internally.
+// Static segments (/search, /merge, /move) must come before /:id so Express
+// doesn't greedily match them as the dynamic param.
 router.get('/admin/products/search', requireAdmin, adminProductSearch);
 router.get('/admin/categories/search', requireAdmin, adminCategorySearch);
+router.post('/admin/products/merge', requireAdmin, adminRateLimit, mergeProductsHandler);
+router.post('/admin/products/move', requireAdmin, adminRateLimit, moveProductsHandler);
+router.get('/admin/products/:id', requireAdmin, getAdminProductDetail);
+router.patch('/admin/products/:id/name', requireAdmin, adminRateLimit, renameProductHandler);
+router.delete('/admin/store-products/:spId', requireAdmin, adminRateLimit, deleteAdminStoreProduct);
+router.patch('/admin/store-products/:spId', requireAdmin, adminRateLimit, editAdminStoreProduct);
+router.post('/admin/store-products/:spId/move', requireAdmin, adminRateLimit, moveAdminStoreProduct);
 
 // Uncategorised tab — DB rescue queue for Products that fall outside
 // both user-driven (Žymos) and heuristic-driven (Nuotraukos / Kiekiai).

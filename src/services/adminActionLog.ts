@@ -32,7 +32,13 @@ export type AdminAction =
     | 'uncategorised_set'          // assigned a category (+ optional name edit)
     | 'uncategorised_delete'       // deleted a Product (and its SPs by FK cascade)
     | 'uncategorised_skip'         // skipped without action — 90-day filter
-    | 'uncategorised_split';       // split a merged receipt line into two products
+    | 'uncategorised_split'         // split a merged receipt line into two products
+    | 'product_merge'              // merged 2+ products into one canonical winner
+    | 'product_move'               // moved product(s) to a different L3 category
+    | 'product_rename'             // renamed a product's canonical name
+    | 'sp_delete'                  // force-deleted a SP (and parent Product if last SP)
+    | 'sp_edit'                    // edited SP fields (storeProductName, amount, unit, imageUrl…)
+    | 'sp_move';                   // moved SP to a different Product
 
 export interface LogActionArgs {
     adminUserId: string;

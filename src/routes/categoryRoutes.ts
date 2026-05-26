@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import {
-    addCategory, fetchAllCategories, fetchSubCategories, fetchCategoryById,
-    fetchCategoryPath, fetchAllProductsByParentCategory,
+    addCategory, fetchAllCategories, fetchSubCategories, fetchSubCategoriesWithCounts,
+    fetchCategoryById, fetchCategoryPath, fetchAllProductsByParentCategory,
     fetchCategoryAncestors, fetchStoreProductsByCategory, fetchL3CategorySearch,
     resolveCategoryPathHandler, fetchAllL2Categories
 } from '../controllers/categoryController.js';
@@ -73,6 +73,7 @@ router.get('/categories/l3/search', fetchL3CategorySearch);
  */
 // GET /api/categories/:id/subcategories - Get subcategories of a category
 router.get('/categories/:id/subcategories', fetchSubCategories);
+router.get('/categories/:id/subcategories-with-counts', fetchSubCategoriesWithCounts);
 
 router.get('/categories/:id/ancestors', fetchCategoryAncestors);
 router.get('/categories/:id/store-products', fetchStoreProductsByCategory);

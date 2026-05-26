@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { createCategory, getTopLevelCategories, getSubCategories, getCategoryById, getCategoryPath, getCategoryAncestors, getStoreProductsByCategoryAndChain, getAllProductsByParentCategory, searchL3CategoriesByName, resolveCategoryByPath, getAllL2Categories } from '../models/categoryModel.js';
+import { createCategory, getTopLevelCategories, getSubCategories, getSubCategoriesWithProductCounts, getCategoryById, getCategoryPath, getCategoryAncestors, getStoreProductsByCategoryAndChain, getAllProductsByParentCategory, searchL3CategoriesByName, resolveCategoryByPath, getAllL2Categories } from '../models/categoryModel.js';
 
 export const addCategory = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -37,6 +37,20 @@ export const fetchSubCategories = async (req: Request, res: Response, next: Next
             return;
         }
         res.json(category);
+    } catch (error) {
+        next(error);
+    }
+};
+
+export const fetchSubCategoriesWithCounts = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const id = Number(req.params.id);
+        if (isNaN(id)) {
+            res.status(400).json({ error: 'Invalid category ID' });
+            return;
+        }
+        const rows = await getSubCategoriesWithProductCounts(id, req.locale);
+        res.json(rows);
     } catch (error) {
         next(error);
     }
