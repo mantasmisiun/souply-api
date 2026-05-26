@@ -27,6 +27,65 @@ import { getPresignedUrl } from '../services/storageService.js';
 
 const VERTICAL_PADDING_PCT = 0.08;
 
+/**
+ * GET /api/admin/amounts/:spId/receipt-crop
+ *
+ * Finds a recent receipt that contains the given StoreProduct and serves
+ * a crop of that line. Used for heuristic-driven amount queue items that
+ * don't have a user flag (and therefore no flagReceiptId/flagLineIdx).
+ */
+export const getAmountReceiptCrop = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const spId = Number(req.params.spId);
+        if (!Number.isFinite(spId)) {
+            res.status(400).json({ error: 'spId must be a number' });
+            return;
+        }
+
+        // Fetch up to 10 recent receipts containing this SP. We iterate
+        // to find one that has a `region` field on the matching product line
+        // (older receipts may predate region logging).
+        const [priceRows]: any = await pool.query(
+            `SELECT pr.receiptId, r.parsedData, r.fileType
+               FROM Price pr
+               JOIN Receipt r ON r.id = pr.receiptId
+              WHERE pr.storeProductId = ?
+                AND pr.receiptId IS NOT NULL
+                AND r.parsedData IS NOT NULL
+              ORDER BY pr.date DESC
+              LIMIT 10`,
+            [spId],
+        );
+
+        let resolvedReceiptId: number | null = null;
+        let resolvedLineIdx: number | null = null;
+
+        for (const row of priceRows as any[]) {
+            if (typeof row.fileType === 'string' && row.fileType.includes('pdf')) continue;
+            const pd = typeof row.parsedData === 'string' ? JSON.parse(row.parsedData) : row.parsedData;
+            const products: any[] = pd?.products ?? [];
+            const idx = products.findIndex(
+                (p: any) => Number(p.storeProductId) === spId && p.region,
+            );
+            if (idx !== -1) {
+                resolvedReceiptId = row.receiptId;
+                resolvedLineIdx = idx;
+                break;
+            }
+        }
+
+        if (resolvedReceiptId === null || resolvedLineIdx === null) {
+            res.status(404).json({ error: 'no receipt crop available for this SP' });
+            return;
+        }
+
+        // Delegate to the existing crop handler by injecting resolved params.
+        req.params.receiptId = String(resolvedReceiptId);
+        req.params.lineIdx = String(resolvedLineIdx);
+        return getFlaggedReceiptCrop(req, res, next);
+    } catch (e) { next(e); }
+};
+
 export const getFlaggedReceiptCrop = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const receiptId = Number(req.params.receiptId);

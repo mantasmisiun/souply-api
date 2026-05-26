@@ -29,7 +29,7 @@ import {
     dismissFlag,
     skipFlagCard,
 } from '../controllers/adminFlagController.js';
-import { getFlaggedReceiptCrop } from '../controllers/adminReceiptCropController.js';
+import { getFlaggedReceiptCrop, getAmountReceiptCrop } from '../controllers/adminReceiptCropController.js';
 import {
     adminProductSearch,
     adminCategorySearch,
@@ -54,8 +54,24 @@ import {
     editAdminStoreProduct,
     moveAdminStoreProduct,
 } from '../controllers/adminStoreProductController.js';
+import { getQueueCounts } from '../controllers/adminQueueController.js';
+import {
+    getAdminReceiptList,
+    getAdminReceipt,
+    patchReceiptDate,
+    patchProductName,
+    postConfirmMatch,
+    patchProductUnit,
+    patchProductAmount,
+    patchProductQuantity,
+    postDenyMatch,
+} from '../controllers/adminReceiptsController.js';
+import { requireSuperAdmin } from '../middleware/requireSuperAdmin.js';
 
 const router = Router();
+
+// Unified queue counts — badge numbers for filter chips in the Eilė tab.
+router.get('/admin/queue/counts', requireAdmin, getQueueCounts);
 
 // Existing — user deletion. requireAdmin only; no audit/rate-limit because
 // the action goes through a dedicated service with its own logging.
@@ -94,6 +110,7 @@ router.post('/admin/flags/:flagKey/skip', requireAdmin, adminRateLimit, skipFlag
 // Receipt-line crop image — served on demand. Not rate-limited; pure
 // read, and a single card review can fire multiple if the admin re-pans.
 router.get('/admin/flags/receipts/:receiptId/:lineIdx/crop', requireAdmin, getFlaggedReceiptCrop);
+router.get('/admin/amounts/:spId/receipt-crop', requireAdmin, getAmountReceiptCrop);
 
 // Catalog tab — superadmin-only product operations.
 // requireAdmin gates the outer shell; handlers enforce superadmin role internally.
@@ -120,5 +137,16 @@ router.post('/admin/uncategorised/:productId/skip', requireAdmin, adminRateLimit
 router.get('/admin/uncategorised/:productId/category-suggestions', requireAdmin, getCategorySuggestions);
 router.get('/admin/uncategorised/:productId/source-receipt', requireAdmin, getSourceReceipt);
 router.post('/admin/uncategorised/:productId/split', requireAdmin, adminRateLimit, applySplit);
+
+// Receipts tab — superadmin only.
+router.get('/admin/receipts', requireSuperAdmin, getAdminReceiptList);
+router.get('/admin/receipts/:id', requireSuperAdmin, getAdminReceipt);
+router.patch('/admin/receipts/:id/date', requireSuperAdmin, adminRateLimit, patchReceiptDate);
+router.patch('/admin/receipts/:id/products/:index/name', requireSuperAdmin, adminRateLimit, patchProductName);
+router.post('/admin/receipts/:id/products/:index/confirm-match', requireSuperAdmin, adminRateLimit, postConfirmMatch);
+router.patch('/admin/receipts/:id/products/:index/unit', requireSuperAdmin, adminRateLimit, patchProductUnit);
+router.patch('/admin/receipts/:id/products/:index/amount', requireSuperAdmin, adminRateLimit, patchProductAmount);
+router.patch('/admin/receipts/:id/products/:index/quantity', requireSuperAdmin, adminRateLimit, patchProductQuantity);
+router.post('/admin/receipts/:id/products/:index/deny-match', requireSuperAdmin, adminRateLimit, postDenyMatch);
 
 export default router;
