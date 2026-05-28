@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { createStoreChain, getAllChains } from '../models/storeChainModel.js';
-import { createStore, getAllStores, getStoreById, getStoresByChainId } from '../models/storeModel.js';
+import { createStore, getAllStores, getAllStoresLite, getStoreById, getStoresByChainId } from '../models/storeModel.js';
 import { findBestStoreMatch } from '../utils/addressMatcher.js';
 
 export const addStoreChain = async (req: Request, res: Response, next: NextFunction) => {
@@ -34,6 +34,15 @@ export const addStore = async (req: Request, res: Response, next: NextFunction) 
 export const fetchAllStores = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const stores = await getAllStores();
+        res.json(stores);
+    } catch (error) {
+        next(error);
+    }
+};
+
+export const fetchAllStoresLite = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const stores = await getAllStoresLite();
         res.json(stores);
     } catch (error) {
         next(error);

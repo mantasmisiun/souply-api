@@ -8,12 +8,13 @@ export const createListItem = async (
     quantity: number,
     price: number | null = null,
     customName: string | null = null,
+    isWeighable: boolean = false,
     conn?: Connection
 ) => {
     const db = (conn ?? pool) as any;
     const [result]: any = await db.query(
-        'INSERT INTO ShoppingListItem (listId, productId, storeProductId, quantity, price, customName) VALUES (?, ?, ?, ?, ?, ?)',
-        [listId, productId, storeProductId, quantity, price, customName]
+        'INSERT INTO ShoppingListItem (listId, productId, storeProductId, quantity, price, customName, isWeighable) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [listId, productId, storeProductId, quantity, price, customName, isWeighable ? 1 : 0]
     );
     return result.insertId;
 };
@@ -69,7 +70,7 @@ export const getListItemsByShoppingListId = async (listId: number) => {
                    AND spi.imageUrl IS NOT NULL) AS imageUrls,
                 sp.unit,
                 sp.amount,
-                sp.isWeighable,
+                COALESCE(sli.isWeighable, sp.isWeighable, 0) AS isWeighable,
                 c3.id   AS l3CategoryId,
                 c3.name AS l3CategoryName,
                 c2.id   AS l2CategoryId,

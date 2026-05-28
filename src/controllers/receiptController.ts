@@ -21,6 +21,7 @@ import {
     logFailedReceipt,
     type FailReason,
 } from "../models/failedReceiptLogModel.js";
+import { createUser } from "../models/userModel.js";
 
 export const markSwipesDone = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -142,6 +143,11 @@ export const createReceiptFromOcr = async (req: Request, res: Response, next: Ne
                 return;
             }
         }
+        // Ensure the User row exists before the FK-dependent Receipt insert.
+        // INSERT IGNORE is idempotent, so this is a no-op when the user
+        // already exists. Protects against DB resets where the phone still
+        // has USER_SYNCED_KEY='1' but the user row is gone.
+        await createUser(String(userId));
         // Receipt.storeId is resolved from parsedData later; initial insert can use null
         const storeId = parsedData.header?.storeId ?? null;
         const receiptId = await createReceipt(userId, storeId, filePath || '', fileType || 'image/jpeg');

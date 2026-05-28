@@ -23,20 +23,70 @@ export const getBasketItemById = async (id: number) => {
     return rows[0] || null;
 };
 
-export const getBasketItemsByBasketId = async (basketId: number) => {
+export const getBasketItemsByBasketId = async (basketId: number, userId?: string | null) => {
     const [rows]: any = await pool.query(
-        `SELECT BasketItem.id, BasketItem.basketId, BasketItem.productId,
-                BasketItem.quantity, BasketItem.matchMode,
-                Product.name AS productName,
+        `SELECT bi.id, bi.basketId, bi.productId,
+                bi.quantity, bi.matchMode,
+                p.name AS productName,
+                p.globalScore,
                 (SELECT JSON_ARRAYAGG(spi.imageUrl)
                  FROM StoreProduct spi
-                 WHERE spi.productId = Product.id AND spi.imageUrl IS NOT NULL) AS imageUrls
-         FROM BasketItem
-         JOIN Product ON BasketItem.productId = Product.id
-         WHERE BasketItem.basketId = ?`,
+                 WHERE spi.productId = p.id AND spi.imageUrl IS NOT NULL) AS imageUrls,
+                (SELECT COALESCE(MAX(sp.isWeighable), 0)
+                 FROM StoreProduct sp
+                 WHERE sp.productId = p.id) AS isWeighable
+         FROM BasketItem bi
+         JOIN Product p ON bi.productId = p.id
+         WHERE bi.basketId = ?`,
         [basketId]
     );
-    return rows;
+
+    if (!userId || rows.length === 0) {
+        return rows.map((r: any) => ({ ...r, isCritical: false }));
+    }
+
+    const [userScores]: any = await pool.query(
+        `SELECT productId, score, interactionCount FROM UserProductScore WHERE userId = ?`,
+        [userId]
+    );
+
+    const scoreMap = new Map<number, { score: number; interactionCount: number }>(
+        userScores.map((s: any) => [
+            Number(s.productId),
+            { score: Number(s.score), interactionCount: Number(s.interactionCount) },
+        ])
+    );
+    const allScores: number[] = userScores
+        .map((s: any) => Number(s.score))
+        .sort((a: number, b: number) => a - b);
+    const coldStart = allScores.length < 5;
+
+    let isCriticalFor: (productId: number, globalScore: number) => boolean;
+
+    if (coldStart) {
+        // p80 across all products with a global score (top quintile threshold)
+        const [globalP80Row]: any = await pool.query(
+            `SELECT MIN(globalScore) AS p80
+             FROM (
+                 SELECT globalScore, NTILE(5) OVER (ORDER BY globalScore) AS quintile
+                 FROM Product WHERE globalScore > 0
+             ) t
+             WHERE quintile = 5`
+        );
+        const globalP80 = Number(globalP80Row[0]?.p80 ?? 0);
+        isCriticalFor = (_id: number, globalScore: number) => globalScore >= globalP80;
+    } else {
+        const p80 = allScores[Math.max(0, Math.floor(0.80 * allScores.length) - 1)] ?? 0;
+        isCriticalFor = (productId: number) => {
+            const us = scoreMap.get(productId);
+            return !!us && us.score >= p80 && us.interactionCount >= 3;
+        };
+    }
+
+    return rows.map((r: any) => ({
+        ...r,
+        isCritical: isCriticalFor(Number(r.productId), Number(r.globalScore ?? 0)),
+    }));
 };
 
 export const updateBasketItemQuantity = async (

@@ -75,7 +75,7 @@ export const getStoresByChainId = async (chainId: number) => {
 //For basket price comparison, pull closest stores to user
 export const getClosestStores = async (lat: number, lng: number, limit: number = 10) => {
     const [rows]: any = await pool.query(
-        `SELECT s.*, sc.name as chainName, sc.logoUrl,
+        `SELECT s.*, sc.name as chainName, sc.logoUrl, sc.miniLogoUrl,
             (6371 * ACOS(
                 COS(RADIANS(?)) * COS(RADIANS(latitude)) *
                 COS(RADIANS(longitude) - RADIANS(?)) +
@@ -106,6 +106,44 @@ export interface ClosestChainStore {
     latitude: number;
     longitude: number;
 }
+
+/** Fetch specific stores by ID with haversine distance from a given point.
+ *  Used when the client has pre-filtered the candidate pool by location mode. */
+export const getStoresByIdsWithDistance = async (storeIds: number[], lat: number, lng: number) => {
+    if (!storeIds.length) return [];
+    const [rows]: any = await pool.query(
+        `SELECT s.*, sc.name as chainName, sc.logoUrl, sc.miniLogoUrl,
+            (6371 * ACOS(
+                COS(RADIANS(?)) * COS(RADIANS(s.latitude)) *
+                COS(RADIANS(s.longitude) - RADIANS(?)) +
+                SIN(RADIANS(?)) * SIN(RADIANS(s.latitude))
+            )) AS distance
+         FROM Store s
+         JOIN StoreChain sc ON s.chainId = sc.id
+         WHERE s.id IN (?)
+         ORDER BY distance ASC`,
+        [lat, lng, lat, storeIds]
+    );
+    return rows;
+};
+
+/** Lightweight store list for client-side candidate pool building.
+ *  Returns only the fields needed for location filtering. */
+export const getAllStoresLite = async () => {
+    const [rows]: any = await pool.query(
+        `SELECT s.id, s.chainId, s.name, s.address,
+                CAST(s.latitude AS DECIMAL(18,15)) AS latitude,
+                CAST(s.longitude AS DECIMAL(18,15)) AS longitude,
+                sc.name AS chainName, sc.logoUrl
+         FROM Store s
+         JOIN StoreChain sc ON s.chainId = sc.id`
+    );
+    return rows.map((r: any) => ({
+        ...r,
+        latitude: parseFloat(r.latitude),
+        longitude: parseFloat(r.longitude),
+    }));
+};
 
 export const getClosestStorePerChainToStore = async (anchorStoreId: number): Promise<ClosestChainStore[]> => {
     const [anchorRows]: any = await pool.query(

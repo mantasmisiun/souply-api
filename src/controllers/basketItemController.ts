@@ -56,7 +56,8 @@ export const fetchBasketItemsByBasketId = async (req: Request, res: Response, ne
             res.status(400).json({ error: 'Invalid basket ID' });
             return;
         }
-        const items = await getBasketItemsByBasketId(basketId);
+        const basket = await getBasketById(basketId);
+        const items = await getBasketItemsByBasketId(basketId, basket?.userId ?? null);
         res.json(items);
     } catch (error) {
         next(error);

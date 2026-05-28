@@ -31,6 +31,15 @@ export const getShoppingListByBasketId = async (basketId: number): Promise<any |
     return rows[0] || null;
 };
 
+/** Find an existing list for this basket+store pair — used for split combo duplicate guard. */
+export const getShoppingListByBasketAndStore = async (basketId: number, storeId: number): Promise<any | null> => {
+    const [rows]: any = await pool.query(
+        'SELECT * FROM ShoppingList WHERE basketId = ? AND storeId = ? LIMIT 1',
+        [basketId, storeId]
+    );
+    return rows[0] || null;
+};
+
 export const getShoppingListsByUserId = async (userId: string) => {
     // A user sees a list if they created it OR they're a member of it
     // (from claiming a share QR). Inner JOIN on ShoppingListMember —

@@ -1,4 +1,4 @@
-import { getClosestStores } from '../models/storeModel.js';
+import { getClosestStores, getStoresByIdsWithDistance } from '../models/storeModel.js';
 import { getBasketProductIds } from '../models/basketModel.js';
 import pool from '../config/db.js';
 import { MatchThresholds } from '../config/matchThresholds.js';
@@ -21,6 +21,7 @@ interface StoreResult {
     chainName: string;
     chainId: number;
     chainLogoUrl: string | null;
+    chainMiniLogoUrl: string | null;
     storeAddress: string;
     distance: number;
     total: number;
@@ -65,6 +66,10 @@ export interface CalculateOptions {
      *  been migrated to pass location yet. */
     lat?: number;
     lng?: number;
+    /** When provided, calculate only for these specific stores (candidate pool
+     *  from client-side location filtering). Falls back to 10-closest when
+     *  absent, preserving the existing single-store flow. */
+    storeIds?: number[];
 }
 
 // ---------------------------------------------------------------------------
@@ -233,7 +238,9 @@ export const calculateBasketForStores = async (
     const lat = Number.isFinite(opts.lat) ? (opts.lat as number) : VILNIUS_LAT;
     const lng = Number.isFinite(opts.lng) ? (opts.lng as number) : VILNIUS_LNG;
 
-    const stores = await getClosestStores(lat, lng, 10);
+    const stores = opts.storeIds?.length
+        ? await getStoresByIdsWithDistance(opts.storeIds, lat, lng)
+        : await getClosestStores(lat, lng, 10);
     const basketItems = await getBasketProductIds(basketId);
 
     if (!basketItems.length) return [];
@@ -307,6 +314,7 @@ export const calculateBasketForStores = async (
                 chainName: store.chainName,
                 chainId: store.chainId,
                 chainLogoUrl: store.logoUrl || null,
+                chainMiniLogoUrl: store.miniLogoUrl || null,
                 storeAddress: store.address,
                 distance: parseFloat(store.distance.toFixed(2)),
                 total: Math.round(total * 100) / 100,

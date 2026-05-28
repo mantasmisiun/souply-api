@@ -159,9 +159,13 @@ export const calculateBasket = async (req: Request, res: Response, next: NextFun
         // Service falls back to Vilnius centre if absent.
         const rawLat = Number(req.body?.lat);
         const rawLng = Number(req.body?.lng);
+        const rawStoreIds = req.body?.storeIds;
         const opts = {
             lat: Number.isFinite(rawLat) ? rawLat : undefined,
             lng: Number.isFinite(rawLng) ? rawLng : undefined,
+            storeIds: Array.isArray(rawStoreIds)
+                ? rawStoreIds.map(Number).filter((n: number) => n > 0 && Number.isFinite(n))
+                : undefined,
         };
 
         const { calculateBasketForStores } = await import('../services/basketCalculationService.js');

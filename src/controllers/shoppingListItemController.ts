@@ -5,7 +5,7 @@ import { logInteraction } from '../models/productInteractionModel.js';
 
 export const addListItem = async (req: Request, res: Response, next: NextFunction) => {
     try {
-        const { listId, productId, storeProductId, quantity, price, name } = req.body;
+        const { listId, productId, storeProductId, quantity, price, name, isWeighable } = req.body;
         // productId is OPTIONAL — null is valid for custom/manual items
         // added via the inline quick-add input. Only listId and quantity
         // are truly required.
@@ -34,7 +34,8 @@ export const addListItem = async (req: Request, res: Response, next: NextFunctio
             storeProductId ?? null,
             quantity,
             price ?? null,
-            name ?? null
+            name ?? null,
+            isWeighable === true || isWeighable === 1
         );
         if (productId != null) {
             getListOwnerUserId(listId).then(userId => {

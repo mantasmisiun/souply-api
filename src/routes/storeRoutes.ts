@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { addStoreChain, addStore, fetchAllStores, fetchStoreById, fetchAllChains, fetchStoresByChainId, matchStoreByAddress } from '../controllers/storeController.js';
+import { addStoreChain, addStore, fetchAllStores, fetchAllStoresLite, fetchStoreById, fetchAllChains, fetchStoresByChainId, matchStoreByAddress } from '../controllers/storeController.js';
 
 const router = Router();
 
@@ -110,6 +110,7 @@ router.get('/stores', fetchAllStores);
  *         description: Missing chainId or address
  */
 router.get('/stores/match', matchStoreByAddress);
+router.get('/stores/lite', fetchAllStoresLite);
 
 /**
  * @swagger

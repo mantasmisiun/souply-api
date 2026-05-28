@@ -96,6 +96,12 @@ export function toCanonicalAmount(
     spUnit: string,
     canonical: CanonicalMeta,
 ): number | null {
+    // Fluid-origin SP in a count/vnt canonical: canonicalize() reclassified
+    // this single-size non-weighable product from fluid to vnt. One physical
+    // pack counts as 1 unit regardless of its weight.
+    if (canonical.family === 'count' && canonical.unit === 'vnt' && unitFamily(spUnit) === 'fluid') {
+        return 1;
+    }
     const fam = unitFamily(spUnit);
     if (fam !== canonical.family) return null;
     if (canonical.family === 'fluid') return toFluidBase(spAmount, spUnit);
@@ -226,6 +232,24 @@ export function canonicalize(sps: SpUnitInput[]): CanonicalMeta | null {
         // pick the cheapest combination of SPs regardless of step, so
         // the picker step is purely a UX choice here.
         step = Math.max(step, 0.5);
+    }
+
+    // Single-size non-weighable fluid product (e.g. a 36g tea bag, a 330ml
+    // can with one SP): the kg/l unit is meaningless — users think in packs,
+    // not kilograms. Reclassify to count so the picker shows "1 vnt" instead
+    // of "0.0 kg". Multi-size products and anything weighable keep fluid.
+    if (
+        dominantFamily === 'fluid' &&
+        !inFamilySps.some(sp => !!sp.isWeighable) &&
+        distinctCanonAmounts.size <= 1
+    ) {
+        return {
+            family: 'count',
+            unit: 'vnt',
+            step: 1,
+            inFamilySpIds: new Set(inFamilySps.map(s => s.id)),
+            outlierSpIds,
+        };
     }
 
     return {

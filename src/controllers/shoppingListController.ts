@@ -8,6 +8,7 @@ import {
     updateShoppingListStatus,
     updateShoppingListBasket,
     getShoppingListByBasketId,
+    getShoppingListByBasketAndStore,
     getBasketIdByListId,
     duplicateShoppingList,
 } from '../models/shoppingListModel.js';
@@ -53,10 +54,11 @@ export const addShoppingList = async (req: Request, res: Response, next: NextFun
         // friendly 409 with the existing list id lets the UI route users
         // to the existing list instead of popping a raw error.
         if (basketId) {
-            const existing = await getShoppingListByBasketId(Number(basketId));
+            // Check per (basketId, storeId) — split combos create one list per store.
+            const existing = await getShoppingListByBasketAndStore(Number(basketId), Number(storeId));
             if (existing) {
                 res.status(409).json({
-                    error: 'A shopping list already exists for this basket',
+                    error: 'A shopping list already exists for this basket at this store',
                     listId: existing.id,
                 });
                 return;
