@@ -1,20 +1,23 @@
 # docker-compose for deploying souply-api to OMV.
 #
 # Setup assumptions:
-#   - MySQL + MinIO run in containers on OMV, connected to a shared
-#     docker network (see `backend` below).
-#   - Traefik runs on the Raspberry Pi (separate host). Traefik
-#     reaches this service via LAN IP + port 3000 — NOT via docker
-#     labels (labels only work when Traefik and the service share
-#     a docker host). The pi's Traefik gets a file-provider route
-#     pointing at http://192.168.1.212:3000.
+#   - MariaDB (souply-mariadb) and Redis (souply-redis) run in sibling
+#     containers brought up by /opt/souply/docker-compose.infra.yml.
+#     They join `mysql_net` + `souply_redis_default` respectively.
+#   - MinIO is shared with basket-api on `minio_2_default`. Same bucket
+#     (MINIO_PRODUCT_IMAGES_BUCKET) so existing product photography
+#     stays visible across both stacks during cutover.
+#   - basket-api is still running on host port 3000 → souply-api
+#     binds to 3001 so the two coexist while we cut traffic over.
+#   - Traefik runs on the Raspberry Pi (separate host); reach this
+#     service via LAN IP + port 3001 once api.souply.lt DNS lands.
 #
-# Build + run from /Project/ (NOT souply-api/) so the shared/
+# Build + run from /opt/souply/ (NOT souply-api/) so the shared/
 # sibling folder ends up in the build context:
 #
-#   cd /opt/Project         (or wherever you put the code on OMV)
+#   cd /opt/souply
 #   docker compose -f souply-api/docker-compose.yml build
-#   docker compose -f souply-api/docker-compose.yml up -d
+#   docker compose -f souply-api/docker-compose.yml --env-file souply-api/.env.production up -d
 #   docker compose -f souply-api/docker-compose.yml logs -f
 
 services:
@@ -28,19 +31,16 @@ services:
     env_file:
       - .env.production
 
-    # Bind OMV host port so the Pi's Traefik can reach us at
-    # http://192.168.1.212:3000. Keep the bind on 0.0.0.0 (default);
-    # your home LAN firewall controls who else can hit it.
+    # basket-api owns 3000 — souply-api on 3001 during the parallel
+    # cutover window. Switch back to 3000 only after basket-api is
+    # retired and DNS has fully moved over.
     ports:
-      - "3000:3000"
+      - "3001:3000"
 
     networks:
-      # Docker containers can attach to multiple networks. The API
-      # needs one per backing service it reaches by container name.
-      # Adjust these to match YOUR `docker network ls` output on OMV.
-      - mysql_net
-      - minio_2_default
-      - basket_redis_default
+      - mysql_net              # souply-mariadb reachable as souply-mariadb:3306
+      - minio_2_default        # shared MinIO with basket-api
+      - souply_redis_default   # souply-redis reachable as souply-redis:6379
 
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/docs/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
@@ -51,14 +51,15 @@ services:
 
 networks:
   # All three networks pre-exist on OMV; `external: true` tells
-  # docker-compose not to try to create them. The `name:` must
-  # match `docker network ls` exactly.
+  # docker-compose not to try to create them. The `name:` must match
+  # `docker network ls` exactly. souply_redis_default was created by
+  # docker-compose.infra.yml the first time you brought it up.
   mysql_net:
     external: true
     name: mysql_net
   minio_2_default:
     external: true
     name: minio_2_default
-  basket_redis_default:
+  souply_redis_default:
     external: true
-    name: basket_redis_default
+    name: souply_redis_default
