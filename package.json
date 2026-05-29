@@ -29,6 +29,7 @@
   "dependencies": {
     "bullmq": "^5.73.0",
     "cheerio": "^1.2.0",
+    "cors": "^2.8.6",
     "dotenv": "^17.4.0",
     "express": "^5.2.1",
     "jose": "^6.2.3",
@@ -49,6 +50,7 @@
   },
   "devDependencies": {
     "@types/cheerio": "^0.22.35",
+    "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/jest": "^30.0.0",
     "@types/node": "^25.5.0",

@@ -1,5 +1,6 @@
 import './config/env.js';
 import express from 'express';
+import cors from 'cors';
 import * as path from 'path';
 import pool from './config/db.js';
 import storeRoutes from './routes/storeRoutes.js';
@@ -24,6 +25,7 @@ import geocodeRoutes from './routes/geocodeRoutes.js';
 import parserTestRoutes from './routes/parserTestRoutes.js';
 import adminRoutes from './routes/adminRoutes.js';
 import adminInviteRoutes from './routes/adminInviteRoutes.js';
+import uploadRoutes from './routes/uploadRoutes.js';
 import swaggerUi from 'swagger-ui-express';
 import swaggerSpec from './config/swagger.js';
 import './scrapers/scheduler.js';
@@ -31,6 +33,36 @@ import { refreshDiscountedSummary } from './models/productModel.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Allow-list of origins permitted to talk to this API from a browser.
+// Mobile app + scripts skip preflight; only the web client needs CORS.
+//
+//   - localhost (5173/5174 etc.) — Vite dev server + previews
+//   - 127.0.0.1 variants — same, occasionally used by tooling
+//   - CORS_ORIGINS env var — comma-separated extra origins
+//     (e.g. "https://souply.lt,https://app.souply.lt" in prod)
+//
+// Credentials are enabled because production will send the auth cookie.
+const envOrigins = (process.env.CORS_ORIGINS ?? '')
+    .split(',')
+    .map(o => o.trim())
+    .filter(Boolean);
+const corsAllowList = new Set<string>([
+    'http://localhost:5173',
+    'http://localhost:5174',
+    'http://127.0.0.1:5173',
+    'http://127.0.0.1:5174',
+    ...envOrigins,
+]);
+app.use(cors({
+    origin: (origin, cb) => {
+        // Same-origin requests + non-browser clients (curl, mobile) send
+        // no Origin header → always allow.
+        if (!origin) return cb(null, true);
+        cb(null, corsAllowList.has(origin));
+    },
+    credentials: true,
+}));
 
 app.use(express.json({ limit: '10mb' }));
 app.use(resolveLocale);
@@ -55,6 +87,7 @@ app.use('/api', geocodeRoutes);
 app.use('/api', parserTestRoutes);
 app.use('/api', adminRoutes);
 app.use('/api', adminInviteRoutes);
+app.use('/api', uploadRoutes);
 app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
 // Dev-only: static-serve the PNGs produced by `npm run receipts:stage`

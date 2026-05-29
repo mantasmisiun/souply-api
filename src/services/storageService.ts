@@ -162,6 +162,105 @@ export const getPresignedUploadUrl = async (
     const filePath = `${publicUrlPrefix()}/${BUCKET}/${objectName}`;
     return { uploadUrl, filePath };
 };
+/* ── Template covers ──────────────────────────────────────────────
+ *
+ * Per-creator cover photos for BasketTemplate rows. Souply-web
+ * uploads via POST /api/uploads/template-cover; consumer surfaces
+ * (souply-app basket bookmark, basket-instance icon) read fresh
+ * signed URLs at fetch time so the bucket can stay private.
+ *
+ * Bucket is created lazily on first upload — saves a manual
+ * `mc mb` step in dev, and is a no-op against existing buckets in
+ * prod. 7-day signed GETs are the MinIO max; we refresh on
+ * dashboard load via getTemplateCoverSignedUrl().
+ */
+const TEMPLATE_COVERS_BUCKET = process.env.MINIO_TEMPLATE_COVERS_BUCKET || 'template-covers';
+const TEMPLATE_COVERS_GET_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 days
+
+let ensureTemplateCoversBucketPromise: Promise<void> | null = null;
+
+/** Idempotent lazy `mc mb` — first caller pays the round-trip, the
+ *  rest await the cached promise. Failures bubble up so the caller
+ *  can decide whether to 500 or retry. */
+const ensureTemplateCoversBucket = (): Promise<void> => {
+    if (!ensureTemplateCoversBucketPromise) {
+        ensureTemplateCoversBucketPromise = (async () => {
+            const client = getClient();
+            const exists = await client.bucketExists(TEMPLATE_COVERS_BUCKET).catch(() => false);
+            if (!exists) {
+                await client.makeBucket(TEMPLATE_COVERS_BUCKET, 'us-east-1');
+                console.log('[MinIO] created bucket', TEMPLATE_COVERS_BUCKET);
+            }
+        })().catch((err) => {
+            // Reset so the next caller retries instead of inheriting
+            // the failure (transient MinIO outage, race with manual
+            // bucket creation, etc).
+            ensureTemplateCoversBucketPromise = null;
+            throw err;
+        });
+    }
+    return ensureTemplateCoversBucketPromise;
+};
+
+/**
+ * Upload a processed cover image at a deterministic path. Returns the
+ * storage key (persist this on BasketTemplate) plus a fresh signed
+ * URL the client can render immediately.
+ *
+ * Key format: `template-covers/{userId}/{uuid}.jpg`. userId is part of
+ * the path so a future "list all covers a user owns" sweep stays a
+ * simple prefix list rather than a DB scan.
+ */
+export const uploadTemplateCover = async (
+    userId: string,
+    storageKey: string,
+    body: Buffer,
+    mimeType: string,
+): Promise<{ storageKey: string; url: string; expiresAt: string }> => {
+    await ensureTemplateCoversBucket();
+    const client = getClient();
+    await client.putObject(
+        TEMPLATE_COVERS_BUCKET,
+        storageKey,
+        Readable.from(body),
+        body.length,
+        {
+            'Content-Type': mimeType,
+            // Tag the user on the object metadata so a misplaced key
+            // can still be traced to its owner without a DB lookup.
+            'x-amz-meta-souply-user': userId,
+        },
+    );
+    return getTemplateCoverSignedUrl(storageKey);
+};
+
+/** Mint a fresh presigned GET URL for an existing cover. Web/mobile
+ *  clients call this when a list response's `expiresAt` is past or
+ *  about to expire. */
+export const getTemplateCoverSignedUrl = async (
+    storageKey: string,
+): Promise<{ storageKey: string; url: string; expiresAt: string }> => {
+    await ensureTemplateCoversBucket();
+    const url = await getClient().presignedGetObject(
+        TEMPLATE_COVERS_BUCKET,
+        storageKey,
+        TEMPLATE_COVERS_GET_TTL_SECONDS,
+    );
+    const expiresAt = new Date(Date.now() + TEMPLATE_COVERS_GET_TTL_SECONDS * 1000).toISOString();
+    return { storageKey, url, expiresAt };
+};
+
+/** Delete a cover when a template is removed. Best-effort: a 404 from
+ *  MinIO (object already gone) is swallowed so cascade deletes don't
+ *  fail on partial state. */
+export const deleteTemplateCover = async (storageKey: string): Promise<void> => {
+    try {
+        await getClient().removeObject(TEMPLATE_COVERS_BUCKET, storageKey);
+    } catch (err: any) {
+        if (err?.code !== 'NoSuchKey') throw err;
+    }
+};
+
 const PRODUCT_IMAGES_BUCKET = process.env.MINIO_PRODUCT_IMAGES_BUCKET || 'product-images';
 
 export const getPresignedProductImageUploadUrl = async (
