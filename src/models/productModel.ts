@@ -194,11 +194,15 @@ const BROWSE_SELECT = `
         (SELECT JSON_ARRAYAGG(spi.imageUrl)
          FROM StoreProduct spi
          WHERE spi.productId = p.id AND spi.imageUrl IS NOT NULL) AS imageUrls,
-        (SELECT JSON_ARRAYAGG(JSON_OBJECT('chainId', cl.chainId, 'logoUrl', cl.miniLogoUrl))
-         FROM (SELECT DISTINCT sp2.chainId, sc2.miniLogoUrl
-               FROM StoreProduct sp2
-               JOIN StoreChain sc2 ON sc2.id = sp2.chainId
-               WHERE sp2.productId = p.id) cl) AS chainLogos,
+        -- chainLogos: one {chainId,logoUrl} per distinct chain the product
+        -- is sold in. Written as a correlated subquery inside IN(...) rather
+        -- than a correlated DERIVED TABLE because MariaDB (prod engine) does
+        -- not support outer-column references inside FROM-subqueries; the
+        -- IN(...) form is portable across MySQL 8 and MariaDB 11. StoreChain.id
+        -- is unique so no DISTINCT is needed on the outer aggregate.
+        (SELECT JSON_ARRAYAGG(JSON_OBJECT('chainId', sc2.id, 'logoUrl', sc2.miniLogoUrl))
+         FROM StoreChain sc2
+         WHERE sc2.id IN (SELECT sp2.chainId FROM StoreProduct sp2 WHERE sp2.productId = p.id)) AS chainLogos,
         CAST(MIN(${AMOUNT_NORMALIZED_EXPR}) AS UNSIGNED) as minAmount,
         CAST(MAX(${AMOUNT_NORMALIZED_EXPR}) AS UNSIGNED) as maxAmount,
         'g' as unit,
