@@ -3,6 +3,12 @@ dist/
 .env
 .env.test
 schema.sql
+
+# Transient debug outputs
+swipe-debug.log
+mismatches.csv
+*.log
+*.csv
 # Generated receipt batch outputs
 receipts/_batch_staging/
 receipts/_logs/

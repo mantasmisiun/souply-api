@@ -103,6 +103,28 @@ export const uploadReceiptImage = async (
     return `${publicUrlPrefix()}/${BUCKET}/${objectName}`;
 };
 
+/**
+ * Generic upload at an explicit object key (no auto-timestamp suffix).
+ * Used for avatars (avatars/{userId}.jpg — overwrites on every change)
+ * and branded share QRs (template-qrs/{slug}.png — overwrites on
+ * snapshot refresh). Returns the public URL.
+ */
+export const uploadObject = async (
+    objectKey: string,
+    body: Buffer,
+    mimeType: string,
+): Promise<string> => {
+    const client = getClient();
+    await client.putObject(
+        BUCKET,
+        objectKey,
+        Readable.from(body),
+        body.length,
+        { 'Content-Type': mimeType },
+    );
+    return `${publicUrlPrefix()}/${BUCKET}/${objectKey}`;
+};
+
 const extractObjectKey = (filePathOrKey: string | null | undefined): string | null => {
     if (!filePathOrKey) return null;
     const marker = `/${BUCKET}/`;

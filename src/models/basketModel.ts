@@ -1,12 +1,105 @@
 import pool from '../config/db.js';
 import type { Connection } from 'mysql2/promise';
 
-export const createBasket = async (userId: string) => {
-    const [result]: any = await pool.query(
-        'INSERT INTO Basket (userId) VALUES (?)',
-        [userId]
+export const createBasket = async (userId: string, sourceTemplateId: number | null = null, conn?: Connection) => {
+    const db = (conn ?? pool) as any;
+    const [result]: any = await db.query(
+        'INSERT INTO Basket (userId, sourceTemplateId) VALUES (?, ?)',
+        [userId, sourceTemplateId]
     );
     return result.insertId;
+};
+
+/**
+ * Find the user's most recent non-completed basket that was spawned from
+ * the given template AND is not abandoned. Abandonment is the conjunction
+ * of "never calculated" + "never user-edited" — both flags need to flip
+ * for a basket to count as meaningfully in-progress.
+ *
+ * Returns null when nothing matches; the instantiate endpoint then prunes
+ * any abandoned instance and creates a fresh one.
+ */
+export const findActiveBasketFromTemplate = async (
+    userId: string,
+    templateId: number,
+): Promise<any | null> => {
+    const [rows]: any = await pool.query(
+        `SELECT * FROM Basket
+          WHERE userId = ?
+            AND sourceTemplateId = ?
+            AND status <> 'completed'
+            AND (hasBeenCalculated = 1 OR userEditedAfterCreation = 1)
+          ORDER BY updatedAt DESC
+          LIMIT 1`,
+        [userId, templateId],
+    );
+    return rows[0] ?? null;
+};
+
+/**
+ * Find any abandoned basket(s) the user owns from the given template —
+ * status != completed, never calculated, never edited. These can be
+ * deleted before creating a fresh instance because there's nothing
+ * meaningful to resume.
+ */
+export const findAbandonedBasketsFromTemplate = async (
+    userId: string,
+    templateId: number,
+): Promise<number[]> => {
+    const [rows]: any = await pool.query(
+        `SELECT id FROM Basket
+          WHERE userId = ?
+            AND sourceTemplateId = ?
+            AND status <> 'completed'
+            AND hasBeenCalculated = 0
+            AND userEditedAfterCreation = 0`,
+        [userId, templateId],
+    );
+    return rows.map((r: any) => r.id as number);
+};
+
+/**
+ * Flip the "calculated at least once" flag — called by the calculate
+ * endpoint. Stays 1 even after revert; the flag tracks lifetime fact,
+ * not current status.
+ */
+export const markBasketCalculated = async (id: number, conn?: Connection) => {
+    const db = (conn ?? pool) as any;
+    await db.query(
+        `UPDATE Basket SET hasBeenCalculated = 1 WHERE id = ? AND hasBeenCalculated = 0`,
+        [id],
+    );
+};
+
+/**
+ * Persist the cheapest store's total from the most recent comparison
+ * run. Drives the "nuo €X" line on Krepselis cards for compared
+ * baskets without forcing the list endpoint to re-run the comparison
+ * engine. Pass null to clear (e.g. on revert).
+ */
+export const updateBasketCheapestTotal = async (
+    id: number,
+    cheapest: number | null,
+    conn?: Connection,
+) => {
+    const db = (conn ?? pool) as any;
+    await db.query(
+        `UPDATE Basket SET cheapestTotal = ? WHERE id = ?`,
+        [cheapest, id],
+    );
+};
+
+/**
+ * Flip the "user-edited after creation" flag — called by basket item
+ * add/update/delete. The guard `WHERE userEditedAfterCreation = 0`
+ * keeps repeated edits as cheap no-op writes.
+ */
+export const markBasketUserEdited = async (id: number, conn?: Connection) => {
+    const db = (conn ?? pool) as any;
+    await db.query(
+        `UPDATE Basket SET userEditedAfterCreation = 1 WHERE id = ? AND userEditedAfterCreation = 0`,
+        [id],
+    );
 };
 
 /**
@@ -29,8 +122,20 @@ export const getUserDraftBasketId = async (userId: string): Promise<number | nul
 };
 
 export const getBasketsByUserId = async (userId: string) => {
+    // Pull the selected-store total for inProgress / completed baskets so
+    // the Krepselis card can show what the user actually spent at their
+    // chosen shop. `cheapestTotal` is the persisted result of the most
+    // recent comparison run — drives the "nuo €X" line on compared
+    // baskets. Both are correlated subqueries / direct columns to keep
+    // the GROUP BY trivial.
     const [rows]: any = await pool.query(
-        `SELECT Basket.*, COUNT(BasketItem.id) as itemCount
+        `SELECT Basket.*,
+                COUNT(BasketItem.id) as itemCount,
+                (SELECT ROUND(SUM(sli.price * sli.quantity), 2)
+                   FROM ShoppingList sl
+                   JOIN ShoppingListItem sli ON sli.listId = sl.id
+                  WHERE sl.basketId = Basket.id
+                    AND sli.price IS NOT NULL) AS selectedStoreTotal
          FROM Basket
          LEFT JOIN BasketItem ON Basket.id = BasketItem.basketId
          WHERE Basket.userId = ?

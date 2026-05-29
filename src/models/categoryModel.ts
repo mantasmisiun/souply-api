@@ -1,5 +1,6 @@
 import pool from '../config/db.js';
 import { localizedCategoryNameSql, type Locale } from '../middleware/locale.js';
+import { buildFuzzyNameClause } from '../utils/fuzzyNameClause.js';
 
 /**
  * Locale-aware category model.
@@ -291,12 +292,14 @@ export const getStoreProductsByCategoryAndChain = async (
 
 export const searchL3CategoriesByName = async (query: string, locale: Locale = 'lt') => {
     // Search on the canonical LT name AND the translated name so users
-    // typing in either language find their category. The autocomplete
-    // is short-lived UI, so two LIKEs is fine.
+    // typing in either language find their category. Uses the shared
+    // fuzzy clause builder so the autocomplete tolerates dropped
+    // diacritics and skipped words the same way every other search does.
     const tr3 = localizedCategoryNameSql(locale, { categoryAlias: 'c3', translationAlias: 'ct3' });
     const tr2 = localizedCategoryNameSql(locale, { categoryAlias: 'c2', translationAlias: 'ct2' });
     const tr1 = localizedCategoryNameSql(locale, { categoryAlias: 'c1', translationAlias: 'ct1' });
-    const like = `%${query}%`;
+    const fuzzyLt = buildFuzzyNameClause(query, 'c3.name');
+    const fuzzyTr = buildFuzzyNameClause(query, 'ct3.name');
     const [rows]: any = await pool.query(
         `SELECT c3.id,
                 ${tr3.nameSql} AS name,
@@ -310,11 +313,11 @@ export const searchL3CategoriesByName = async (query: string, locale: Locale = '
          ${tr3.joinSql}
          ${tr2.joinSql}
          ${tr1.joinSql}
-         WHERE (c3.name LIKE ? OR ct3.name LIKE ?)
+         WHERE ((${fuzzyLt.sql}) OR (${fuzzyTr.sql}))
            AND c3.isHidden = 0 AND c2.isHidden = 0 AND c1.isHidden = 0
          ORDER BY name
          LIMIT 20`,
-        [tr3.localeParam, tr2.localeParam, tr1.localeParam, like, like],
+        [tr3.localeParam, tr2.localeParam, tr1.localeParam, ...fuzzyLt.params, ...fuzzyTr.params],
     );
 
     return rows.map((r: any) => ({

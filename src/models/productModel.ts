@@ -1,5 +1,6 @@
 import pool from '../config/db.js';
 import { nameSimilarity } from '../utils/productNameNormalize.js';
+import { buildFuzzyNameClause } from '../utils/fuzzyNameClause.js';
 import {
     loadCanonicalsForProducts,
     attachCanonicalFields,
@@ -67,15 +68,16 @@ const PRODUCT_WITH_IMAGES_SELECT = `
 `;
 
 export const searchProduct = async (query: string) => {
+    const fuzzy = buildFuzzyNameClause(query, 'p.name');
     const [products]: any = await pool.query(
         `${BROWSE_SELECT}
          JOIN Category cat ON cat.id = p.categoryId AND cat.name NOT LIKE 'Nepriskirt%'
-         WHERE p.name LIKE ?
+         WHERE ${fuzzy.sql}
            AND p.mergedIntoId IS NULL
          GROUP BY p.id
          ORDER BY p.globalScore DESC
          LIMIT 50`,
-        [`%${query}%`]
+        fuzzy.params,
     );
     if (products.length === 0) return [];
     const categoryIds = [...new Set((products as any[]).map((p: any) => p.categoryId).filter(Boolean))];
@@ -123,6 +125,7 @@ export const searchProductsForAdmin = async (
 ) => {
     const trimmed = query.trim();
     if (trimmed.length === 0) return [];
+    const fuzzy = buildFuzzyNameClause(trimmed, 'p.name');
     const [rows]: any = await pool.query(
         `SELECT p.id,
                 p.name,
@@ -131,10 +134,10 @@ export const searchProductsForAdmin = async (
            FROM Product p
            LEFT JOIN Category c ON c.id = p.categoryId
            LEFT JOIN CategoryTranslation ct ON ct.categoryId = c.id AND ct.locale = ?
-          WHERE p.name LIKE ?
+          WHERE ${fuzzy.sql}
           ORDER BY p.globalScore DESC, p.id ASC
           LIMIT ?`,
-        [locale, `%${trimmed}%`, limit],
+        [locale, ...fuzzy.params, limit],
     );
     return rows.map((r: any) => ({
         id: Number(r.id),
@@ -447,8 +450,9 @@ export const getDiscountedProducts = async (opts: {
         params.push(opts.l2CategoryId);
     }
     if (opts.search) {
-        conditions.push('name LIKE ?');
-        params.push(`%${opts.search}%`);
+        const fuzzy = buildFuzzyNameClause(opts.search, 'name');
+        conditions.push(`(${fuzzy.sql})`);
+        params.push(...fuzzy.params);
     }
 
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';

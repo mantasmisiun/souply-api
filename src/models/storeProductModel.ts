@@ -1,5 +1,6 @@
 import pool from '../config/db.js';
 import { resolveEffectiveProductId } from '../services/storeProductMergeService.js';
+import { buildFuzzyNameClause } from '../utils/fuzzyNameClause.js';
 import type { Locale } from '../middleware/locale.js';
 
 type Connection = typeof pool | any;
@@ -136,13 +137,14 @@ export const getStoreProductByProductAndChain = async (productId: number, chainI
 };
 
 export const searchStoreProductsByChain = async (name: string, chainId: number) => {
+    const fuzzy = buildFuzzyNameClause(name, 'sp.storeProductName');
     const [rows]: any = await pool.query(
         `SELECT sp.*
          FROM StoreProduct sp
          WHERE sp.chainId = ?
-         AND sp.storeProductName LIKE ?
+         AND ${fuzzy.sql}
          LIMIT 5`,
-        [chainId, `%${name}%`]
+        [chainId, ...fuzzy.params],
     );
     return rows;
 };
@@ -275,8 +277,9 @@ export const searchUnifiedProductsByChain = async (
     const localParams: any[] = [chainId];
 
     if (hasTerm) {
-        localWhere.push('sp.storeProductName LIKE ?');
-        localParams.push(`%${term}%`);
+        const fuzzy = buildFuzzyNameClause(term, 'sp.storeProductName');
+        localWhere.push(`(${fuzzy.sql})`);
+        localParams.push(...fuzzy.params);
     }
     if (hasCategory) {
         localWhere.push(`(
@@ -320,8 +323,9 @@ export const searchUnifiedProductsByChain = async (
     const otherParams: any[] = [chainId, chainId];
 
     if (hasTerm) {
-        otherWhere.push('p.name LIKE ?');
-        otherParams.push(`%${term}%`);
+        const fuzzy = buildFuzzyNameClause(term, 'p.name');
+        otherWhere.push(`(${fuzzy.sql})`);
+        otherParams.push(...fuzzy.params);
     }
     if (hasCategory) {
         otherWhere.push(`(

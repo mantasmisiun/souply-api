@@ -15,7 +15,7 @@ const NEPRISKIRTA_CATEGORY_ID = MatchThresholds.nepriskirtaCategoryId;
 
 type MatchMode = 'sku' | 'base';
 
-interface StoreResult {
+export interface StoreResult {
     storeId: number;
     storeName: string;
     chainName: string;
@@ -70,6 +70,10 @@ export interface CalculateOptions {
      *  from client-side location filtering). Falls back to 10-closest when
      *  absent, preserving the existing single-store flow. */
     storeIds?: number[];
+    /** When provided, skip the `Basket` table read and price these items
+     *  directly. Used by the šablonai share-snapshot pipeline so a virtual
+     *  template can be priced without first persisting a temp basket. */
+    items?: Array<{ productId: number; quantity: number; matchMode?: 'sku' | 'base'; name?: string }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -241,7 +245,16 @@ export const calculateBasketForStores = async (
     const stores = opts.storeIds?.length
         ? await getStoresByIdsWithDistance(opts.storeIds, lat, lng)
         : await getClosestStores(lat, lng, 10);
-    const basketItems = await getBasketProductIds(basketId);
+    // Allow callers (e.g. template share-snapshot) to bypass the
+    // Basket-table read and price a virtual item list directly.
+    const basketItems = opts.items
+        ? opts.items.map(it => ({
+              productId: Number(it.productId),
+              quantity: Number(it.quantity),
+              matchMode: it.matchMode ?? 'sku',
+              name: it.name ?? '',
+          }))
+        : await getBasketProductIds(basketId);
 
     if (!basketItems.length) return [];
 

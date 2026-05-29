@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { createBasket, getBasketsByUserId, getBasketById, updateBasketUpdatedAt, updateBasketStatus, updateBasketSavedAmount, deleteBasket, updateBasketName, getUserDraftBasketId } from '../models/basketModel.js';
+import { createBasket, getBasketsByUserId, getBasketById, updateBasketUpdatedAt, updateBasketStatus, updateBasketSavedAmount, deleteBasket, updateBasketName, getUserDraftBasketId, markBasketCalculated, updateBasketCheapestTotal } from '../models/basketModel.js';
 
 export const addBasket = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -171,6 +171,22 @@ export const calculateBasket = async (req: Request, res: Response, next: NextFun
         const { calculateBasketForStores } = await import('../services/basketCalculationService.js');
         const results = await calculateBasketForStores(id, opts);
         await updateBasketStatus(id, 'compared');
+        // Lifetime fact: this basket has been through the comparison engine
+        // at least once. Drives the abandonment-detection query used by
+        // the template instantiate endpoint and the daily cleanup cron.
+        await markBasketCalculated(id);
+        // Persist the cheapest store's total so the Krepselis card can
+        // show "nuo €X" for compared baskets without re-running the
+        // comparison engine on every list load. Drops missing-items
+        // stores first (they're not actionable), then picks the lowest
+        // total — matches what the client's results screen highlights.
+        const cheapest = (results as any[])
+            .filter(r => r && Array.isArray(r.missingItemNames) && r.missingItemNames.length === 0 && Number.isFinite(Number(r.total)))
+            .reduce<number | null>((acc, r) => {
+                const t = Number(r.total);
+                return acc == null || t < acc ? t : acc;
+            }, null);
+        await updateBasketCheapestTotal(id, cheapest != null ? Number(cheapest.toFixed(2)) : null);
         res.json(results);
     } catch (error) {
         next(error);

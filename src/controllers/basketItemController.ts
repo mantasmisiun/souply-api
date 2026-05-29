@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { createBasketItem, getBasketItemById, getBasketItemsByBasketId, updateBasketItemQuantity, deleteBasketItem, getBasketItemByBasketAndProduct, convertBasketItemsMode } from '../models/basketItemModel.js';
 import { getProductById } from '../models/productModel.js';
-import { getBasketById, updateBasketUpdatedAt } from '../models/basketModel.js';
+import { getBasketById, updateBasketUpdatedAt, markBasketUserEdited } from '../models/basketModel.js';
 import { logInteraction } from '../models/productInteractionModel.js';
 
 export const addBasketItem = async (req: Request, res: Response, next: NextFunction) => {
@@ -42,6 +42,9 @@ export const addBasketItem = async (req: Request, res: Response, next: NextFunct
 
         const id = await createBasketItem(basketId, productId, quantity, resolvedMatchMode);
         await updateBasketUpdatedAt(basketId);
+        // Flip the abandonment flag — once a user has added even one item,
+        // the basket is no longer "untouched template instance".
+        await markBasketUserEdited(basketId);
         logInteraction(basket.userId, productId, 'basket_add').catch(() => {});
         res.status(201).json({ id, basketId, productId, quantity, matchMode: resolvedMatchMode });
     } catch (error) {
@@ -93,6 +96,7 @@ export const updateBasketItem = async (req: Request, res: Response, next: NextFu
 
         await updateBasketItemQuantity(id, quantity);
         await updateBasketUpdatedAt(basketItem.basketId);
+        await markBasketUserEdited(basketItem.basketId);
         res.json({ id, quantity });
     } catch (error) {
         next(error);
@@ -109,7 +113,10 @@ export const removeBasketItem = async (req: Request, res: Response, next: NextFu
         // Look up the row before deleting so we know which basket to bump.
         const basketItem = await getBasketItemById(id);
         await deleteBasketItem(id);
-        if (basketItem) await updateBasketUpdatedAt(basketItem.basketId);
+        if (basketItem) {
+            await updateBasketUpdatedAt(basketItem.basketId);
+            await markBasketUserEdited(basketItem.basketId);
+        }
         res.status(204).send();
     } catch (error) {
         next(error);

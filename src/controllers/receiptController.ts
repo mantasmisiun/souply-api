@@ -17,6 +17,7 @@ import { getPresignedUrl } from "../services/storageService.js";
 import { persistReceiptPrices } from '../services/receiptSaveService.js';
 import { getReceiptComparison } from '../services/receiptComparisonService.js';
 import { hydrateReceiptCategoriesIfNeeded } from '../services/receiptHydrationService.js';
+import { generateDefaultTemplate } from '../services/defaultTemplateService.js';
 import {
     logFailedReceipt,
     type FailReason,
@@ -177,6 +178,14 @@ export const createReceiptFromOcr = async (req: Request, res: Response, next: Ne
                 })),
             }, true);
             res.status(201).json({ id: receiptId, ...result });
+            // Fire-and-forget default-template regeneration. Runs after the
+            // response has been sent so client-perceived latency is unaffected.
+            // No-ops when the user doesn't qualify (< 3 receipts / < 2 chains)
+            // or already has an autoUpdate=off default template — see
+            // generateDefaultTemplate() for the full guard chain.
+            generateDefaultTemplate(String(userId)).catch(e =>
+                console.warn('[defaultTemplate] generation failed:', e?.message),
+            );
         } catch (err: any) {
             if (err?.code === 'ER_DUP_ENTRY' && /unique_receipt/i.test(String(err?.sqlMessage ?? ''))) {
                 // Best-effort cleanup of the orphaned Receipt row. Non-fatal
