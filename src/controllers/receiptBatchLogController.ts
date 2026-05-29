@@ -8,7 +8,7 @@
  *   POST /api/receipts/batch-log          → process one receipt
  *   POST /api/receipts/batch-log/finalize → assemble _report.md
  *
- * Logs land under basket-api/receipts/_logs/<chain>/<filename>/ so a
+ * Logs land under souply-api/receipts/_logs/<chain>/<filename>/ so a
  * developer can grep them locally when a user reports "receipt X,
  * product Y is wrong".
  */

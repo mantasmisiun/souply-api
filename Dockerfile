@@ -1,12 +1,12 @@
 # syntax=docker/dockerfile:1
 #
-# Basket-API container. Build context MUST be the parent /Project/
-# directory because the TypeScript build needs both basket-api/ AND
+# Souply-API container. Build context MUST be the parent /Project/
+# directory because the TypeScript build needs both souply-api/ AND
 # shared/ (which lives as a sibling, referenced via `../shared` in
 # tsconfig.json).
 #
 # Build from /Project/:
-#   docker build -f basket-api/Dockerfile -t basket-api:latest .
+#   docker build -f souply-api/Dockerfile -t souply-api:latest .
 #
 # Multi-stage: builder compiles TS → runtime stage copies only the
 # compiled JS + prod node_modules. Keeps the final image under ~300MB.
@@ -17,19 +17,19 @@ WORKDIR /app
 
 # Install dev deps for compilation. Copy package files first so the
 # npm install layer caches independently of source changes.
-COPY basket-api/package*.json ./basket-api/
-WORKDIR /app/basket-api
+COPY souply-api/package*.json ./souply-api/
+WORKDIR /app/souply-api
 RUN npm ci
 
 # Copy the rest of the source (TS + shared parsers).
 WORKDIR /app
-COPY basket-api/tsconfig.json ./basket-api/
-COPY basket-api/src ./basket-api/src
+COPY souply-api/tsconfig.json ./souply-api/
+COPY souply-api/src ./souply-api/src
 COPY shared ./shared
 
 # Compile. outDir=./dist with rootDir=.. means compiled tree lands
-# at /app/basket-api/dist/{basket-api,shared}/...
-WORKDIR /app/basket-api
+# at /app/souply-api/dist/{souply-api,shared}/...
+WORKDIR /app/souply-api
 RUN npm run build
 
 # ─── Stage 2: runtime ───────────────────────────────────────────
@@ -49,7 +49,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Prod deps only (playwright itself is a prod dep — scrapers need it).
-COPY basket-api/package*.json ./
+COPY souply-api/package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
 # Download Chromium + all required system libraries into the image.
@@ -57,12 +57,12 @@ RUN npm ci --omit=dev && npm cache clean --force
 RUN npx playwright install chromium --with-deps
 
 # Compiled output + static assets (email logo, etc.)
-COPY --from=builder /app/basket-api/dist ./dist
-COPY basket-api/assets ./dist/basket-api/assets
+COPY --from=builder /app/souply-api/dist ./dist
+COPY souply-api/assets ./dist/souply-api/assets
 
 # Tini as PID 1 so the container handles SIGTERM cleanly on
 # docker stop (Node alone can be stubborn about signals).
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["node", "dist/basket-api/src/index.js"]
+CMD ["node", "dist/souply-api/src/index.js"]
 
 EXPOSE 3000

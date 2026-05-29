@@ -1,9 +1,9 @@
 /**
  * Stage receipt PDFs for the phone-side batch screen:
- *   1. Walks basket-api/receipts/<chain>/*.pdf
+ *   1. Walks souply-api/receipts/<chain>/*.pdf
  *   2. Runs `pdftoppm -r 200 -png` per file → one PNG per page, named
  *      <basename>.png (or <basename>-N.png for multi-page) under
- *      basket-api/receipts/_batch_staging/<chain>/.
+ *      souply-api/receipts/_batch_staging/<chain>/.
  *   3. Writes a manifest.json alongside so the phone knows what to
  *      iterate.
  *
@@ -39,11 +39,11 @@ const REPO_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), 
 // shared/receipts/<chain>/<name>.pdf, alongside their hand-annotated
 // .truth.json siblings. This is where the parser test fixtures live.
 const RECEIPTS_ROOT = path.join(REPO_ROOT, 'shared', 'receipts');
-// Staging output (PNGs + manifest) stays inside basket-api so the
+// Staging output (PNGs + manifest) stays inside souply-api so the
 // existing /receipts-batch static route in src/index.ts keeps
 // serving it without configuration changes. _batch_staging is
 // regeneratable disposable output — no need to live in /shared.
-const STAGING_ROOT = path.join(REPO_ROOT, 'basket-api', 'receipts', '_batch_staging');
+const STAGING_ROOT = path.join(REPO_ROOT, 'souply-api', 'receipts', '_batch_staging');
 
 interface CliArgs {
     chains: ChainName[];

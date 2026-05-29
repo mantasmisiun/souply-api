@@ -1,4 +1,4 @@
-# docker-compose for deploying basket-api to OMV.
+# docker-compose for deploying souply-api to OMV.
 #
 # Setup assumptions:
 #   - MySQL + MinIO run in containers on OMV, connected to a shared
@@ -9,20 +9,20 @@
 #     a docker host). The pi's Traefik gets a file-provider route
 #     pointing at http://192.168.1.212:3000.
 #
-# Build + run from /Project/ (NOT basket-api/) so the shared/
+# Build + run from /Project/ (NOT souply-api/) so the shared/
 # sibling folder ends up in the build context:
 #
 #   cd /opt/Project         (or wherever you put the code on OMV)
-#   docker compose -f basket-api/docker-compose.yml build
-#   docker compose -f basket-api/docker-compose.yml up -d
-#   docker compose -f basket-api/docker-compose.yml logs -f
+#   docker compose -f souply-api/docker-compose.yml build
+#   docker compose -f souply-api/docker-compose.yml up -d
+#   docker compose -f souply-api/docker-compose.yml logs -f
 
 services:
-  basket-api:
+  souply-api:
     build:
       context: ..
-      dockerfile: basket-api/Dockerfile
-    container_name: basket-api
+      dockerfile: souply-api/Dockerfile
+    container_name: souply-api
     restart: unless-stopped
 
     env_file:

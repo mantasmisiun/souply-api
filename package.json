@@ -1,12 +1,12 @@
 {
-  "name": "basket-api",
+  "name": "souply-api",
   "version": "1.0.0",
   "type": "module",
   "main": "index.js",
   "scripts": {
     "dev": "nodemon --exec tsx src/index.ts --ignore receipts/",
     "build": "tsc",
-    "start": "node dist/basket-api/src/index.js",
+    "start": "node dist/souply-api/src/index.js",
     "receipts:batch": "tsx src/scripts/receiptBatch/importReceiptBatch.ts",
     "receipts:stage": "tsx src/scripts/receiptBatch/stageReceiptsOnDevice.ts",
     "receipts:cleanup": "tsx src/scripts/receiptBatch/cleanupTestReceipts.ts",

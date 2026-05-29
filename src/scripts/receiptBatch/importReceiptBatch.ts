@@ -16,7 +16,7 @@
  *   node --loader ts-node/esm src/scripts/receiptBatch/importReceiptBatch.ts \
  *        --chain maxima --persist --user 5a857b48-a91d-4370-b58a-7f71003fe3a5
  *
- * Logs land at Project/basket-api/receipts/_logs/<chain>/<filename>/ and
+ * Logs land at Project/souply-api/receipts/_logs/<chain>/<filename>/ and
  * a top-level _report.md summarising issue counts across the run.
  *
  * Only processes text-extractable PDFs. Image-only PDFs need the phone
@@ -52,7 +52,7 @@ const CHAIN_META: Record<ChainName, { chainId: number; chainDisplay: string }> =
 };
 
 const REPO_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../../../..');
-const RECEIPTS_ROOT = path.join(REPO_ROOT, 'basket-api', 'receipts');
+const RECEIPTS_ROOT = path.join(REPO_ROOT, 'souply-api', 'receipts');
 const LOGS_ROOT = path.join(RECEIPTS_ROOT, '_logs');
 
 const parseArgs = (argv: string[]): CliArgs => {

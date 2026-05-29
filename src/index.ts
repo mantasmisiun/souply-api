@@ -63,11 +63,11 @@ app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 // silently restrict direct reads of /Android/data/<pkg>/ in FUSE even
 // though the files land physically. HTTP avoids the whole dance.
 // Resolve relative to process.cwd() rather than import.meta.url —
-// cwd is `basket-api/` under both `npm run dev` (ts-node) and
+// cwd is `souply-api/` under both `npm run dev` (ts-node) and
 // `npm start` (compiled dist/), whereas import.meta.url lands in
 // different spots under those two setups because of our wider
-// rootDir. Concretely: dev → /…/basket-api/src/index.ts; prod →
-// /…/basket-api/dist/basket-api/src/index.js — different `../`
+// rootDir. Concretely: dev → /…/souply-api/src/index.ts; prod →
+// /…/souply-api/dist/souply-api/src/index.js — different `../`
 // counts. cwd sidesteps that.
 const ASSETS_DIR = path.resolve(process.cwd(), 'assets');
 app.use('/assets', express.static(ASSETS_DIR));
@@ -80,7 +80,7 @@ app.use('/receipts-batch', express.static(RECEIPTS_STAGING_DIR, { fallthrough: f
 // The phone's parser-test screen fetches these per receipt to score
 // V1 vs V2 against ground truth. Same cwd-anchored path strategy as
 // RECEIPTS_STAGING_DIR above — ../shared resolves to the repo's
-// cross-stack module dir from basket-api/.
+// cross-stack module dir from souply-api/.
 const TRUTH_DIR = path.resolve(process.cwd(), '../shared/receipts');
 app.use('/receipts-truth', express.static(TRUTH_DIR, { fallthrough: false }));
 

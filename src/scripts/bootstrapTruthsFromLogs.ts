@@ -6,7 +6,7 @@
  *   1. Run the batch test on Android (the reliable baseline) with
  *      "Persist" off (we just want the diagnostic logs).
  *      Each receipt POSTs to /api/receipts/batch-log which writes
- *      basket-api/receipts/_logs/<chain>/<pdf>/parsedData.json.
+ *      souply-api/receipts/_logs/<chain>/<pdf>/parsedData.json.
  *   2. Run this script. For every <chain>/<pdf>/parsedData.json
  *      without a corresponding shared/receipts/<chain>/<base>.truth.json
  *      it writes a TruthFile derived from the parsed output with
