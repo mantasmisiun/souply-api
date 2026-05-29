@@ -13,6 +13,37 @@ const transporter = nodemailer.createTransport({
     },
 });
 
+/**
+ * Notify the team when a visitor signs up for the beta from the landing
+ * page. Goes to BETA_NOTIFY_EMAIL (falls back to the SMTP user — i.e.
+ * yourself). Plain text by design: it's an internal ops ping, not a
+ * branded user-facing mail. The actual invite is still sent manually.
+ */
+export async function sendBetaSignupNotification(opts: {
+    name: string;
+    email: string;
+    platform: string;
+}): Promise<void> {
+    const from = process.env.SMTP_FROM ?? process.env.SMTP_USER ?? 'noreply@souply.app';
+    const to = process.env.BETA_NOTIFY_EMAIL ?? process.env.SMTP_USER;
+    if (!to) {
+        console.warn('[email] no BETA_NOTIFY_EMAIL / SMTP_USER set; skipping beta notification');
+        return;
+    }
+    await transporter.sendMail({
+        from,
+        to,
+        subject: `Souply beta signup — ${opts.name} (${opts.platform})`,
+        text: [
+            'New beta signup from the landing page:',
+            '',
+            `Name:     ${opts.name}`,
+            `Email:    ${opts.email}`,
+            `Platform: ${opts.platform}`,
+        ].join('\n'),
+    });
+}
+
 export async function sendAdminVerificationEmail(opts: {
     to: string;
     firstName: string;

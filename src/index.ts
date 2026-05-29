@@ -26,6 +26,7 @@ import parserTestRoutes from './routes/parserTestRoutes.js';
 import adminRoutes from './routes/adminRoutes.js';
 import adminInviteRoutes from './routes/adminInviteRoutes.js';
 import uploadRoutes from './routes/uploadRoutes.js';
+import betaSignupRoutes from './routes/betaSignupRoutes.js';
 import swaggerUi from 'swagger-ui-express';
 import swaggerSpec from './config/swagger.js';
 import './scrapers/scheduler.js';
@@ -88,6 +89,7 @@ app.use('/api', parserTestRoutes);
 app.use('/api', adminRoutes);
 app.use('/api', adminInviteRoutes);
 app.use('/api', uploadRoutes);
+app.use('/api', betaSignupRoutes);
 app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
 // Dev-only: static-serve the PNGs produced by `npm run receipts:stage`
