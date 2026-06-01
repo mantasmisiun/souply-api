@@ -12,36 +12,62 @@
 #   - Traefik runs on the Raspberry Pi (separate host); reach this
 #     service via LAN IP + port 3001 once api.souply.lt DNS lands.
 #
-# Build + run from /opt/souply/ (NOT souply-api/) so the shared/
-# sibling folder ends up in the build context:
+# TWO environments off ONE image (staging runs the exact artifact prod
+# runs — the point of staging):
 #
+#   souply-api          PROD     → :3001 → souply_production  (api.souply.lt)        env: .env.production
+#   souply-api-staging  STAGING  → :3002 → souply_test        (api.souply.manofoto)  env: .env.staging
+#
+# Only the PROD service has a `build:`; staging reuses the same
+# `souply-api:latest` image. So:
 #   cd /opt/souply
-#   docker compose -f souply-api/docker-compose.yml build
-#   docker compose -f souply-api/docker-compose.yml --env-file souply-api/.env.production up -d
+#   docker compose -f souply-api/docker-compose.yml build           # builds souply-api:latest
+#   docker compose -f souply-api/docker-compose.yml up -d           # starts BOTH (prod + staging)
 #   docker compose -f souply-api/docker-compose.yml logs -f
+#
+# Build context is /opt/souply (NOT souply-api/) so the shared/ sibling
+# folder is in the build context.
 
 services:
+  # ── PRODUCTION ─────────────────────────────────────────────────
   souply-api:
     build:
       context: ..
       dockerfile: souply-api/Dockerfile
+    image: souply-api:latest
     container_name: souply-api
     restart: unless-stopped
-
     env_file:
-      - .env.production
-
-    # basket-api owns 3000 — souply-api on 3001 during the parallel
-    # cutover window. Switch back to 3000 only after basket-api is
-    # retired and DNS has fully moved over.
+      - .env.production         # DB_NAME=souply_production, CORS_ORIGINS=https://souply.lt
     ports:
       - "3001:3000"
-
     networks:
       - mysql_net              # souply-mariadb reachable as souply-mariadb:3306
-      - minio_2_default        # shared MinIO with basket-api
+      - minio_2_default        # shared MinIO
       - souply_redis_default   # souply-redis reachable as souply-redis:6379
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/docs/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
+  # ── STAGING ────────────────────────────────────────────────────
+  # Same image as prod (no build:) so we promote a verified artifact.
+  souply-api-staging:
+    image: souply-api:latest
+    container_name: souply-api-staging
+    restart: unless-stopped
+    env_file:
+      - .env.staging            # DB_NAME=souply_test, CORS_ORIGINS=https://souply.manofoto.dpdns.org
+    ports:
+      - "3002:3000"
+    networks:
+      - mysql_net
+      - minio_2_default
+      - souply_redis_default
+    depends_on:
+      - souply-api              # ensures the image is built before staging starts
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/docs/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
