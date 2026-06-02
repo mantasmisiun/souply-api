@@ -64,29 +64,45 @@ describe('canonicalize — empty / invalid inputs', () => {
     });
 
     it('collects unknown-unit SPs as outliers when there are other valid ones', () => {
+        // Two distinct fluid sizes keep this a fluid canonical (a single-size
+        // fluid SP would reclassify to a vnt pack); the oz row is the outlier.
         const sps: SpUnitInput[] = [
             { id: 1, amount: 1, unit: 'kg' },
-            { id: 2, amount: 1, unit: 'oz' },
+            { id: 2, amount: 2, unit: 'kg' },
+            { id: 3, amount: 1, unit: 'oz' },
         ];
         const meta = canonicalize(sps)!;
         expect(meta.family).toBe('fluid');
-        expect(meta.outlierSpIds).toContain(2);
+        expect(meta.outlierSpIds).toContain(3);
         expect(meta.inFamilySpIds.has(1)).toBe(true);
-        expect(meta.inFamilySpIds.has(2)).toBe(false);
+        expect(meta.inFamilySpIds.has(3)).toBe(false);
     });
 });
 
 describe('canonicalize — fluid family', () => {
-    it('single kg SP → canonical kg', () => {
+    it('single-size non-weighable kg SP → reclassified to a vnt pack', () => {
+        // A lone fixed-size fluid SP is meaningless as "0.0 kg" in the picker;
+        // it is reclassified to "1 vnt" (one pack). Weighable or multi-size
+        // fluid products stay kg/l (covered below).
         const meta = canonicalize([{ id: 1, amount: 1, unit: 'kg' }])!;
-        expect(meta.family).toBe('fluid');
-        expect(meta.unit).toBe('kg');
+        expect(meta.family).toBe('count');
+        expect(meta.unit).toBe('vnt');
         expect(meta.step).toBe(1);
         expect(meta.outlierSpIds).toEqual([]);
     });
 
-    it('single l SP → canonical l', () => {
-        const meta = canonicalize([{ id: 1, amount: 0.5, unit: 'l' }])!;
+    it('weighable single kg SP stays fluid kg', () => {
+        const meta = canonicalize([{ id: 1, amount: 1, unit: 'kg', isWeighable: true }])!;
+        expect(meta.family).toBe('fluid');
+        expect(meta.unit).toBe('kg');
+    });
+
+    it('multi-size l SPs → canonical l', () => {
+        const meta = canonicalize([
+            { id: 1, amount: 0.5, unit: 'l' },
+            { id: 2, amount: 1.5, unit: 'l' },
+        ])!;
+        expect(meta.family).toBe('fluid');
         expect(meta.unit).toBe('l');
         expect(meta.step).toBe(0.5);
     });
@@ -126,10 +142,12 @@ describe('canonicalize — fluid family', () => {
     });
 
     it('tie kg vs l → kg wins', () => {
+        // Distinct sizes keep it fluid (so it is not reclassified to a vnt pack).
         const meta = canonicalize([
             { id: 1, amount: 1, unit: 'kg' },
-            { id: 2, amount: 1, unit: 'l' },
+            { id: 2, amount: 2, unit: 'l' },
         ])!;
+        expect(meta.family).toBe('fluid');
         expect(meta.unit).toBe('kg');
     });
 
@@ -236,9 +254,11 @@ describe('canonicalize — mixed family', () => {
     });
 
     it('tie 2 fluid vs 2 count → fluid wins (tie-break)', () => {
+        // Distinct fluid sizes keep the fluid winner from being reclassified
+        // to a vnt pack.
         const meta = canonicalize([
             { id: 1, amount: 1, unit: 'kg' },
-            { id: 2, amount: 1, unit: 'l' },
+            { id: 2, amount: 2, unit: 'l' },
             { id: 3, amount: 1, unit: 'vnt' },
             { id: 4, amount: 1, unit: 'vnt' },
         ])!;
@@ -250,7 +270,13 @@ describe('canonicalize — mixed family', () => {
 
 describe('toCanonicalAmount', () => {
     it('returns null when SP family mismatches canonical family', () => {
-        const meta = canonicalize([{ id: 1, amount: 1, unit: 'kg' }])!;
+        // Multi-size fluid → genuine kg canonical (a single-size SP would
+        // reclassify to a vnt pack, which would change this assertion).
+        const meta = canonicalize([
+            { id: 1, amount: 1, unit: 'kg' },
+            { id: 2, amount: 2, unit: 'kg' },
+        ])!;
+        expect(meta.family).toBe('fluid');
         expect(toCanonicalAmount(1, 'vnt', meta)).toBeNull();
     });
 
@@ -260,7 +286,11 @@ describe('toCanonicalAmount', () => {
     });
 
     it('fluid: converts g/ml correctly into canonical base', () => {
-        const metaKg = canonicalize([{ id: 1, amount: 1, unit: 'kg' }])!;
+        const metaKg = canonicalize([
+            { id: 1, amount: 1, unit: 'kg' },
+            { id: 2, amount: 2, unit: 'kg' },
+        ])!;
+        expect(metaKg.family).toBe('fluid');
         expect(toCanonicalAmount(500, 'g', metaKg)).toBeCloseTo(0.5);
         expect(toCanonicalAmount(500, 'ml', metaKg)).toBeCloseTo(0.5);
         // kg ≈ l per the transitional simplification: an l SP under a kg

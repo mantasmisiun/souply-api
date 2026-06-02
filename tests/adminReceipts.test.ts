@@ -23,6 +23,17 @@ import pool from '../src/config/db.js';
 
 jest.setTimeout(30000);
 
+/**
+ * MariaDB's JSON_EXTRACT returns scalars as JSON text ('null', 'true',
+ * '123', '"foo"') rather than native SQL values, so a cleared field reads
+ * back as the string 'null'. Normalise to native JS for assertions.
+ */
+function jsonScalar(v: any): any {
+    if (v === null || v === undefined) return null;
+    if (typeof v !== 'string') return v;
+    try { return JSON.parse(v); } catch { return v; }
+}
+
 // ── Fixtures ─────────────────────────────────────────────────────────
 
 const SUPER_ADMIN_ID   = 'rcpt-test-super-aaaa-aaaaaaaaaaaa';
@@ -87,7 +98,7 @@ async function cleanup() {
 
 async function resetParsedData() {
     await pool.query(
-        'UPDATE Receipt SET parsedData = CAST(? AS JSON), adminEditedAt = NULL WHERE id = ?',
+        'UPDATE Receipt SET parsedData = ?, adminEditedAt = NULL WHERE id = ?',
         [JSON.stringify(makeInitialParsedData(storeProductId)), receiptId],
     );
     await pool.query(
@@ -136,7 +147,7 @@ beforeAll(async () => {
     const [recRes]: any = await pool.query(
         `INSERT INTO Receipt
              (userId, storeId, filePath, fileType, parsedData, processingStatus, receiptDate)
-         VALUES (?, ?, ?, 'image/jpeg', CAST(? AS JSON), 'completed', ?)`,
+         VALUES (?, ?, ?, 'image/jpeg', ?, 'completed', ?)`,
         [USER_ID, STORE_ID, 'http://x/r.jpg', JSON.stringify(makeInitialParsedData(storeProductId)), '2024-01-15'],
     );
     receiptId = Number(recRes.insertId);
@@ -316,10 +327,11 @@ describe('PATCH /api/admin/receipts/:id/products/:index/name', () => {
             [receiptId],
         );
         expect(row.name).toBe('Pienas 2%');
-        expect(row.spId).toBeNull();
-        expect(row.matchedName).toBeNull();
+        expect(jsonScalar(row.spId)).toBeNull();
+        expect(jsonScalar(row.matchedName)).toBeNull();
         // matchConfirmed should be false/NULL after clearing
-        expect(row.confirmed == null || row.confirmed == 0).toBe(true);
+        const confirmed = jsonScalar(row.confirmed);
+        expect(confirmed == null || confirmed == 0 || confirmed === false).toBe(true);
     });
 
     it('returns candidates array (may be empty for novel names)', async () => {
@@ -366,9 +378,10 @@ describe('POST /api/admin/receipts/:id/products/:index/confirm-match', () => {
              FROM Receipt WHERE id = ?`,
             [receiptId],
         );
-        expect(Number(row.spId)).toBe(otherSpId);
+        expect(Number(jsonScalar(row.spId))).toBe(otherSpId);
         expect(row.matchedName).toBeTruthy();
-        expect(row.confirmed == 1 || row.confirmed === true).toBe(true);
+        const confirmed = jsonScalar(row.confirmed);
+        expect(confirmed === true || confirmed == 1).toBe(true);
     });
 
     it('returns 404 for unknown storeProductId', async () => {
@@ -408,10 +421,11 @@ describe('POST /api/admin/receipts/:id/products/:index/deny-match', () => {
              FROM Receipt WHERE id = ?`,
             [receiptId],
         );
-        expect(row.spId).toBeNull();
-        expect(row.matchedName).toBeNull();
-        expect(row.confidence).toBeNull();
-        expect(row.confirmed == null || row.confirmed == 0).toBe(true);
+        expect(jsonScalar(row.spId)).toBeNull();
+        expect(jsonScalar(row.matchedName)).toBeNull();
+        expect(jsonScalar(row.confidence)).toBeNull();
+        const confirmed = jsonScalar(row.confirmed);
+        expect(confirmed == null || confirmed == 0 || confirmed === false).toBe(true);
     });
 
     it('sets adminEditedAt', async () => {

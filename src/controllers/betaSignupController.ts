@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import pool from '../config/db.js';
-import { sendBetaSignupNotification } from '../services/emailService.js';
+import { sendBetaSignupNotification, sendBetaInviteEmail } from '../services/emailService.js';
 
 const EMAIL_RE = /^\S+@\S+\.\S+$/;
 
@@ -16,10 +16,11 @@ const EMAIL_RE = /^\S+@\S+\.\S+$/;
  */
 export const createBetaSignup = async (req: Request, res: Response, next: NextFunction) => {
     try {
-        const { name, email, platform } = req.body ?? {};
+        const { name, email, platform, lang } = req.body ?? {};
         const cleanName = typeof name === 'string' ? name.trim() : '';
         const cleanEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
         const cleanPlatform = platform === 'android' ? 'android' : 'ios';
+        const cleanLang = lang === 'en' ? 'en' : 'lt';
 
         if (cleanName.length < 2) {
             res.status(400).json({ error: 'Name is required' });
@@ -37,8 +38,14 @@ export const createBetaSignup = async (req: Request, res: Response, next: NextFu
             [cleanName, cleanEmail, cleanPlatform],
         );
 
+        // Internal ops ping (to the team).
         sendBetaSignupNotification({ name: cleanName, email: cleanEmail, platform: cleanPlatform })
             .catch((e) => console.error('[betaSignup] notification email failed:', e?.message));
+
+        // User-facing invite (to the signer). Both are fire-and-forget so a
+        // mail hiccup never fails a signup that's already saved.
+        sendBetaInviteEmail({ to: cleanEmail, name: cleanName, platform: cleanPlatform, lang: cleanLang })
+            .catch((e) => console.error('[betaSignup] invite email failed:', e?.message));
 
         res.status(201).json({ ok: true });
     } catch (e) {

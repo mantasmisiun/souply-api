@@ -8,6 +8,7 @@ jest.unstable_mockModule('../src/config/db.js', () => ({
 const mockGetClosestStores = jest.fn<any>();
 jest.unstable_mockModule('../src/models/storeModel.js', () => ({
     getClosestStores: mockGetClosestStores,
+    getStoresByIdsWithDistance: jest.fn(),
     getStoreById: jest.fn(),
     getClosestStorePerChainToStore: jest.fn(),
 }));

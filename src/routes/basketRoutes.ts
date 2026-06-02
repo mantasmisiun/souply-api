@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { addBasket, fetchBasketsByUserId, fetchBasketById, updateBasket, changeBasketStatus, removeBasket, renameBasket, calculateBasket } from '../controllers/basketController.js';
+import { addBasket, fetchBasketsByUserId, fetchBasketById, updateBasket, changeBasketStatus, removeBasket, renameBasket, calculateBasket, copyBasket } from '../controllers/basketController.js';
 
 const router = Router();
 /**
@@ -145,5 +145,7 @@ router.delete('/baskets/:id', removeBasket);
 router.patch('/baskets/:id/name', renameBasket);
 
 router.post('/baskets/:id/calculate', calculateBasket);
+
+router.post('/baskets/:id/copy', copyBasket);
 
 export default router;

@@ -96,7 +96,7 @@ beforeAll(async () => {
     const [recRes]: any = await pool.query(
         `INSERT INTO Receipt
             (userId, storeId, filePath, fileType, parsedData, processingStatus)
-         VALUES (?, ?, 'http://example.local/split.jpg', 'image/jpeg', CAST(? AS JSON), 'completed')`,
+         VALUES (?, ?, 'http://example.local/split.jpg', 'image/jpeg', ?, 'completed')`,
         [USER_ID, STORE_ID, JSON.stringify(parsedData)],
     );
     receiptId = Number(recRes.insertId);
@@ -203,7 +203,7 @@ describe('POST /api/admin/uncategorised/:productId/split', () => {
             ],
         };
         await pool.query(
-            `UPDATE Receipt SET parsedData = CAST(? AS JSON) WHERE id = ?`,
+            `UPDATE Receipt SET parsedData = ? WHERE id = ?`,
             [JSON.stringify(parsedData), receiptId],
         );
         // Remove any extra Products/SPs created by the resolver (top item).

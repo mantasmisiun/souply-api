@@ -1,0 +1,12 @@
+-- Template "edited" signal (2026-06-02).
+--
+-- `BasketTemplate.updatedAt` is ON UPDATE CURRENT_TIMESTAMP, so it bumps on
+-- EVERY write — visit/use/savings counters, share/snapshot, visibility flips —
+-- which made the "Sukurta → Redaguota" stat fire on shares and visits even
+-- though the creator never edited the content. Worse, editing ITEMS touches a
+-- different table and didn't bump it at all.
+--
+-- `editedAt` is set ONLY on genuine content edits (name, cover, items). The
+-- card/stat shows "Redaguota" (+ this date) when it's non-null, else "Sukurta".
+-- NULL for never-edited templates (the common case after this migration).
+ALTER TABLE BasketTemplate ADD COLUMN editedAt DATETIME NULL;

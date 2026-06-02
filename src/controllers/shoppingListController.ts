@@ -18,6 +18,7 @@ import {
     duplicateListItems,
 } from '../models/shoppingListItemModel.js';
 import { getBasketById, updateBasketStatus } from '../models/basketModel.js';
+import { addCollectiveSavings, incrementTemplateUseCount } from '../models/basketTemplateModel.js';
 import { addShoppingListMember, isShoppingListMember } from '../models/shoppingListMemberModel.js';
 import {
     createShareToken,
@@ -40,7 +41,7 @@ import {
  */
 export const addShoppingList = async (req: Request, res: Response, next: NextFunction) => {
     try {
-        const { userId, storeId, basketId, items } = req.body ?? {};
+        const { userId, storeId, basketId, items, savingsEur } = req.body ?? {};
         if (!userId || !storeId) {
             res.status(400).json({ error: 'User ID and Store ID are required' });
             return;
@@ -53,7 +54,12 @@ export const addShoppingList = async (req: Request, res: Response, next: NextFun
         // Duplicate-per-basket guard. The DB also enforces this, but a
         // friendly 409 with the existing list id lets the UI route users
         // to the existing list instead of popping a raw error.
+        // `firstListForBasket` is captured here (before the insert) so the
+        // template "use" + savings accrue exactly ONCE per basket — split
+        // combos create one list per store, and only the first should count.
+        let firstListForBasket = false;
         if (basketId) {
+            firstListForBasket = !(await getShoppingListByBasketId(Number(basketId)));
             // Check per (basketId, storeId) — split combos create one list per store.
             const existing = await getShoppingListByBasketAndStore(Number(basketId), Number(storeId));
             if (existing) {
@@ -90,6 +96,30 @@ export const addShoppingList = async (req: Request, res: Response, next: NextFun
                 // FK lock on Basket(id) and the UPDATE's row lock on the
                 // same id deadlock across connections.
                 await updateBasketStatus(Number(basketId), 'inProgress', conn);
+
+                // First shopping list for this basket → count the template
+                // "use" (Panaudojimai) and accrue the realised savings
+                // (Padėjai sutaupyti), exactly once per basket. savingsEur =
+                // average of the UNIQUE full-coverage store totals − the chosen
+                // store, computed client-side from the comparison the user saw.
+                if (firstListForBasket) {
+                    const basket = await getBasketById(Number(basketId));
+                    if (basket?.sourceTemplateId) {
+                        const templateId = Number(basket.sourceTemplateId);
+                        await incrementTemplateUseCount(templateId, conn);
+                        const savings = Number(savingsEur);
+                        if (Number.isFinite(savings) && savings > 0) {
+                            // Anti-tamper cap: a realised saving can't exceed the
+                            // basket's own value (Σ chosen-store item prices).
+                            const basketValue = Array.isArray(items)
+                                ? items.reduce((s: number, it: any) =>
+                                    s + (Number(it.price) || 0) * (Number(it.quantity) || 0), 0)
+                                : 0;
+                            const capped = basketValue > 0 ? Math.min(savings, basketValue) : savings;
+                            await addCollectiveSavings(templateId, capped, conn);
+                        }
+                    }
+                }
             }
             await conn.commit();
             res.status(201).json({ id, userId, storeId, basketId: basketId ?? null });

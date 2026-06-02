@@ -20,7 +20,7 @@
     "scrape:all": "tsx src/scrapers/runAll.ts",
     "admin": "tsx src/scripts/adminCli.ts",
     "type": "module",
-    "test": "NODE_ENV=test NODE_OPTIONS=--experimental-vm-modules jest"
+    "test": "NODE_ENV=test NODE_OPTIONS=--experimental-vm-modules jest --runInBand --forceExit"
   },
   "keywords": [],
   "author": "",

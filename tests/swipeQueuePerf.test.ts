@@ -31,6 +31,8 @@ const PERF_SP_ALT_BASE = 9930; // alt candidates 9930..9939
 const PERF_PROD_ALT_BASE = 9930;
 
 const ITEM_COUNT = 10; // simulate 10 matched products (realistic receipt)
+const PERF_STORE_BASE = 990000; // seeded Maxima store fleet (clean test DB)
+const STORE_FLEET = 240;        // mirrors the real Maxima chain size
 
 beforeAll(async () => {
     const conn = await (pool as any).getConnection();
@@ -53,6 +55,32 @@ beforeAll(async () => {
         await conn.query(`DELETE FROM Price WHERE storeProductId IN (?)`, [[...spIds, ...altSpIds]]);
         await conn.query(`DELETE FROM StoreProduct WHERE id IN (?)`, [[...spIds, ...altSpIds]]);
         await conn.query(`DELETE FROM Product WHERE id IN (?)`, [[...prodIds, ...altProdIds]]);
+
+        // The dedicated test DB is empty, so create the Maxima chain and a
+        // realistic store fleet here — the propagation cost this test guards
+        // against scales with store count (the original bug fired ~239 INSERTs
+        // per item across the real 240-store chain).
+        await conn.query(
+            `INSERT INTO StoreChain (id, name) VALUES (?, 'Maxima')
+             ON DUPLICATE KEY UPDATE name = VALUES(name)`,
+            [MAXIMA_CHAIN_ID],
+        );
+        const [haveStores]: any = await conn.query(
+            `SELECT COUNT(*) AS cnt FROM Store WHERE chainId = ?`, [MAXIMA_CHAIN_ID],
+        );
+        if (haveStores[0].cnt < STORE_FLEET) {
+            const rowsSql: string[] = [];
+            const rowsParams: any[] = [];
+            for (let i = 0; i < STORE_FLEET; i++) {
+                rowsSql.push('(?,?,?,?)');
+                rowsParams.push(PERF_STORE_BASE + i, MAXIMA_CHAIN_ID, `Perf Maxima ${i}`, `Perf Addr ${i}`);
+            }
+            await conn.query(
+                `INSERT INTO Store (id, chainId, name, address) VALUES ${rowsSql.join(',')}
+                 ON DUPLICATE KEY UPDATE id = id`,
+                rowsParams,
+            );
+        }
 
         await conn.query(`SET foreign_key_checks = 1`);
 
@@ -111,6 +139,9 @@ afterAll(async () => {
         await conn.query(`DELETE FROM StoreProduct WHERE id IN (?)`, [[...spIds, ...altSpIds]]);
         await conn.query(`DELETE FROM Product WHERE id IN (?)`, [[...prodIds, ...altProdIds]]);
         await conn.query(`DELETE FROM Category WHERE id = ?`, [PERF_CAT]);
+        // Tear down the seeded Maxima fleet + chain.
+        await conn.query(`DELETE FROM Store WHERE id >= ? AND id < ?`, [PERF_STORE_BASE, PERF_STORE_BASE + STORE_FLEET]);
+        await conn.query(`DELETE FROM StoreChain WHERE id = ?`, [MAXIMA_CHAIN_ID]);
         await conn.query(`SET foreign_key_checks = 1`);
     } finally {
         conn.release();

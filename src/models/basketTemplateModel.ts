@@ -1,5 +1,6 @@
 import pool from '../config/db.js';
 import type { Connection } from 'mysql2/promise';
+import { clampSavings } from '../util/savings.js';
 
 export interface BasketTemplateRow {
     id: number;
@@ -12,13 +13,21 @@ export interface BasketTemplateRow {
     creatorHandle: string | null;
     sourceTemplateId: number | null;
     useCount: number;
+    visitCount: number;
     collectiveSavingsEur: string; // mysql2 returns DECIMAL as string
     snapshotCheapestChainId: number | null;
     snapshotTotalEur: string | null;
     snapshotRunnerUpEur: string | null;
+    snapshotMostExpensiveEur: string | null;
     snapshotCalculatedAt: Date | null;
+    coverColor: string | null;
+    coverImage: unknown | null;
     createdAt: Date;
     updatedAt: Date;
+    /** Set only on genuine content edits (name / cover / items). Non-null →
+     *  the "Sukurta" stat flips to "Redaguota" (with this date). NULL = never
+     *  edited. Decoupled from `updatedAt`, which auto-bumps on every write. */
+    editedAt: Date | null;
 }
 
 export interface BasketTemplateItemRow {
@@ -44,23 +53,47 @@ export const createTemplate = async (
         isDefault?: boolean;
         autoUpdate?: boolean;
         sourceTemplateId?: number | null;
+        coverColor?: string | null;
+        /** { kind: 'preset', iconKey } | { kind: 'emoji', emoji }. Stored as
+         *  JSON; null falls back to the deterministic sample cover. */
+        coverImage?: unknown;
     } = {},
     conn?: Connection,
 ): Promise<number> => {
     const db = (conn ?? pool) as any;
     const [result]: any = await db.query(
         `INSERT INTO BasketTemplate
-            (userId, name, isDefault, autoUpdate, sourceTemplateId)
-         VALUES (?, ?, ?, ?, ?)`,
+            (userId, name, isDefault, autoUpdate, sourceTemplateId, coverColor, coverImage)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
         [
             userId,
             name,
             opts.isDefault ? 1 : 0,
             opts.autoUpdate ? 1 : 0,
             opts.sourceTemplateId ?? null,
+            opts.coverColor ?? null,
+            opts.coverImage != null ? JSON.stringify(opts.coverImage) : null,
         ],
     );
     return result.insertId;
+};
+
+/** Update the cover identity (colour + image). Either field may be omitted
+ *  to leave it unchanged; pass null to clear. */
+export const setTemplateCover = async (
+    id: number,
+    cover: { coverColor?: string | null; coverImage?: unknown },
+) => {
+    const sets: string[] = [];
+    const params: any[] = [];
+    if (cover.coverColor !== undefined) { sets.push('coverColor = ?'); params.push(cover.coverColor); }
+    if (cover.coverImage !== undefined) {
+        sets.push('coverImage = ?');
+        params.push(cover.coverImage != null ? JSON.stringify(cover.coverImage) : null);
+    }
+    if (sets.length === 0) return;
+    params.push(id);
+    await pool.query(`UPDATE BasketTemplate SET ${sets.join(', ')} WHERE id = ?`, params);
 };
 
 export const getTemplateById = async (id: number): Promise<BasketTemplateRow | null> => {
@@ -113,6 +146,33 @@ export const incrementTemplateUseCount = async (id: number, conn?: Connection) =
     await db.query(
         `UPDATE BasketTemplate SET useCount = useCount + 1 WHERE id = ?`,
         [id],
+    );
+};
+
+/**
+ * Stamp a content edit (name / cover / items) — drives the "Redaguota" stat.
+ * Deliberately separate from `updatedAt` (which auto-bumps on every write,
+ * including counters/shares) so the stat only reflects real edits.
+ */
+export const touchTemplateEdited = async (id: number, conn?: Connection) => {
+    const db = (conn ?? pool) as any;
+    await db.query(`UPDATE BasketTemplate SET editedAt = NOW() WHERE id = ?`, [id]);
+};
+
+/**
+ * Accrue realised savings onto a template's running total. Called once per
+ * basket when the user picks a store and creates a shopping list from a
+ * template-derived basket (ShoppingList.basketId is UNIQUE, so this fires
+ * at most once per basket). `eur` is the realised saving for that shop
+ * (priciest store total − chosen store total), clamped ≥ 0.
+ */
+export const addCollectiveSavings = async (id: number, eur: number, conn?: Connection) => {
+    const db = (conn ?? pool) as any;
+    const amount = clampSavings(eur);
+    if (amount <= 0) return;
+    await db.query(
+        `UPDATE BasketTemplate SET collectiveSavingsEur = collectiveSavingsEur + ? WHERE id = ?`,
+        [amount, id],
     );
 };
 

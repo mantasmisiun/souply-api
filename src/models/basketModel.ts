@@ -135,9 +135,15 @@ export const getBasketsByUserId = async (userId: string) => {
                    FROM ShoppingList sl
                    JOIN ShoppingListItem sli ON sli.listId = sl.id
                   WHERE sl.basketId = Basket.id
-                    AND sli.price IS NOT NULL) AS selectedStoreTotal
+                    AND sli.price IS NOT NULL) AS selectedStoreTotal,
+                t.coverColor   AS templateCoverColor,
+                t.coverImage   AS templateCoverImage,
+                u.username     AS templateCreatorHandle,
+                t.name         AS templateName
          FROM Basket
          LEFT JOIN BasketItem ON Basket.id = BasketItem.basketId
+         LEFT JOIN BasketTemplate t ON t.id = Basket.sourceTemplateId
+         LEFT JOIN User u ON u.id = t.userId
          WHERE Basket.userId = ?
          GROUP BY Basket.id
          ORDER BY updatedAt DESC`,
@@ -147,8 +153,19 @@ export const getBasketsByUserId = async (userId: string) => {
 };
 
 export const getBasketById = async (id: number) => {
+    // Join the source template's cover identity + creator handle so the
+    // basket inherits the emoji/colour strip and shows attribution. NULL for
+    // manual baskets (no sourceTemplateId).
     const [rows]: any = await pool.query(
-        'SELECT * FROM Basket WHERE id = ?',
+        `SELECT Basket.*,
+                t.coverColor    AS templateCoverColor,
+                t.coverImage    AS templateCoverImage,
+                u.username      AS templateCreatorHandle,
+                t.name          AS templateName
+           FROM Basket
+           LEFT JOIN BasketTemplate t ON t.id = Basket.sourceTemplateId
+           LEFT JOIN User u ON u.id = t.userId
+          WHERE Basket.id = ?`,
         [id]
     );
     return rows[0] || null;

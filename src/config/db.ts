@@ -17,6 +17,13 @@ import mysql from 'mysql2/promise';
  */
 const JSON_ARRAY_FIELDS = new Set(['imageUrls', 'chainLogos']);
 
+/**
+ * Column names that hold a JSON OBJECT (not an array). Same MariaDB-as-string
+ * problem as the array fields, but we normalise to an object (or null) instead
+ * of an array. `coverImage` = { kind: 'preset'|'emoji', ... }.
+ */
+const JSON_OBJECT_FIELDS = new Set(['coverImage', 'templateCoverImage']);
+
 const pool = mysql.createPool({
     host: process.env.DB_HOST,
     port: Number(process.env.DB_PORT),
@@ -39,6 +46,15 @@ const pool = mysql.createPool({
                 try { val = JSON.parse(val as string); } catch { return []; }
             }
             return Array.isArray(val) ? val : [];
+        }
+        if (JSON_OBJECT_FIELDS.has(field.name)) {
+            const raw: string | null = field.string();
+            if (raw == null) return null;
+            let val: unknown = raw;
+            for (let i = 0; i < 2 && typeof val === 'string'; i++) {
+                try { val = JSON.parse(val as string); } catch { return null; }
+            }
+            return val && typeof val === 'object' && !Array.isArray(val) ? val : null;
         }
         return next();
     },

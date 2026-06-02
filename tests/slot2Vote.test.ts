@@ -190,11 +190,14 @@ describe('castSlot2Vote', () => {
         );
     });
 
-    it('non-burst similar vote: records equivalence as different', async () => {
+    it('non-burst similar vote: records equivalence as same (category-only)', async () => {
+        // 'similar' maps to a personal 'same' equivalence — it mirrors the
+        // global Wilson 'similar' threshold (category-only match). 'different'
+        // was the previous behaviour. See slot2VoteService equivalenceVerdict.
         mockGetMatchAggregate.mockResolvedValue(BELOW_AGG);
         await castSlot2Vote({ ...BASE_INPUT, vote: 'similar' });
         expect(mockUpsertEquivalence).toHaveBeenCalledWith(
-            'user1', 10, 20, 'different', mockConn,
+            'user1', 10, 20, 'same', mockConn,
         );
     });
 

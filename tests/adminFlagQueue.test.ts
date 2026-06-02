@@ -95,7 +95,7 @@ async function seed() {
     const [rec]: any = await pool.query(
         `INSERT INTO Receipt
             (userId, storeId, filePath, fileType, parsedData, processingStatus)
-         VALUES (?, ?, 'http://example.local/none.jpg', 'image/jpeg', CAST(? AS JSON), 'completed')`,
+         VALUES (?, ?, 'http://example.local/none.jpg', 'image/jpeg', ?, 'completed')`,
         [USER_A, STORE_ID, JSON.stringify(parsedData)],
     );
     receiptId = Number(rec.insertId);
@@ -120,7 +120,7 @@ async function seed() {
 async function plantIssue(lineIdx: number, userId: string, flags: object) {
     await pool.query(
         `INSERT INTO ReceiptLineIssue (receiptId, receiptLineIdx, userId, flags, status)
-         VALUES (?, ?, ?, CAST(? AS JSON), 'pending')`,
+         VALUES (?, ?, ?, ?, 'pending')`,
         [receiptId, lineIdx, userId, JSON.stringify(flags)],
     );
 }
@@ -178,7 +178,7 @@ describe('admin flag queue', () => {
         await pool.query(
             `INSERT INTO ReceiptLineIssue
                 (receiptId, receiptLineIdx, userId, flags, status, resolvedBy, resolvedAt)
-             VALUES (?, 0, ?, CAST(? AS JSON), 'resolved', ?, NOW())`,
+             VALUES (?, 0, ?, ?, 'resolved', ?, NOW())`,
             [receiptId, USER_A, JSON.stringify({ name: true, price: false, amount: false, discount: false, image: false }), ADMIN_ID],
         );
         await plantIssue(1, USER_B, { name: false, price: true, amount: false, discount: false, image: false });

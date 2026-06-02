@@ -89,7 +89,7 @@ beforeAll(async () => {
     const spA = Number(spARes.insertId);
     const [recARes]: any = await pool.query(
         `INSERT INTO Receipt (userId, storeId, filePath, fileType, parsedData, processingStatus)
-         VALUES (?, ?, 'http://example.local/uncA.jpg', 'image/jpeg', CAST(? AS JSON), 'completed')`,
+         VALUES (?, ?, 'http://example.local/uncA.jpg', 'image/jpeg', ?, 'completed')`,
         [USER_ID, STORE_ID, JSON.stringify({ products: [{ storeProductId: spA, name: nameA, price: 2.50 }] })],
     );
     const recA = Number(recARes.insertId);
@@ -119,7 +119,7 @@ beforeAll(async () => {
     // (counts all Prices regardless of receiptId).
     const [recCRes]: any = await pool.query(
         `INSERT INTO Receipt (userId, storeId, filePath, fileType, parsedData, processingStatus)
-         VALUES (?, ?, 'http://example.local/uncC.jpg', 'image/jpeg', CAST(? AS JSON), 'completed')`,
+         VALUES (?, ?, 'http://example.local/uncC.jpg', 'image/jpeg', ?, 'completed')`,
         [USER_ID, STORE_ID, JSON.stringify({ products: [{ storeProductId: spC, name: nameC, price: 1.99 }] })],
     );
     const recC = Number(recCRes.insertId);

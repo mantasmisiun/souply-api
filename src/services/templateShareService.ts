@@ -18,6 +18,7 @@ import pool from '../config/db.js';
 import { calculateBasketForStores, type StoreResult } from './basketCalculationService.js';
 import { getTemplateItems, getTemplateById } from '../models/basketTemplateModel.js';
 import { generateBrandedQrWithDataUri } from './templateQrService.js';
+import { shareUrlForSlug } from '../config/urls.js';
 
 export const SHARE_SLUG_LENGTH = 10;
 const SHARE_SLUG_ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789';
@@ -160,29 +161,55 @@ export interface ShareResult {
     };
 }
 
+/**
+ * Per-process cache of the branded QR PNG keyed by slug. The QR encodes the
+ * slug URL, which never changes once minted, so there's no need to re-render
+ * + re-upload it on every share-sheet open. Only successful renders are
+ * cached (so a transient MinIO failure can be retried next time).
+ */
+const qrCache = new Map<string, { qrUrl: string | null; qrDataUrl: string | null }>();
+
 export async function shareTemplate(templateId: number): Promise<ShareResult> {
     const template = await getTemplateById(templateId);
     if (!template) throw new Error('Template not found');
 
     const slug = template.shareSlug ?? await allocateUniqueSlug();
-    const snapshot = await computeSnapshotForTemplate(templateId);
 
     const targetVisibility: 'unlisted' | 'public' =
         template.visibility === 'public' ? 'public' : 'unlisted';
 
-    // Branded QR generation runs concurrently with the snapshot persist.
-    // Failure is non-fatal — the share still works, just without a
-    // server-cached PNG; the client falls back to the local QR.
-    const url = `https://souply.lt/t/${slug}`;
-    let qrUrl: string | null = null;
-    let qrDataUrl: string | null = null;
-    try {
-        const out = await generateBrandedQrWithDataUri(slug, url);
-        qrUrl = out.qrUrl;
-        qrDataUrl = out.qrDataUrl;
-    } catch (e: any) {
-        console.warn('[templateShare] branded QR generation failed:', e?.message);
+    // Reuse the cached snapshot when present. It's cleared (invalidateSnapshot)
+    // whenever the template's items change, so a present snapshot is current —
+    // no need to re-run the comparison engine on every share-sheet open.
+    let snapshot: SnapshotResult | null;
+    if (template.snapshotCalculatedAt != null) {
+        snapshot = {
+            cheapestChainId: template.snapshotCheapestChainId != null ? Number(template.snapshotCheapestChainId) : null,
+            cheapestTotalEur: template.snapshotTotalEur != null ? Number(template.snapshotTotalEur) : null,
+            runnerUpTotalEur: template.snapshotRunnerUpEur != null ? Number(template.snapshotRunnerUpEur) : null,
+            mostExpensiveTotalEur: template.snapshotMostExpensiveEur != null ? Number(template.snapshotMostExpensiveEur) : null,
+            calculatedAt: new Date(template.snapshotCalculatedAt),
+        };
+    } else {
+        snapshot = await computeSnapshotForTemplate(templateId);
     }
+
+    // Branded QR — cached per slug (deterministic). Failure is non-fatal: the
+    // client falls back to the local QR.
+    const url = shareUrlForSlug(slug);
+    let cached = qrCache.get(slug);
+    if (!cached) {
+        try {
+            const out = await generateBrandedQrWithDataUri(slug, url);
+            cached = { qrUrl: out.qrUrl, qrDataUrl: out.qrDataUrl };
+            qrCache.set(slug, cached);
+        } catch (e: any) {
+            console.warn('[templateShare] branded QR generation failed:', e?.message);
+            cached = { qrUrl: null, qrDataUrl: null };
+        }
+    }
+    const qrUrl = cached.qrUrl;
+    const qrDataUrl = cached.qrDataUrl;
 
     await pool.query(
         `UPDATE BasketTemplate
@@ -253,7 +280,9 @@ export interface ResolvedSlug {
         name: string;
         creatorHandle: string | null;
         useCount: number;
-        visibility: 'unlisted' | 'public';
+        visibility: 'unlisted' | 'public' | 'private';
+        coverColor: string | null;
+        coverImage: unknown | null;
     };
     snapshot: {
         cheapestChainId: number | null;
@@ -272,17 +301,50 @@ export interface ResolvedSlug {
 }
 
 export async function resolveSlug(slug: string): Promise<ResolvedSlug | null> {
+    // Match the slug regardless of visibility so a since-made-private template
+    // resolves to a "made private" state rather than a 404 (the link the
+    // creator already shared keeps opening — it just explains it's off now).
     const [rows]: any = await pool.query(
         `SELECT id, name, creatorHandle, useCount, visibility,
+                coverColor, coverImage,
                 snapshotCheapestChainId, snapshotTotalEur, snapshotRunnerUpEur,
                 snapshotMostExpensiveEur, snapshotCalculatedAt
            FROM BasketTemplate
-          WHERE shareSlug = ? AND visibility IN ('unlisted', 'public')
+          WHERE shareSlug = ?
           LIMIT 1`,
         [slug],
     );
     const row = rows[0];
     if (!row) return null;
+
+    // Private template: return a minimal marker. No visit increment (a bounce
+    // off the "made private" page isn't engagement) and no items leaked.
+    if (row.visibility === 'private') {
+        return {
+            template: {
+                id: Number(row.id),
+                name: row.name,
+                creatorHandle: row.creatorHandle,
+                useCount: Number(row.useCount ?? 0),
+                visibility: 'private',
+                coverColor: row.coverColor ?? null,
+                coverImage: row.coverImage ?? null,
+            },
+            snapshot: {
+                cheapestChainId: null,
+                cheapestTotalEur: null,
+                runnerUpTotalEur: null,
+                mostExpensiveTotalEur: null,
+                calculatedAt: null,
+            },
+            items: [],
+        };
+    }
+
+    // Count this resolve as a visit. Fire-and-forget — an approximate
+    // counter is fine for a creator-facing "Apsilankymai" metric, and we
+    // never want a counter write to fail the public page load.
+    pool.query(`UPDATE BasketTemplate SET visitCount = visitCount + 1 WHERE id = ?`, [row.id]).catch(() => {});
 
     const items = await getTemplateItems(Number(row.id));
 
@@ -293,6 +355,8 @@ export async function resolveSlug(slug: string): Promise<ResolvedSlug | null> {
             creatorHandle: row.creatorHandle,
             useCount: Number(row.useCount ?? 0),
             visibility: row.visibility,
+            coverColor: row.coverColor ?? null,
+            coverImage: row.coverImage ?? null,
         },
         snapshot: {
             cheapestChainId: row.snapshotCheapestChainId !== null ? Number(row.snapshotCheapestChainId) : null,

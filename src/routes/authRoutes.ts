@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import {
     oauthSignIn,
+    logout,
     fetchMe,
     setUsername,
     checkUsernameAvailable,
@@ -20,6 +21,15 @@ const router = Router();
  *     tags: [Auth]
  */
 router.post('/auth/oauth', oauthSignIn);
+
+/**
+ * @swagger
+ * /api/auth/logout:
+ *   post:
+ *     summary: Clear the web session cookie
+ *     tags: [Auth]
+ */
+router.post('/auth/logout', logout);
 
 /**
  * @swagger

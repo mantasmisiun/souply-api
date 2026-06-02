@@ -6,8 +6,9 @@ import {
     getTemplatesByUserId,
     renameTemplate,
     setTemplateAutoUpdate,
+    setTemplateCover,
+    touchTemplateEdited,
     deleteTemplate,
-    incrementTemplateUseCount,
     getTemplateItems,
     insertTemplateItemsBatch,
     addTemplateItem,
@@ -20,6 +21,8 @@ import {
 import { createBasket, getBasketById } from '../models/basketModel.js';
 import { decideInstantiation, type BasketSnapshot } from '../services/basketTemplateService.js';
 import { shareTemplate, invalidateSnapshot, resolveSlug } from '../services/templateShareService.js';
+import { normalizeCoverColor, normalizeCoverImage } from '../util/coverIdentity.js';
+import { shareUrlForSlug } from '../config/urls.js';
 
 // Soft length cap matches the BasketTemplate.name VARCHAR(100). UI prompts
 // the user before they overflow, but we hard-trim on the server too.
@@ -33,11 +36,42 @@ function validateName(rawName: unknown): { ok: true; name: string } | { ok: fals
     return { ok: true, name: trimmed };
 }
 
+
+// ── Ownership ───────────────────────────────────────────────────────────
+//
+// Templates are owned by `userId`, which is the user's stable id — the device
+// UUID for anonymous app users, the same id after they upgrade to a verified
+// creator (User.id is never reassigned), and the verified id for web. So the
+// caller proves ownership by presenting that id: the verified session (Bearer
+// header / web cookie → req.verifiedUser) OR, for anonymous app clients, the
+// device UUID in the `X-User-Id` header. Without this, every template
+// endpoint is keyed only by a sequential integer id (IDOR).
+
+function callerId(req: Request): string | null {
+    if (req.verifiedUser?.id) return String(req.verifiedUser.id);
+    const h = req.headers['x-user-id'];
+    return typeof h === 'string' && h.length > 0 ? h : null;
+}
+
+/** Load the template by `:id` and assert the caller owns it. Sends the
+ *  appropriate 400/404/403 and returns null when it can't be served. */
+async function loadOwnedTemplate(req: Request, res: Response): Promise<any | null> {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) { res.status(400).json({ error: 'Invalid template ID' }); return null; }
+    const tpl = await getTemplateById(id);
+    if (!tpl) { res.status(404).json({ error: 'Template not found' }); return null; }
+    const cid = callerId(req);
+    if (!cid || String(tpl.userId) !== cid) { res.status(403).json({ error: 'forbidden' }); return null; }
+    return tpl;
+}
+
 // ── Template CRUD ─────────────────────────────────────────────────────────
 
 export const listTemplates = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const userId = String(req.params.userId);
+        // Only the owner may list their templates.
+        if (callerId(req) !== userId) { res.status(403).json({ error: 'forbidden' }); return; }
         const templates = await getTemplatesByUserId(userId);
         res.json(templates);
     } catch (e) { next(e); }
@@ -45,24 +79,18 @@ export const listTemplates = async (req: Request, res: Response, next: NextFunct
 
 export const fetchTemplate = async (req: Request, res: Response, next: NextFunction) => {
     try {
-        const id = Number(req.params.id);
-        if (!Number.isFinite(id)) {
-            res.status(400).json({ error: 'Invalid template ID' });
-            return;
-        }
-        const template = await getTemplateById(id);
-        if (!template) {
-            res.status(404).json({ error: 'Template not found' });
-            return;
-        }
-        const items = await getTemplateItems(id);
+        // Owner-only: the editor reads its own template here; the public
+        // preview goes through GET /t/:slug instead.
+        const template = await loadOwnedTemplate(req, res);
+        if (!template) return;
+        const items = await getTemplateItems(Number(req.params.id));
         res.json({ ...template, items });
     } catch (e) { next(e); }
 };
 
 export const addTemplate = async (req: Request, res: Response, next: NextFunction) => {
     try {
-        const { userId, name, autoUpdate, items } = req.body ?? {};
+        const { userId, name, autoUpdate, items, visibility, coverColor, coverImage } = req.body ?? {};
         if (!userId || typeof userId !== 'string') {
             res.status(400).json({ error: 'userId is required' });
             return;
@@ -71,6 +99,18 @@ export const addTemplate = async (req: Request, res: Response, next: NextFunctio
         if (!nameCheck.ok) {
             res.status(400).json({ error: nameCheck.error });
             return;
+        }
+        // Visibility on create: 'private'/'unlisted' are open; 'public' needs a
+        // verified user with a username (the publish wall) — same gate as PATCH.
+        const reqVisibility = visibility === undefined ? 'private' : String(visibility);
+        if (!['private', 'unlisted', 'public'].includes(reqVisibility)) {
+            res.status(400).json({ error: 'invalid-visibility' });
+            return;
+        }
+        if (reqVisibility === 'public') {
+            const verified = req.verifiedUser ?? null;
+            if (!verified) { res.status(401).json({ error: 'auth-required' }); return; }
+            if (!verified.username) { res.status(412).json({ error: 'username-required' }); return; }
         }
 
         // Optional initial items (the "save current basket as template" flow
@@ -93,11 +133,30 @@ export const addTemplate = async (req: Request, res: Response, next: NextFunctio
             const templateId = await createTemplate(
                 userId,
                 nameCheck.name,
-                { autoUpdate: Boolean(autoUpdate) },
+                {
+                    autoUpdate: Boolean(autoUpdate),
+                    coverColor: normalizeCoverColor(coverColor),
+                    coverImage: normalizeCoverImage(coverImage),
+                },
                 conn as any,
             );
             if (initialItems.length > 0) {
                 await insertTemplateItemsBatch(templateId, initialItems, conn as any);
+            }
+            // Apply non-default visibility within the same transaction. 'public'
+            // already passed the publish-wall gate above; stamp the handle too.
+            if (reqVisibility !== 'private') {
+                if (reqVisibility === 'public') {
+                    await (conn as any).query(
+                        `UPDATE BasketTemplate SET visibility = ?, creatorHandle = ? WHERE id = ?`,
+                        [reqVisibility, req.verifiedUser!.username, templateId],
+                    );
+                } else {
+                    await (conn as any).query(
+                        `UPDATE BasketTemplate SET visibility = ? WHERE id = ?`,
+                        [reqVisibility, templateId],
+                    );
+                }
             }
             await conn.commit();
             res.status(201).json({ id: templateId, userId, name: nameCheck.name, itemCount: initialItems.length });
@@ -119,7 +178,7 @@ export const addTemplate = async (req: Request, res: Response, next: NextFunctio
 export const addTemplateFromBasket = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const basketId = Number(req.params.basketId);
-        const { name, autoUpdate } = req.body ?? {};
+        const { name, autoUpdate, coverColor, coverImage } = req.body ?? {};
         if (!Number.isFinite(basketId)) {
             res.status(400).json({ error: 'Invalid basket ID' });
             return;
@@ -134,6 +193,9 @@ export const addTemplateFromBasket = async (req: Request, res: Response, next: N
             res.status(404).json({ error: 'Basket not found' });
             return;
         }
+        // Only the basket's owner may turn it into a template.
+        const cid = callerId(req);
+        if (!cid || String(basket.userId) !== cid) { res.status(403).json({ error: 'forbidden' }); return; }
 
         // Read items directly off BasketItem rather than going through the
         // enriched fetch — the template only stores productId + quantity.
@@ -153,7 +215,11 @@ export const addTemplateFromBasket = async (req: Request, res: Response, next: N
             const templateId = await createTemplate(
                 basket.userId,
                 nameCheck.name,
-                { autoUpdate: Boolean(autoUpdate) },
+                {
+                    autoUpdate: Boolean(autoUpdate),
+                    coverColor: normalizeCoverColor(coverColor),
+                    coverImage: normalizeCoverImage(coverImage),
+                },
                 conn as any,
             );
             if (items.length > 0) {
@@ -172,17 +238,10 @@ export const addTemplateFromBasket = async (req: Request, res: Response, next: N
 
 export const patchTemplate = async (req: Request, res: Response, next: NextFunction) => {
     try {
+        const template = await loadOwnedTemplate(req, res);
+        if (!template) return;
         const id = Number(req.params.id);
-        if (!Number.isFinite(id)) {
-            res.status(400).json({ error: 'Invalid template ID' });
-            return;
-        }
-        const template = await getTemplateById(id);
-        if (!template) {
-            res.status(404).json({ error: 'Template not found' });
-            return;
-        }
-        const { name, autoUpdate, visibility } = req.body ?? {};
+        const { name, autoUpdate, visibility, coverColor, coverImage } = req.body ?? {};
         if (name !== undefined) {
             const check = validateName(name);
             if (!check.ok) { res.status(400).json({ error: check.error }); return; }
@@ -190,6 +249,17 @@ export const patchTemplate = async (req: Request, res: Response, next: NextFunct
         }
         if (autoUpdate !== undefined) {
             await setTemplateAutoUpdate(id, Boolean(autoUpdate));
+        }
+        if (coverColor !== undefined || coverImage !== undefined) {
+            await setTemplateCover(id, {
+                ...(coverColor !== undefined ? { coverColor: normalizeCoverColor(coverColor) } : {}),
+                ...(coverImage !== undefined ? { coverImage: normalizeCoverImage(coverImage) } : {}),
+            });
+        }
+        // Name / cover are content edits → stamp "Redaguota". autoUpdate and
+        // visibility are settings, not content, so they don't count.
+        if (name !== undefined || coverColor !== undefined || coverImage !== undefined) {
+            await touchTemplateEdited(id);
         }
         // Visibility transition. private/unlisted are open; public requires
         // a verified user with a claimed username — the publish wall.
@@ -216,6 +286,21 @@ export const patchTemplate = async (req: Request, res: Response, next: NextFunct
                     `UPDATE BasketTemplate SET visibility = ?, creatorHandle = ? WHERE id = ?`,
                     [target, verified.username, id],
                 );
+            } else if (target === 'private') {
+                // Flip to private keeps the slug (so old links resolve to a
+                // "made private" page instead of 404) but clears the cached
+                // snapshot — a later re-publish recomputes against fresh prices.
+                await pool.query(
+                    `UPDATE BasketTemplate
+                        SET visibility = 'private',
+                            snapshotCheapestChainId  = NULL,
+                            snapshotTotalEur         = NULL,
+                            snapshotRunnerUpEur      = NULL,
+                            snapshotMostExpensiveEur = NULL,
+                            snapshotCalculatedAt     = NULL
+                      WHERE id = ?`,
+                    [id],
+                );
             } else {
                 await pool.query(
                     `UPDATE BasketTemplate SET visibility = ? WHERE id = ?`,
@@ -230,12 +315,9 @@ export const patchTemplate = async (req: Request, res: Response, next: NextFunct
 
 export const removeTemplate = async (req: Request, res: Response, next: NextFunction) => {
     try {
-        const id = Number(req.params.id);
-        if (!Number.isFinite(id)) {
-            res.status(400).json({ error: 'Invalid template ID' });
-            return;
-        }
-        await deleteTemplate(id);
+        const template = await loadOwnedTemplate(req, res);
+        if (!template) return;
+        await deleteTemplate(Number(req.params.id));
         res.status(204).send();
     } catch (e) { next(e); }
 };
@@ -244,24 +326,19 @@ export const removeTemplate = async (req: Request, res: Response, next: NextFunc
 
 export const fetchTemplateItems = async (req: Request, res: Response, next: NextFunction) => {
     try {
-        const id = Number(req.params.id);
-        if (!Number.isFinite(id)) {
-            res.status(400).json({ error: 'Invalid template ID' });
-            return;
-        }
-        const items = await getTemplateItems(id);
+        const template = await loadOwnedTemplate(req, res);
+        if (!template) return;
+        const items = await getTemplateItems(Number(req.params.id));
         res.json(items);
     } catch (e) { next(e); }
 };
 
 export const addItem = async (req: Request, res: Response, next: NextFunction) => {
     try {
+        const template = await loadOwnedTemplate(req, res);
+        if (!template) return;
         const templateId = Number(req.params.id);
         const { productId, quantity, unit, sortOrder } = req.body ?? {};
-        if (!Number.isFinite(templateId)) {
-            res.status(400).json({ error: 'Invalid template ID' });
-            return;
-        }
         if (!Number.isFinite(Number(productId)) || !Number.isFinite(Number(quantity)) || Number(quantity) <= 0) {
             res.status(400).json({ error: 'productId and quantity > 0 are required' });
             return;
@@ -273,19 +350,29 @@ export const addItem = async (req: Request, res: Response, next: NextFunction) =
             sortOrder: Number.isFinite(Number(sortOrder)) ? Number(sortOrder) : 0,
         });
         // Snapshot now reflects stale items — clear so the next share
-        // recomputes against the current set.
+        // recomputes against the current set. Items changed → "Redaguota".
         invalidateSnapshot(templateId).catch(() => {});
+        await touchTemplateEdited(templateId);
         res.status(201).json({ id: itemId, templateId, productId: Number(productId), quantity: Number(quantity) });
     } catch (e) { next(e); }
 };
 
 export const patchItem = async (req: Request, res: Response, next: NextFunction) => {
     try {
+        const template = await loadOwnedTemplate(req, res);
+        if (!template) return;
         const itemId = Number(req.params.itemId);
         const templateId = Number(req.params.id);
         const { quantity, sortOrder } = req.body ?? {};
         if (!Number.isFinite(itemId)) {
             res.status(400).json({ error: 'Invalid item ID' });
+            return;
+        }
+        // Item must belong to this (owned) template — block editing a foreign
+        // item id under a template you happen to own.
+        const owned = await getTemplateItemById(itemId);
+        if (!owned || Number(owned.templateId) !== templateId) {
+            res.status(404).json({ error: 'Template item not found' });
             return;
         }
         if (quantity !== undefined) {
@@ -304,26 +391,34 @@ export const patchItem = async (req: Request, res: Response, next: NextFunction)
             }
             await updateTemplateItemSortOrder(itemId, s);
         }
-        if (Number.isFinite(templateId)) invalidateSnapshot(templateId).catch(() => {});
+        if (Number.isFinite(templateId)) {
+            invalidateSnapshot(templateId).catch(() => {});
+            await touchTemplateEdited(templateId);
+        }
         res.status(204).send();
     } catch (e) { next(e); }
 };
 
 export const removeItem = async (req: Request, res: Response, next: NextFunction) => {
     try {
+        const template = await loadOwnedTemplate(req, res);
+        if (!template) return;
         const itemId = Number(req.params.itemId);
         if (!Number.isFinite(itemId)) {
             res.status(400).json({ error: 'Invalid item ID' });
             return;
         }
         const existing = await getTemplateItemById(itemId);
-        if (!existing) {
+        if (!existing || Number(existing.templateId) !== Number(req.params.id)) {
             res.status(404).json({ error: 'Template item not found' });
             return;
         }
         await deleteTemplateItem(itemId);
         const templateId = Number(req.params.id);
-        if (Number.isFinite(templateId)) invalidateSnapshot(templateId).catch(() => {});
+        if (Number.isFinite(templateId)) {
+            invalidateSnapshot(templateId).catch(() => {});
+            await touchTemplateEdited(templateId);
+        }
         res.status(204).send();
     } catch (e) { next(e); }
 };
@@ -340,16 +435,9 @@ export const removeItem = async (req: Request, res: Response, next: NextFunction
  */
 export const generateShareLink = async (req: Request, res: Response, next: NextFunction) => {
     try {
+        const template = await loadOwnedTemplate(req, res);
+        if (!template) return;
         const id = Number(req.params.id);
-        if (!Number.isFinite(id)) {
-            res.status(400).json({ error: 'Invalid template ID' });
-            return;
-        }
-        const template = await getTemplateById(id);
-        if (!template) {
-            res.status(404).json({ error: 'Template not found' });
-            return;
-        }
         const items = await getTemplateItems(id);
         if (items.length === 0) {
             res.status(400).json({ error: 'Template has no items to share' });
@@ -358,7 +446,7 @@ export const generateShareLink = async (req: Request, res: Response, next: NextF
         const result = await shareTemplate(id);
         res.json({
             ...result,
-            url: `https://souply.lt/t/${result.slug}`,
+            url: shareUrlForSlug(result.slug),
         });
     } catch (e) { next(e); }
 };
@@ -372,11 +460,9 @@ export const generateShareLink = async (req: Request, res: Response, next: NextF
  */
 export const revokeShareLink = async (req: Request, res: Response, next: NextFunction) => {
     try {
+        const template = await loadOwnedTemplate(req, res);
+        if (!template) return;
         const id = Number(req.params.id);
-        if (!Number.isFinite(id)) {
-            res.status(400).json({ error: 'Invalid template ID' });
-            return;
-        }
         await pool.query(
             `UPDATE BasketTemplate
                 SET shareSlug = NULL,
@@ -471,18 +557,23 @@ export const instantiateTemplate = async (req: Request, res: Response, next: Nex
             res.status(404).json({ error: 'Template not found' });
             return;
         }
+        // Consumers may instantiate shared (unlisted/public) templates; a
+        // PRIVATE template can only be instantiated by its owner. Stops a
+        // stranger from copying a private template's items by guessing its id.
+        if (template.visibility === 'private') {
+            const cid = callerId(req);
+            if (!cid || String(template.userId) !== cid) { res.status(403).json({ error: 'forbidden' }); return; }
+        }
 
-        // When the client passes force=true, the user has chosen "Sukurti
-        // naują" on the resume prompt. Treat ALL non-completed baskets from
-        // this template as abandoned (regardless of their flags), so the
-        // decision function returns createFresh + deletes them.
-        const whereTail = force
-            ? `AND status <> 'completed'`
-            : `AND status <> 'completed'`;
+        // Read the caller's non-completed baskets spawned from this template.
+        // When force=true (user chose "Sukurti naują" on the resume prompt)
+        // we don't change WHICH rows we read — instead the force-fresh handling
+        // below zeroes their flags so decideInstantiation() returns createFresh
+        // and marks them for deletion.
         const [rows]: any = await pool.query(
             `SELECT id, status, hasBeenCalculated, userEditedAfterCreation
                FROM Basket
-              WHERE userId = ? AND sourceTemplateId = ? ${whereTail}`,
+              WHERE userId = ? AND sourceTemplateId = ? AND status <> 'completed'`,
             [userId, templateId],
         );
         const existing: BasketSnapshot[] = rows.map((r: any) => ({
@@ -531,7 +622,10 @@ export const instantiateTemplate = async (req: Request, res: Response, next: Nex
                     [values],
                 );
             }
-            await incrementTemplateUseCount(templateId, conn as any);
+            // Note: "Panaudojimai" (useCount) is NOT bumped here — it counts
+            // shopping lists generated from the template, so it's incremented
+            // on the first shopping-list creation (see shoppingListController),
+            // not merely on instantiating a basket.
             await conn.commit();
 
             res.status(201).json({ action: 'created', basketId: newBasketId, templateId, itemCount: items.length });

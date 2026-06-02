@@ -34,7 +34,7 @@ const router = Router();
  *     responses:
  *       200: { description: List of templates with item counts joined in }
  */
-router.get('/basket-templates/user/:userId', listTemplates);
+router.get('/basket-templates/user/:userId', attachVerifiedUser, listTemplates);
 
 /**
  * @swagger
@@ -48,7 +48,7 @@ router.get('/basket-templates/user/:userId', listTemplates);
  *       `items[]` lets a single request seed the template with products,
  *       used by the "save current basket as template" flow.
  */
-router.post('/basket-templates', addTemplate);
+router.post('/basket-templates', attachVerifiedUser, addTemplate);
 
 /**
  * @swagger
@@ -59,7 +59,7 @@ router.post('/basket-templates', addTemplate);
  *     description: |
  *       Source basket stays untouched. Body must include a `name`.
  */
-router.post('/basket-templates/from-basket/:basketId', addTemplateFromBasket);
+router.post('/basket-templates/from-basket/:basketId', attachVerifiedUser, addTemplateFromBasket);
 
 /**
  * @swagger
@@ -68,7 +68,7 @@ router.post('/basket-templates/from-basket/:basketId', addTemplateFromBasket);
  *     summary: Get a single template with its items inlined
  *     tags: [BasketTemplate]
  */
-router.get('/basket-templates/:id', fetchTemplate);
+router.get('/basket-templates/:id', attachVerifiedUser, fetchTemplate);
 
 /**
  * @swagger
@@ -86,7 +86,7 @@ router.patch('/basket-templates/:id', attachVerifiedUser, patchTemplate);
  *     summary: Delete a template + cascade its items
  *     tags: [BasketTemplate]
  */
-router.delete('/basket-templates/:id', removeTemplate);
+router.delete('/basket-templates/:id', attachVerifiedUser, removeTemplate);
 
 /**
  * @swagger
@@ -95,7 +95,7 @@ router.delete('/basket-templates/:id', removeTemplate);
  *     summary: List items in a template
  *     tags: [BasketTemplate]
  */
-router.get('/basket-templates/:id/items', fetchTemplateItems);
+router.get('/basket-templates/:id/items', attachVerifiedUser, fetchTemplateItems);
 
 /**
  * @swagger
@@ -104,7 +104,7 @@ router.get('/basket-templates/:id/items', fetchTemplateItems);
  *     summary: Add an item to a template
  *     tags: [BasketTemplate]
  */
-router.post('/basket-templates/:id/items', addItem);
+router.post('/basket-templates/:id/items', attachVerifiedUser, addItem);
 
 /**
  * @swagger
@@ -113,7 +113,7 @@ router.post('/basket-templates/:id/items', addItem);
  *     summary: Update an item's quantity and/or sort order
  *     tags: [BasketTemplate]
  */
-router.patch('/basket-templates/:id/items/:itemId', patchItem);
+router.patch('/basket-templates/:id/items/:itemId', attachVerifiedUser, patchItem);
 
 /**
  * @swagger
@@ -122,7 +122,7 @@ router.patch('/basket-templates/:id/items/:itemId', patchItem);
  *     summary: Remove a template item
  *     tags: [BasketTemplate]
  */
-router.delete('/basket-templates/:id/items/:itemId', removeItem);
+router.delete('/basket-templates/:id/items/:itemId', attachVerifiedUser, removeItem);
 
 /**
  * @swagger
@@ -137,7 +137,7 @@ router.delete('/basket-templates/:id/items/:itemId', removeItem);
  *       was created and the template's items were copied into it.
  *       Abandoned siblings are silently deleted in the same transaction.
  */
-router.post('/basket-templates/:id/instantiate', instantiateTemplate);
+router.post('/basket-templates/:id/instantiate', attachVerifiedUser, instantiateTemplate);
 
 /**
  * @swagger
@@ -158,8 +158,8 @@ router.post('/basket-templates/:id/ack-auto-update', ackAutoUpdate);
  *     summary: Revoke share link, downgrade visibility to 'private'
  *     tags: [BasketTemplate]
  */
-router.post('/basket-templates/:id/share', generateShareLink);
-router.delete('/basket-templates/:id/share', revokeShareLink);
+router.post('/basket-templates/:id/share', attachVerifiedUser, generateShareLink);
+router.delete('/basket-templates/:id/share', attachVerifiedUser, revokeShareLink);
 
 /**
  * @swagger

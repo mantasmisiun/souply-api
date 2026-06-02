@@ -11,6 +11,9 @@ import {
 } from '../services/usernameService.js';
 import { getVerifiedUser } from '../services/authService.js';
 import { uploadObject } from '../services/storageService.js';
+import { SESSION_COOKIE } from '../middleware/requireVerifiedUser.js';
+
+const SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days, matches the JWT
 
 function getProviderClientId(provider: AuthProvider): string | null {
     if (provider === 'google') return process.env.GOOGLE_OAUTH_CLIENT_ID ?? null;
@@ -73,6 +76,19 @@ export const oauthSignIn = async (req: Request, res: Response, next: NextFunctio
         const token = await issueSessionToken(link.userId);
         const user = await getVerifiedUser(link.userId);
 
+        // Web session: also set the JWT as an httpOnly cookie so the
+        // browser holds it XSS-safely (mobile ignores this and keeps
+        // using the `token` from the body as a Bearer header). Host-only
+        // (no Domain) so it never leaks to sibling subdomains. `secure`
+        // only in production — local dev runs over http://localhost.
+        res.cookie(SESSION_COOKIE, token, {
+            httpOnly: true,
+            secure: process.env.NODE_ENV === 'production',
+            sameSite: 'lax',
+            maxAge: SESSION_MAX_AGE_MS,
+            path: '/',
+        });
+
         res.json({
             token,
             action: link.action,
@@ -90,8 +106,18 @@ export const oauthSignIn = async (req: Request, res: Response, next: NextFunctio
 };
 
 /**
+ * POST /api/auth/logout — clears the web session cookie. No-op for
+ * mobile (which just drops its stored Bearer token client-side). Always
+ * 204 so the client can treat logout as fire-and-forget.
+ */
+export const logout = async (_req: Request, res: Response) => {
+    res.clearCookie(SESSION_COOKIE, { path: '/' });
+    res.status(204).send();
+};
+
+/**
  * GET /api/auth/me — returns the current verified user's profile fields.
- * Requires Bearer JWT.
+ * Accepts the Bearer header or the web session cookie.
  */
 export const fetchMe = async (req: Request, res: Response, next: NextFunction) => {
     try {

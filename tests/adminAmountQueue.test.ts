@@ -94,7 +94,16 @@ afterAll(async () => {
 
 describe('admin amounts queue', () => {
     beforeEach(async () => {
+        // Reset to the seeded "actionable" state so tests are order-independent.
+        // Earlier tests mutate this SP (confirm sets amount/unit) and write
+        // audit rows that the picker's recently-resolved + agreement filters
+        // would otherwise use to drop spMismatch out of the queue.
         await pool.query(`DELETE FROM AdminCardLease WHERE leasedTo = ?`, [ADMIN_ID]);
+        await pool.query(`DELETE FROM AdminAuditLog WHERE adminUserId = ?`, [ADMIN_ID]);
+        await pool.query(
+            `UPDATE StoreProduct SET amount = 500, unit = 'ml', isWeighable = 0 WHERE id = ?`,
+            [spMismatch],
+        );
     });
 
     it('claim-batch returns only mismatches (parser-hit + disagrees with DB)', async () => {

@@ -1,5 +1,59 @@
 import { Request, Response, NextFunction } from 'express';
+import pool from '../config/db.js';
 import { createBasket, getBasketsByUserId, getBasketById, updateBasketUpdatedAt, updateBasketStatus, updateBasketSavedAmount, deleteBasket, updateBasketName, getUserDraftBasketId, markBasketCalculated, updateBasketCheapestTotal } from '../models/basketModel.js';
+import { copiedSourceTemplateId } from '../util/basketCopy.js';
+
+/**
+ * POST /api/baskets/:id/copy  Body: { userId }
+ * Clones a basket's items into a new draft basket. If the source basket was
+ * edited (diverged from the creator's original), the copy is "plain" — no
+ * template link, so it loses the inherited emoji/colour/@attribution and the
+ * user can name it / save it as a template. An unedited basket's copy keeps
+ * the template link (stays identical to the original).
+ */
+export const copyBasket = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const sourceId = Number(req.params.id);
+        const { userId } = req.body ?? {};
+        if (!Number.isFinite(sourceId) || !userId) {
+            res.status(400).json({ error: 'Basket id and userId are required' });
+            return;
+        }
+        const source = await getBasketById(sourceId);
+        if (!source) { res.status(404).json({ error: 'Basket not found' }); return; }
+
+        const newSourceTemplateId = copiedSourceTemplateId(
+            source.sourceTemplateId ?? null,
+            source.userEditedAfterCreation === 1,
+        );
+
+        const conn = await (pool as any).getConnection();
+        try {
+            await conn.beginTransaction();
+            const newId = await createBasket(userId, newSourceTemplateId, conn);
+            const [items]: any = await conn.query(
+                `SELECT productId, quantity, matchMode FROM BasketItem WHERE basketId = ?`,
+                [sourceId],
+            );
+            if (items.length > 0) {
+                const values = items.map((it: any) => [newId, it.productId, it.quantity, it.matchMode ?? 'sku']);
+                await conn.query(
+                    `INSERT INTO BasketItem (basketId, productId, quantity, matchMode) VALUES ?`,
+                    [values],
+                );
+            }
+            await conn.commit();
+            res.status(201).json({ id: newId, userId, itemCount: items.length });
+        } catch (e) {
+            try { await conn.rollback(); } catch {}
+            throw e;
+        } finally {
+            conn.release();
+        }
+    } catch (error) {
+        next(error);
+    }
+};
 
 export const addBasket = async (req: Request, res: Response, next: NextFunction) => {
     try {

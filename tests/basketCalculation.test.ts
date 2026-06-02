@@ -191,8 +191,14 @@ describe('priceItem — non-weighable with canonical', () => {
 
     it('rounds up to nearest pack multiple', () => {
         // 500ml pack at 0.60. User wants 1.2 L. ceil(1.2/0.5) = 3 packs = 1.80.
+        // The Product carries two pack sizes (500ml + 1L) so it stays a fluid
+        // canonical — a single-size non-weighable fluid SP would reclassify to
+        // a "1 vnt" pack (see canonicalUnit single-size reclassification).
         const sp = makeSpRow({ id: 1, price: '0.60', amount: '500', unit: 'ml', isWeighable: false });
-        const canonical = canonicalize([{ id: 1, amount: 500, unit: 'ml' }])!;
+        const canonical = canonicalize([
+            { id: 1, amount: 500, unit: 'ml' },
+            { id: 2, amount: 1000, unit: 'ml' },
+        ])!;
         const result = priceItem(1, 1.2, 'Juice', 'sku', { ...sp, effectivePrice: 0.60 }, FLAGS_DIRECT, canonical);
         expect(result.packsNeeded).toBe(3);
         expect(result.totalPrice).toBeCloseTo(1.80);
@@ -258,9 +264,10 @@ describe('priceItem — weighable with canonical', () => {
         // SP: 100g pack at 0.50 → 5.00 per canonical kg. User wants 0.3 kg.
         // Expected: 0.3 × 5.00 = 1.50
         const sp = makeSpRow({ id: 1, price: '0.50', amount: '100', unit: 'g', isWeighable: true });
-        const canonical = canonicalize([{ id: 1, amount: 100, unit: 'g' }])!;
+        const canonical = canonicalize([{ id: 1, amount: 100, unit: 'g', isWeighable: true }])!;
         // Note canonical.unit is 'kg' (g normalised away) even though there's
-        // only one SP — the picker UI never shows g/ml.
+        // only one SP — the picker UI never shows g/ml. Weighable SPs are never
+        // reclassified to a count pack, so a single weighable g SP stays kg.
         expect(canonical.unit).toBe('kg');
         const result = priceItem(1, 0.3, 'Spice', 'sku', { ...sp, effectivePrice: 0.50 }, FLAGS_DIRECT, canonical);
         expect(result.totalPrice).toBeCloseTo(1.50);
@@ -269,7 +276,7 @@ describe('priceItem — weighable with canonical', () => {
     it('normalises ml-priced SP into canonical l', () => {
         // 250ml at 1.00 → 4.00 / canonical l. User wants 0.5 l.
         const sp = makeSpRow({ id: 1, price: '1.00', amount: '250', unit: 'ml', isWeighable: true });
-        const canonical = canonicalize([{ id: 1, amount: 250, unit: 'ml' }])!;
+        const canonical = canonicalize([{ id: 1, amount: 250, unit: 'ml', isWeighable: true }])!;
         expect(canonical.unit).toBe('l');
         const result = priceItem(1, 0.5, 'Oil', 'sku', { ...sp, effectivePrice: 1.00 }, FLAGS_DIRECT, canonical);
         expect(result.totalPrice).toBeCloseTo(2.00);

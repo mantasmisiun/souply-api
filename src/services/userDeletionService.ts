@@ -2,6 +2,7 @@ import pool from '../config/db.js';
 import { applyAggregateDelta, getMatchAggregate } from '../models/storeProductMatchModel.js';
 import { reevaluateMerge } from './swipeVoteService.js';
 import { deleteReceiptImage } from './storageService.js';
+import { stripReceiptPII } from '../util/receiptPII.js';
 
 export type DeletionMode = 'anonymize' | 'purge';
 
@@ -28,15 +29,10 @@ async function sanitizeReceiptParsedData(userId: string): Promise<void> {
     );
     for (const row of rows) {
         try {
-            const d = typeof row.parsedData === 'string'
+            const parsed = typeof row.parsedData === 'string'
                 ? JSON.parse(row.parsedData)
-                : structuredClone(row.parsedData);
-
-            if (d?.footer) delete d.footer.rawText;
-            if (d?.header) delete d.header.rawText;
-            if (Array.isArray(d?.products)) {
-                for (const p of d.products) delete p.rawLines;
-            }
+                : row.parsedData;
+            const d = stripReceiptPII(parsed);
 
             await pool.query(
                 `UPDATE Receipt SET parsedData = ? WHERE id = ?`,
