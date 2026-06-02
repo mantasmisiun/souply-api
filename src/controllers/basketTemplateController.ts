@@ -21,6 +21,7 @@ import {
 import { createBasket, getBasketById } from '../models/basketModel.js';
 import { decideInstantiation, type BasketSnapshot } from '../services/basketTemplateService.js';
 import { shareTemplate, invalidateSnapshot, resolveSlug } from '../services/templateShareService.js';
+import { buildDefaultTemplate } from '../services/defaultTemplateService.js';
 import { normalizeCoverColor, normalizeCoverImage } from '../util/coverIdentity.js';
 import { shareUrlForSlug } from '../config/urls.js';
 
@@ -242,6 +243,12 @@ export const patchTemplate = async (req: Request, res: Response, next: NextFunct
         if (!template) return;
         const id = Number(req.params.id);
         const { name, autoUpdate, visibility, coverColor, coverImage } = req.body ?? {};
+        // The auto default template is read-only content-wise — only its
+        // learning switch (autoUpdate) may change. Block name/cover edits.
+        if (template.isDefault === 1 && (name !== undefined || coverColor !== undefined || coverImage !== undefined)) {
+            res.status(403).json({ error: 'default-template-readonly' });
+            return;
+        }
         if (name !== undefined) {
             const check = validateName(name);
             if (!check.ok) { res.status(400).json({ error: check.error }); return; }
@@ -322,6 +329,75 @@ export const removeTemplate = async (req: Request, res: Response, next: NextFunc
     } catch (e) { next(e); }
 };
 
+/**
+ * POST /api/basket-templates/default/build
+ *
+ * User-initiated build of the auto "default" template from the caller's
+ * receipt purchases (the "Build it" button). Returns the built template with
+ * items, or 409 when generation can't run (not enough receipts, no purchased
+ * products, etc.).
+ */
+export const buildDefault = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const cid = callerId(req);
+        if (!cid) { res.status(401).json({ error: 'auth-required' }); return; }
+        const result = await buildDefaultTemplate(cid);
+        if (result.action === 'skipped') {
+            res.status(409).json({ error: 'build-skipped', reason: result.reason });
+            return;
+        }
+        const template = await getTemplateById(result.templateId);
+        const items = await getTemplateItems(result.templateId);
+        res.status(201).json({ ...template, items });
+    } catch (e) { next(e); }
+};
+
+/**
+ * POST /api/basket-templates/:id/duplicate
+ *
+ * Copy a template the caller owns into a NEW, normal (editable, isDefault=0)
+ * template — used to turn the read-only default template into something
+ * editable, and to duplicate any manual template. Items + cover carry over.
+ */
+export const duplicateTemplate = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const source = await loadOwnedTemplate(req, res);
+        if (!source) return;
+        const srcItems = await getTemplateItems(Number(req.params.id));
+        const newName = `${source.name} (kopija)`.slice(0, NAME_MAX);
+        const items: TemplateItemInput[] = srcItems.map((it: any, i: number) => ({
+            productId: Number(it.productId),
+            quantity: Number(it.quantity) || 1,
+            unit: it.unit ?? null,
+            sortOrder: i,
+        }));
+        const conn = await pool.getConnection();
+        try {
+            await conn.beginTransaction();
+            const templateId = await createTemplate(
+                source.userId,
+                newName,
+                {
+                    autoUpdate: false,
+                    coverColor: normalizeCoverColor(source.coverColor),
+                    coverImage: normalizeCoverImage(source.coverImage),
+                },
+                conn as any,
+            );
+            if (items.length > 0) {
+                await insertTemplateItemsBatch(templateId, items, conn as any);
+            }
+            await conn.commit();
+            res.status(201).json({ id: templateId, userId: source.userId, name: newName, itemCount: items.length });
+        } catch (txErr) {
+            try { await conn.rollback(); } catch {}
+            throw txErr;
+        } finally {
+            conn.release();
+        }
+    } catch (e) { next(e); }
+};
+
 // ── Template item CRUD ────────────────────────────────────────────────────
 
 export const fetchTemplateItems = async (req: Request, res: Response, next: NextFunction) => {
@@ -337,6 +413,7 @@ export const addItem = async (req: Request, res: Response, next: NextFunction) =
     try {
         const template = await loadOwnedTemplate(req, res);
         if (!template) return;
+        if (template.isDefault === 1) { res.status(403).json({ error: 'default-template-readonly' }); return; }
         const templateId = Number(req.params.id);
         const { productId, quantity, unit, sortOrder } = req.body ?? {};
         if (!Number.isFinite(Number(productId)) || !Number.isFinite(Number(quantity)) || Number(quantity) <= 0) {
@@ -361,6 +438,7 @@ export const patchItem = async (req: Request, res: Response, next: NextFunction)
     try {
         const template = await loadOwnedTemplate(req, res);
         if (!template) return;
+        if (template.isDefault === 1) { res.status(403).json({ error: 'default-template-readonly' }); return; }
         const itemId = Number(req.params.itemId);
         const templateId = Number(req.params.id);
         const { quantity, sortOrder } = req.body ?? {};
@@ -403,6 +481,7 @@ export const removeItem = async (req: Request, res: Response, next: NextFunction
     try {
         const template = await loadOwnedTemplate(req, res);
         if (!template) return;
+        if (template.isDefault === 1) { res.status(403).json({ error: 'default-template-readonly' }); return; }
         const itemId = Number(req.params.itemId);
         if (!Number.isFinite(itemId)) {
             res.status(400).json({ error: 'Invalid item ID' });

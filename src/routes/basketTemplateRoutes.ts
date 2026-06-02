@@ -15,10 +15,16 @@ import {
     generateShareLink,
     revokeShareLink,
     fetchSharedTemplate,
+    buildDefault,
+    duplicateTemplate,
 } from '../controllers/basketTemplateController.js';
 import { attachVerifiedUser } from '../middleware/requireVerifiedUser.js';
 
 const router = Router();
+
+// Build the auto "default" template from the caller's receipts ("Build it").
+// Registered before the `:id` routes so "default" isn't swallowed as an id.
+router.post('/basket-templates/default/build', attachVerifiedUser, buildDefault);
 
 /**
  * @swagger
@@ -138,6 +144,15 @@ router.delete('/basket-templates/:id/items/:itemId', attachVerifiedUser, removeI
  *       Abandoned siblings are silently deleted in the same transaction.
  */
 router.post('/basket-templates/:id/instantiate', attachVerifiedUser, instantiateTemplate);
+
+/**
+ * @swagger
+ * /api/basket-templates/{id}/duplicate:
+ *   post:
+ *     summary: Copy a template into a new editable (isDefault=0) template
+ *     tags: [BasketTemplate]
+ */
+router.post('/basket-templates/:id/duplicate', attachVerifiedUser, duplicateTemplate);
 
 /**
  * @swagger

@@ -1,21 +1,32 @@
 /**
- * Auto-generated default template — Pass A.3 of the šablonai roadmap.
+ * Auto-generated default ("Smart template") — Pass A.3 of the šablonai roadmap.
  *
- * Per Documentation/roadmap/sablonai.md Part 2:
+ * The Smart template IS the user's real shopping list, reconstructed from the
+ * products they actually buy on their receipts. Design notes:
  *
  *   • Triggered once the user uploads their 3rd receipt across ≥ 2 distinct
  *     chains (same threshold as account recovery, so onboarding doubles as
  *     recovery without ever mentioning it).
- *   • Picks products the user actually engages with (basket adds / list
- *     adds / list checks) using the existing `UserProductScore` table.
- *   • For users with limited history, falls back to globally popular
- *     products to avoid an empty template.
+ *   • Ranking is RECENCY-WEIGHTED frequency, not raw frequency: each purchase
+ *     contributes an exponentially-decaying weight by age (half-life
+ *     DECAY_HALF_LIFE_DAYS). A staple bought twice last week beats one bought
+ *     ten times a year ago — the list tracks current habits, not history.
+ *   • Item amounts are the MEDIAN quantity the user buys per trip (from each
+ *     receipt's parsedData — Price has no quantity column), unit-rounded.
+ *   • Only products that are still buyable are included: a recent scraped
+ *     price OR a recent purchase within AVAILABILITY_WINDOW_DAYS (a thing you
+ *     bought last week is obviously still sold). Discontinued items drop off.
+ *   • One-off impulse buys (seen on a single receipt) are held back unless we
+ *     need them to reach MIN_ITEMS, so the list isn't polluted by noise but a
+ *     light user still gets a usable template.
+ *   • Among similar scores, products sold in MORE chains rank higher so the
+ *     resulting basket is actually price-comparable across stores.
  *   • Re-runs on every subsequent receipt upload for templates with
- *     `autoUpdate = 1`.
+ *     autoUpdate = 1 (the "learn from receipts" switch).
  *
  * The pure decision functions are kept side-effect-free so they can be
- * unit-tested without touching the DB. The orchestrator at the bottom
- * is the integration glue.
+ * unit-tested without touching the DB. The orchestrator at the bottom is the
+ * integration glue.
  */
 
 import pool from '../config/db.js';
@@ -24,6 +35,21 @@ import {
     insertTemplateItemsBatch,
     type TemplateItemInput,
 } from '../models/basketTemplateModel.js';
+
+// ── Tunables ───────────────────────────────────────────────────────────────
+
+/** Hard cap on template size — a quick-shop list, not a dump of everything. */
+export const MAX_ITEMS = 25;
+/** Backfill target so light users still get a usable list (see one-off rule). */
+export const MIN_ITEMS = 8;
+/** Below this purchase frequency a product is a "one-off" (backfill only). */
+export const MIN_FREQUENCY = 2;
+/** Recency half-life: a purchase this many days old counts for half as much. */
+export const DECAY_HALF_LIFE_DAYS = 45;
+/** A product is "still buyable" if scraped OR purchased within this window. */
+export const AVAILABILITY_WINDOW_DAYS = 45;
+
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 // ── Pure decision logic ───────────────────────────────────────────────────
 
@@ -43,46 +69,96 @@ export function qualifiesForAutoTemplate(receipts: ReceiptSummary[]): boolean {
     return distinctChains.size >= 2;
 }
 
-export interface UserProductSignal {
-    productId: number;
-    score: number;
-    interactionCount: number;
+/**
+ * Exponential recency weight for a single purchase. age 0 → 1.0; age ==
+ * half-life → 0.5; older → tends to 0. Future-dated / today purchases get
+ * full weight.
+ */
+export function decayWeight(ageDays: number, halfLifeDays: number = DECAY_HALF_LIFE_DAYS): number {
+    if (!(ageDays > 0) || !Number.isFinite(ageDays)) return 1;
+    return Math.pow(0.5, ageDays / halfLifeDays);
+}
+
+/** Plain median of a numeric list (0 for empty). */
+export function median(values: number[]): number {
+    const sorted = values.filter(v => Number.isFinite(v)).sort((a, b) => a - b);
+    if (sorted.length === 0) return 0;
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
 }
 
 /**
- * Pick the products for the default template.
- *
- * Inclusion rules (Pass A.3 v1 — simplified vs. spec's "≥2 receipt sessions"
- * because ProductInteraction events don't carry receipt IDs; we approximate
- * with interactionCount):
- *
- *   • interactionCount ≥ 2 → always include (user engaged with this product
- *     more than once → habitual)
- *   • interactionCount = 1 AND product is in the global top-10% popular set
- *     → include (one-off engagement with a universally bought item, e.g.
- *     monthly toilet paper — covers the spec's bulk-buyer carve-out)
- *
- * Capped at MAX_ITEMS to keep the template usable as a quick-shop list
- * rather than a dump of everything the user ever bought.
+ * Round a typical purchase amount to something sensible for a shopping list.
+ * Weighable products → 0.1 step (kg); piece products → whole units. Clamped
+ * to a sane band so a garbled OCR quantity can't produce an absurd amount.
  */
-export const MAX_ITEMS = 25;
+export function roundQuantity(qty: number, isWeighable: boolean): number {
+    if (!(qty > 0) || !Number.isFinite(qty)) return 1;
+    if (isWeighable) {
+        const r = Math.round(qty * 10) / 10;
+        return Math.min(Math.max(r, 0.1), 20);
+    }
+    const r = Math.round(qty);
+    return Math.min(Math.max(r, 1), 50);
+}
 
-export function selectDefaultTemplateProducts(
-    signals: UserProductSignal[],
-    globalTopSet: Set<number>,
-): number[] {
-    const eligible = signals
-        .filter(s => {
-            if (s.score <= 0) return false;
-            if (s.interactionCount >= 2) return true;
-            if (s.interactionCount === 1 && globalTopSet.has(s.productId)) return true;
-            return false;
-        })
-        // Highest user-engagement score first. Ties broken by interactionCount
-        // (more touches = more confident inclusion).
-        .sort((a, b) => (b.score - a.score) || (b.interactionCount - a.interactionCount));
+/** A product the user bought, aggregated across their receipts. */
+export interface PurchaseSignal {
+    productId: number;
+    /** Sum of recency-decayed weights over the distinct receipts it appears on. */
+    decayedScore: number;
+    /** Distinct receipts this product appears on (raw purchase frequency). */
+    freq: number;
+    /** Typical amount bought per trip (median, unit-rounded). */
+    quantity: number;
+    /** How many chains sell this product (comparability tiebreak). */
+    chainCount: number;
+    /** Still buyable — recent scraped price OR recent purchase. */
+    available: boolean;
+}
 
-    return eligible.slice(0, MAX_ITEMS).map(s => s.productId);
+export interface RankedTemplateItem {
+    productId: number;
+    quantity: number;
+}
+
+/**
+ * Rank purchase signals into the final template item list.
+ *
+ *   • Drop unavailable / zero-score products.
+ *   • Primary order: recency-weighted score (decayedScore) descending.
+ *   • Ties: more chains first (more price-comparable), then raw frequency.
+ *   • Habitual products (freq ≥ MIN_FREQUENCY) fill the list first; one-off
+ *     buys only backfill up to MIN_ITEMS so a light user isn't left empty.
+ *   • Capped at MAX_ITEMS.
+ */
+export function rankDefaultTemplateItems(
+    signals: PurchaseSignal[],
+    opts: { maxItems?: number; minItems?: number; minFrequency?: number } = {},
+): RankedTemplateItem[] {
+    const maxItems = opts.maxItems ?? MAX_ITEMS;
+    const minItems = opts.minItems ?? MIN_ITEMS;
+    const minFrequency = opts.minFrequency ?? MIN_FREQUENCY;
+
+    const eligible = signals.filter(
+        s => Number.isFinite(s.productId) && s.available && s.decayedScore > 0,
+    );
+    const cmp = (a: PurchaseSignal, b: PurchaseSignal) =>
+        (b.decayedScore - a.decayedScore) ||
+        (b.chainCount - a.chainCount) ||
+        (b.freq - a.freq) ||
+        (a.productId - b.productId);
+
+    const strong = eligible.filter(s => s.freq >= minFrequency).sort(cmp);
+    const weak = eligible.filter(s => s.freq < minFrequency).sort(cmp);
+
+    let picked = strong.slice(0, maxItems);
+    if (picked.length < minItems) {
+        picked = picked.concat(weak.slice(0, minItems - picked.length));
+    }
+    return picked
+        .slice(0, maxItems)
+        .map(s => ({ productId: s.productId, quantity: s.quantity }));
 }
 
 // ── DB-touching orchestrator ──────────────────────────────────────────────
@@ -106,6 +182,145 @@ export function computeItemDelta(oldIds: number[], newIds: number[]): number {
     return delta;
 }
 
+/** A single product line read off one receipt's parsedData. */
+interface PurchaseEvent {
+    spId: number;
+    receiptId: number;
+    receiptMs: number;
+    quantity: number;
+}
+
+/**
+ * Gather the user's receipt purchases into ranked template items. Pulls the
+ * raw lines from parsedData (quantity lives there, not in Price), resolves
+ * each storeProductId → productId + isWeighable, then computes the
+ * recency-weighted score, median amount and availability per product.
+ */
+async function buildSignalsFromReceipts(userId: string, now: number): Promise<PurchaseSignal[]> {
+    // Purchase events live in each receipt's parsedData (Price has no
+    // quantity column). receiptDate gives the purchase recency.
+    const [receiptRows]: any = await pool.query(
+        `SELECT id, receiptDate, parsedData
+           FROM Receipt
+          WHERE userId = ? AND parsedData IS NOT NULL`,
+        [userId],
+    );
+
+    const events: PurchaseEvent[] = [];
+    const spIds = new Set<number>();
+    for (const row of receiptRows as any[]) {
+        let parsed: any;
+        try {
+            parsed = typeof row.parsedData === 'string' ? JSON.parse(row.parsedData) : row.parsedData;
+        } catch {
+            continue;
+        }
+        const products = Array.isArray(parsed?.products) ? parsed.products : [];
+        const receiptMs = row.receiptDate ? new Date(row.receiptDate).getTime() : now;
+        for (const line of products) {
+            const spId = Number(line?.storeProductId);
+            if (!Number.isFinite(spId) || spId <= 0) continue;
+            const q = Number(line?.quantity);
+            events.push({
+                spId,
+                receiptId: Number(row.id),
+                receiptMs: Number.isFinite(receiptMs) ? receiptMs : now,
+                quantity: Number.isFinite(q) && q > 0 ? q : 1,
+            });
+            spIds.add(spId);
+        }
+    }
+    if (spIds.size === 0) return [];
+
+    // storeProductId → productId + isWeighable
+    const spIdArr = [...spIds];
+    const spPlaceholders = spIdArr.map(() => '?').join(',');
+    const [spRows]: any = await pool.query(
+        `SELECT id, productId, isWeighable FROM StoreProduct WHERE id IN (${spPlaceholders})`,
+        spIdArr,
+    );
+    const spMeta = new Map<number, { productId: number; isWeighable: boolean }>();
+    for (const r of spRows as any[]) {
+        const productId = Number(r.productId);
+        if (Number.isFinite(productId)) {
+            spMeta.set(Number(r.id), { productId, isWeighable: !!r.isWeighable });
+        }
+    }
+
+    // Aggregate per product: distinct receipts (with dates) + per-trip amount.
+    interface Agg {
+        productId: number;
+        isWeighable: boolean;
+        receiptDates: Map<number, number>; // receiptId → receiptMs (dedupes lines)
+        qtyByReceipt: Map<number, number>; // receiptId → summed qty that trip
+    }
+    const byProduct = new Map<number, Agg>();
+    for (const ev of events) {
+        const meta = spMeta.get(ev.spId);
+        if (!meta) continue;
+        let agg = byProduct.get(meta.productId);
+        if (!agg) {
+            agg = {
+                productId: meta.productId,
+                isWeighable: meta.isWeighable,
+                receiptDates: new Map(),
+                qtyByReceipt: new Map(),
+            };
+            byProduct.set(meta.productId, agg);
+        }
+        agg.isWeighable = agg.isWeighable || meta.isWeighable;
+        agg.receiptDates.set(ev.receiptId, ev.receiptMs);
+        agg.qtyByReceipt.set(ev.receiptId, (agg.qtyByReceipt.get(ev.receiptId) ?? 0) + ev.quantity);
+    }
+    if (byProduct.size === 0) return [];
+
+    // Availability + chain count per candidate product.
+    const prodIdArr = [...byProduct.keys()];
+    const prodPlaceholders = prodIdArr.map(() => '?').join(',');
+    const [availRows]: any = await pool.query(
+        `SELECT sp.productId AS productId,
+                COUNT(DISTINCT sp.chainId) AS chainCount,
+                MAX(CASE WHEN pr.receiptId IS NULL THEN pr.date END) AS lastScraped
+           FROM StoreProduct sp
+           LEFT JOIN Price pr ON pr.storeProductId = sp.id
+          WHERE sp.productId IN (${prodPlaceholders})
+          GROUP BY sp.productId`,
+        prodIdArr,
+    );
+    const availMeta = new Map<number, { chainCount: number; lastScrapedMs: number }>();
+    for (const r of availRows as any[]) {
+        availMeta.set(Number(r.productId), {
+            chainCount: Number(r.chainCount) || 0,
+            lastScrapedMs: r.lastScraped ? new Date(r.lastScraped).getTime() : 0,
+        });
+    }
+
+    const windowMs = AVAILABILITY_WINDOW_DAYS * DAY_MS;
+    const signals: PurchaseSignal[] = [];
+    for (const agg of byProduct.values()) {
+        let decayedScore = 0;
+        let lastBoughtMs = 0;
+        for (const ms of agg.receiptDates.values()) {
+            const ageDays = Math.max(0, (now - ms) / DAY_MS);
+            decayedScore += decayWeight(ageDays);
+            if (ms > lastBoughtMs) lastBoughtMs = ms;
+        }
+        const meta = availMeta.get(agg.productId);
+        const lastScrapedMs = meta?.lastScrapedMs ?? 0;
+        const available =
+            (now - lastScrapedMs) <= windowMs || (now - lastBoughtMs) <= windowMs;
+        signals.push({
+            productId: agg.productId,
+            decayedScore,
+            freq: agg.receiptDates.size,
+            quantity: roundQuantity(median([...agg.qtyByReceipt.values()]), agg.isWeighable),
+            chainCount: meta?.chainCount ?? 0,
+            available,
+        });
+    }
+    return signals;
+}
+
 /**
  * Run the qualification check, pick products, and either create a new
  * default template or refresh the existing one's items wholesale. Wholesale
@@ -114,7 +329,10 @@ export function computeItemDelta(oldIds: number[], newIds: number[]): number {
  * `autoUpdate=1` as "trust the algorithm" anyway. Diff-based merging
  * with pinned items lands in a future pass.
  */
-export async function generateDefaultTemplate(userId: string): Promise<GenerateResult> {
+export async function generateDefaultTemplate(
+    userId: string,
+    opts: { allowCreate?: boolean } = {},
+): Promise<GenerateResult> {
     // 1. Qualification check
     const [receipts]: any = await pool.query(
         `SELECT s.chainId
@@ -136,39 +354,30 @@ export async function generateDefaultTemplate(userId: string): Promise<GenerateR
         [userId],
     );
     const existing = existingRows[0] ?? null;
+    // Learning switched off → leave the frozen snapshot untouched.
     if (existing && existing.autoUpdate === 0) {
         return { action: 'skipped', reason: 'autoupdate-off' };
     }
-
-    // 3. Read the user's per-product engagement signal
-    const [signalRows]: any = await pool.query(
-        `SELECT productId, score, interactionCount
-           FROM UserProductScore
-          WHERE userId = ? AND score > 0`,
-        [userId],
-    );
-    const signals: UserProductSignal[] = signalRows.map((r: any) => ({
-        productId: Number(r.productId),
-        score: Number(r.score),
-        interactionCount: Number(r.interactionCount),
-    }));
-
-    // 4. Compute the global top-10% set for the bulk-buyer carve-out
-    const globalTopSet = await loadGlobalTop10PercentSet();
-
-    // 5. Pick the products
-    const productIds = selectDefaultTemplateProducts(signals, globalTopSet);
-    if (productIds.length === 0) {
-        return { action: 'skipped', reason: 'no-eligible-products' };
+    // Creation is user-initiated (the "Build it" button → allowCreate). The
+    // receipt-save trigger only REFRESHES an already-built template.
+    if (!existing && !opts.allowCreate) {
+        return { action: 'skipped', reason: 'not-built' };
     }
 
-    const items: TemplateItemInput[] = productIds.map((productId, i) => ({
-        productId,
-        quantity: 1,
+    // 3. Build the ranked item list from what the user actually buys.
+    const signals = await buildSignalsFromReceipts(userId, Date.now());
+    const ranked = rankDefaultTemplateItems(signals);
+    if (ranked.length === 0) {
+        return { action: 'skipped', reason: 'no-eligible-products' };
+    }
+    const productIds = ranked.map(r => r.productId);
+    const items: TemplateItemInput[] = ranked.map((it, i) => ({
+        productId: it.productId,
+        quantity: it.quantity,
         sortOrder: i,
     }));
 
-    // 6. Write
+    // 4. Write
     const conn = await pool.getConnection();
     try {
         await conn.beginTransaction();
@@ -203,7 +412,7 @@ export async function generateDefaultTemplate(userId: string): Promise<GenerateR
 
         const templateId = await createTemplate(
             userId,
-            'Pirkinių sąrašas',
+            'Smart template',
             { isDefault: true, autoUpdate: true },
             conn as any,
         );
@@ -219,25 +428,9 @@ export async function generateDefaultTemplate(userId: string): Promise<GenerateR
 }
 
 /**
- * Returns the set of productIds in the global top 10% by `Product.globalScore`.
- * `globalScore` is already the same decayed-sum-of-interaction-events the
- * šablonai spec calls `popularityScore`, so we can reuse it directly
- * instead of computing a parallel ranking.
+ * The "Build it" action — explicitly creates (or rebuilds) the user's default
+ * template from their receipts. Distinct from the receipt-save trigger, which
+ * only refreshes an already-built template when learning is on.
  */
-async function loadGlobalTop10PercentSet(): Promise<Set<number>> {
-    const [rows]: any = await pool.query(
-        `SELECT id FROM Product
-          WHERE globalScore > 0
-          ORDER BY globalScore DESC
-          LIMIT 10000`,
-    );
-    // Strict top-10% within the universe of products that have any score
-    // at all. For the bulk-buyer carve-out we want the universally-bought
-    // staples — top 10% over scored products is the right denominator.
-    const [[countRow]]: any = await pool.query(
-        `SELECT COUNT(*) AS n FROM Product WHERE globalScore > 0`,
-    );
-    const total = Number(countRow?.n ?? 0);
-    const cutoff = Math.max(1, Math.floor(total * 0.10));
-    return new Set(rows.slice(0, cutoff).map((r: any) => Number(r.id)));
-}
+export const buildDefaultTemplate = (userId: string): Promise<GenerateResult> =>
+    generateDefaultTemplate(userId, { allowCreate: true });
