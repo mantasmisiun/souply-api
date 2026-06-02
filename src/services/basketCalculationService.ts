@@ -23,6 +23,8 @@ export interface StoreResult {
     chainLogoUrl: string | null;
     chainMiniLogoUrl: string | null;
     storeAddress: string;
+    latitude: number | null;
+    longitude: number | null;
     distance: number;
     total: number;
     isApproximated: boolean;
@@ -329,6 +331,8 @@ export const calculateBasketForStores = async (
                 chainLogoUrl: store.logoUrl || null,
                 chainMiniLogoUrl: store.miniLogoUrl || null,
                 storeAddress: store.address,
+                latitude: store.latitude != null ? Number(store.latitude) : null,
+                longitude: store.longitude != null ? Number(store.longitude) : null,
                 distance: parseFloat(store.distance.toFixed(2)),
                 total: Math.round(total * 100) / 100,
                 isApproximated,

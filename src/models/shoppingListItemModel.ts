@@ -70,7 +70,19 @@ export const getListItemsByShoppingListId = async (listId: number) => {
                    AND spi.imageUrl IS NOT NULL) AS imageUrls,
                 sp.unit,
                 sp.amount,
-                COALESCE(sli.isWeighable, sp.isWeighable, 0) AS isWeighable,
+                -- Weighable is a property of the PRODUCT, not the list row. The
+                -- sli.isWeighable column is NOT NULL DEFAULT 0, so it can't be
+                -- the first COALESCE arg or it shadows the real flag for every
+                -- basket-created item. Resolve from: the exact store product →
+                -- any store product of the product (covers substitutions with a
+                -- null storeProductId) → an explicitly-set custom-item flag → 0.
+                COALESCE(
+                    sp.isWeighable,
+                    (SELECT MAX(spi.isWeighable) FROM StoreProduct spi
+                      WHERE spi.productId = COALESCE(sp.productId, sli.productId, p.id)),
+                    NULLIF(sli.isWeighable, 0),
+                    0
+                ) AS isWeighable,
                 c3.id   AS l3CategoryId,
                 c3.name AS l3CategoryName,
                 c2.id   AS l2CategoryId,
