@@ -9,7 +9,7 @@ import {
     setAvatar,
     fetchPublicProfile,
 } from '../controllers/authController.js';
-import { requireVerifiedUser } from '../middleware/requireVerifiedUser.js';
+import { requireVerifiedUser, attachVerifiedUser } from '../middleware/requireVerifiedUser.js';
 
 const router = Router();
 
@@ -65,7 +65,9 @@ router.get('/users/username-available', requireVerifiedUser, checkUsernameAvaila
  *     summary: Update displayName and/or bio
  *     tags: [Auth]
  */
-router.patch('/users/me/profile', requireVerifiedUser, patchProfile);
+// attachVerifiedUser: editing your OWN profile (keyed by caller id) — a
+// verified session OR X-User-Id fallback (dev / app) is sufficient.
+router.patch('/users/me/profile', attachVerifiedUser, patchProfile);
 
 /**
  * @swagger
@@ -74,7 +76,10 @@ router.patch('/users/me/profile', requireVerifiedUser, patchProfile);
  *     summary: Upload an avatar (base64 JSON body, ≤ 2 MB)
  *     tags: [Auth]
  */
-router.post('/users/me/avatar', requireVerifiedUser, setAvatar);
+// attachVerifiedUser (not requireVerifiedUser): the avatar is keyed by the
+// caller's OWN id, so a verified session OR an X-User-Id fallback (dev / app
+// anonymous) is enough — there's no cross-user write.
+router.post('/users/me/avatar', attachVerifiedUser, setAvatar);
 
 /**
  * @swagger

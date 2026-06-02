@@ -1,5 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
+import pool from '../config/db.js';
+import { avatarSignedUrl } from '../services/storageService.js';
 import { createUser, getUserById, updateLastActive } from '../models/userModel.js';
 import { getUserPointsProfile } from '../services/userPointsService.js';
 import { hasPendingMandatorySwipes, shouldShowBurstWarning } from '../services/swipeSessionService.js';
@@ -81,12 +83,24 @@ export const fetchUserProfile = async (req: Request, res: Response, next: NextFu
         const user = await getUserById(id);
         if (!user) { res.status(404).json({ error: 'User not found' }); return; }
 
-        const [pointsProfile, pendingSwipeCount, showBurstWarning] = await Promise.all([
+        const [pointsProfile, pendingSwipeCount, showBurstWarning, aggRows] = await Promise.all([
             getUserPointsProfile(id),
             getPendingMandatorySwipeCount(id),
             shouldShowBurstWarning(id),
-            updateLastActive(id),
+            // Aggregate stats across the creator's own (non-default) templates:
+            // count + total visits + uses + follower (collective) savings.
+            pool.query(
+                `SELECT COUNT(*)                          AS templateCount,
+                        COALESCE(SUM(visitCount), 0)      AS totalVisits,
+                        COALESCE(SUM(useCount), 0)        AS totalUses,
+                        COALESCE(SUM(collectiveSavingsEur), 0) AS totalSavings
+                   FROM BasketTemplate
+                  WHERE userId = ? AND isDefault = 0`,
+                [id],
+            ),
+            updateLastActive(id), // fire-and-forget; result unused
         ]);
+        const agg = (aggRows as any)?.[0]?.[0] ?? {};
 
         res.json({
             ...pointsProfile,
@@ -97,6 +111,17 @@ export const fetchUserProfile = async (req: Request, res: Response, next: NextFu
             // show the "Pereiti į admin panelį" button on the Profilis tab.
             isAdmin: !!(user as any).isAdmin,
             role: (user as any).adminRole ?? null,
+            // Identity for the profile header (avatar + name + @handle).
+            firstName: (user as any).firstName ?? null,
+            lastName: (user as any).lastName ?? null,
+            displayName: (user as any).displayName ?? null,
+            username: (user as any).username ?? null,
+            avatarUrl: await avatarSignedUrl((user as any).avatarUrl),
+            // Aggregate template stats for the profile cards.
+            templateCount: Number(agg.templateCount ?? 0),
+            totalVisits: Number(agg.totalVisits ?? 0),
+            totalUses: Number(agg.totalUses ?? 0),
+            totalFollowerSavingsEur: Number(agg.totalSavings ?? 0),
         });
     } catch (error) {
         next(error);

@@ -1,6 +1,7 @@
 import './config/env.js';
 import express from 'express';
 import cors from 'cors';
+import helmet from 'helmet';
 import * as path from 'path';
 import pool from './config/db.js';
 import storeRoutes from './routes/storeRoutes.js';
@@ -55,6 +56,15 @@ const corsAllowList = new Set<string>([
     'http://127.0.0.1:5174',
     ...envOrigins,
 ]);
+// Security headers. CSP is disabled — this is a JSON/asset API, not an
+// HTML origin, and the default CSP would block cross-origin embedding of
+// served images (avatars, assets). crossOriginResourcePolicy is relaxed to
+// 'cross-origin' so the app/web can load those images from another origin.
+app.use(helmet({
+    contentSecurityPolicy: false,
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+}));
+
 app.use(cors({
     origin: (origin, cb) => {
         // Same-origin requests + non-browser clients (curl, mobile) send
@@ -90,7 +100,13 @@ app.use('/api', adminRoutes);
 app.use('/api', adminInviteRoutes);
 app.use('/api', uploadRoutes);
 app.use('/api', betaSignupRoutes);
-app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+
+// Interactive API docs reveal the full surface — keep them off in
+// production. Available in dev/test for local exploration.
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+if (!IS_PRODUCTION) {
+    app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+}
 
 // Dev-only: static-serve the PNGs produced by `npm run receipts:stage`
 // so the phone-side batch screen can fetch manifest.json + images over
@@ -107,17 +123,21 @@ app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 const ASSETS_DIR = path.resolve(process.cwd(), 'assets');
 app.use('/assets', express.static(ASSETS_DIR));
 
-const RECEIPTS_STAGING_DIR = path.resolve(process.cwd(), 'receipts/_batch_staging');
-app.use('/receipts-batch', express.static(RECEIPTS_STAGING_DIR, { fallthrough: false }));
+// Dev-only batch/truth receipt static dirs — these can surface real
+// receipt images + annotations, so never expose them in production.
+if (!IS_PRODUCTION) {
+    const RECEIPTS_STAGING_DIR = path.resolve(process.cwd(), 'receipts/_batch_staging');
+    app.use('/receipts-batch', express.static(RECEIPTS_STAGING_DIR, { fallthrough: false }));
 
-// Dev-only: static-serve hand-annotated truth JSONs from
-// /home/.../Projects/shared/receipts/<chain>/<basename>.truth.json.
-// The phone's parser-test screen fetches these per receipt to score
-// V1 vs V2 against ground truth. Same cwd-anchored path strategy as
-// RECEIPTS_STAGING_DIR above — ../shared resolves to the repo's
-// cross-stack module dir from souply-api/.
-const TRUTH_DIR = path.resolve(process.cwd(), '../shared/receipts');
-app.use('/receipts-truth', express.static(TRUTH_DIR, { fallthrough: false }));
+    // static-serve hand-annotated truth JSONs from
+    // /home/.../Projects/shared/receipts/<chain>/<basename>.truth.json.
+    // The phone's parser-test screen fetches these per receipt to score
+    // V1 vs V2 against ground truth. Same cwd-anchored path strategy as
+    // RECEIPTS_STAGING_DIR above — ../shared resolves to the repo's
+    // cross-stack module dir from souply-api/.
+    const TRUTH_DIR = path.resolve(process.cwd(), '../shared/receipts');
+    app.use('/receipts-truth', express.static(TRUTH_DIR, { fallthrough: false }));
+}
 
 app.get('/health', async (req, res) => {
     try {

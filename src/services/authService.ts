@@ -178,6 +178,8 @@ export interface VerifiedUserRow {
     id: string;
     username: string | null;
     displayName: string | null;
+    firstName: string | null;
+    lastName: string | null;
     bio: string | null;
     avatarUrl: string | null;
     authProvider: AuthProvider | null;
@@ -187,7 +189,7 @@ export interface VerifiedUserRow {
 
 export async function getVerifiedUser(userId: string): Promise<VerifiedUserRow | null> {
     const [rows]: any = await pool.query(
-        `SELECT id, username, displayName, bio, avatarUrl,
+        `SELECT id, username, displayName, firstName, lastName, bio, avatarUrl,
                 authProvider, email, emailVerified
            FROM User WHERE id = ? LIMIT 1`,
         [userId],
@@ -198,6 +200,8 @@ export async function getVerifiedUser(userId: string): Promise<VerifiedUserRow |
         id: String(r.id),
         username: r.username,
         displayName: r.displayName,
+        firstName: r.firstName,
+        lastName: r.lastName,
         bio: r.bio,
         avatarUrl: r.avatarUrl,
         authProvider: r.authProvider,

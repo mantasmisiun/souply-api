@@ -125,6 +125,74 @@ export const uploadObject = async (
     return `${publicUrlPrefix()}/${BUCKET}/${objectKey}`;
 };
 
+// ── User avatars ────────────────────────────────────────────────────────────
+// PRIVATE bucket — avatars are served via short-lived presigned GET URLs
+// (minted at read time), never a public URL. We persist the storage KEY on
+// User.avatarUrl and sign it whenever the user is returned.
+
+const AVATARS_BUCKET = process.env.MINIO_AVATARS_BUCKET || 'avatars';
+const AVATAR_GET_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 days (presign max)
+let ensureAvatarsBucketPromise: Promise<void> | null = null;
+
+const ensureAvatarsBucket = (): Promise<void> => {
+    if (!ensureAvatarsBucketPromise) {
+        ensureAvatarsBucketPromise = (async () => {
+            const client = getClient();
+            const exists = await client.bucketExists(AVATARS_BUCKET).catch(() => false);
+            if (!exists) {
+                await client.makeBucket(AVATARS_BUCKET, 'us-east-1');
+                console.log('[MinIO] created bucket', AVATARS_BUCKET);
+            }
+            // No public policy — kept private; served via presigned URLs.
+        })().catch((err) => {
+            ensureAvatarsBucketPromise = null;
+            throw err;
+        });
+    }
+    return ensureAvatarsBucketPromise;
+};
+
+/**
+ * Compress an uploaded avatar (any image) to a square 256×256 JPEG and store
+ * it at `{userId}.jpg` in the private avatars bucket (overwrites on change).
+ * Returns the storage KEY — persist it on User.avatarUrl and sign it on read.
+ */
+export const uploadAvatar = async (userId: string, body: Buffer): Promise<string> => {
+    await ensureAvatarsBucket();
+    const sharp = (await import('sharp')).default;
+    const jpg = await sharp(body)
+        .rotate() // honour EXIF orientation before cropping
+        .resize(256, 256, { fit: 'cover' })
+        .jpeg({ quality: 82 })
+        .toBuffer();
+    const key = `${userId}.jpg`;
+    await getClient().putObject(AVATARS_BUCKET, key, Readable.from(jpg), jpg.length, {
+        'Content-Type': 'image/jpeg',
+    });
+    return key;
+};
+
+/**
+ * Mint a fresh presigned GET URL for a stored avatar. Accepts either a bare
+ * key (new) or a legacy full URL (extracts the key after `avatars/`). Returns
+ * null when there's no avatar.
+ */
+export const avatarSignedUrl = async (stored: string | null | undefined): Promise<string | null> => {
+    if (!stored) return null;
+    // Normalise: strip any host + bucket prefix + query, leaving the object key.
+    let key = stored;
+    const marker = `${AVATARS_BUCKET}/`;
+    const i = stored.indexOf(marker);
+    if (i >= 0) key = stored.slice(i + marker.length);
+    key = key.split('?')[0];
+    try {
+        await ensureAvatarsBucket();
+        return await getClient().presignedGetObject(AVATARS_BUCKET, key, AVATAR_GET_TTL_SECONDS);
+    } catch {
+        return null;
+    }
+};
+
 const extractObjectKey = (filePathOrKey: string | null | undefined): string | null => {
     if (!filePathOrKey) return null;
     const marker = `/${BUCKET}/`;

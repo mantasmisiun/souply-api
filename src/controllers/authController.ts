@@ -10,7 +10,7 @@ import {
     type UsernameRejectReason,
 } from '../services/usernameService.js';
 import { getVerifiedUser } from '../services/authService.js';
-import { uploadObject } from '../services/storageService.js';
+import { uploadAvatar, avatarSignedUrl } from '../services/storageService.js';
 import { SESSION_COOKIE } from '../middleware/requireVerifiedUser.js';
 
 const SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days, matches the JWT
@@ -126,8 +126,10 @@ export const fetchMe = async (req: Request, res: Response, next: NextFunction) =
             id: user.id,
             username: user.username,
             displayName: user.displayName,
+            firstName: (user as any).firstName ?? null,
+            lastName: (user as any).lastName ?? null,
             bio: user.bio,
-            avatarUrl: user.avatarUrl,
+            avatarUrl: await avatarSignedUrl(user.avatarUrl),
             email: user.email,
             authProvider: user.authProvider,
         });
@@ -180,10 +182,25 @@ const BIO_MAX = 160;
 
 export const patchProfile = async (req: Request, res: Response, next: NextFunction) => {
     try {
-        const userId = req.verifiedUser!.id;
-        const { displayName, bio } = req.body ?? {};
+        const hdr = req.header('x-user-id');
+        const userId = req.verifiedUser?.id ?? (typeof hdr === 'string' && hdr ? hdr : null);
+        if (!userId) {
+            res.status(401).json({ error: 'auth-required' });
+            return;
+        }
+        const { displayName, bio, firstName, lastName } = req.body ?? {};
         const updates: string[] = [];
         const args: any[] = [];
+        for (const [field, value] of [['firstName', firstName], ['lastName', lastName]] as const) {
+            if (value !== undefined) {
+                if (typeof value !== 'string' || value.length > 100) {
+                    res.status(400).json({ error: `bad-${field}` });
+                    return;
+                }
+                updates.push(`${field} = ?`);
+                args.push(value.trim() || null);
+            }
+        }
         if (displayName !== undefined) {
             if (typeof displayName !== 'string' || displayName.length > DISPLAY_NAME_MAX) {
                 res.status(400).json({ error: 'bad-displayName' });
@@ -219,23 +236,28 @@ export const patchProfile = async (req: Request, res: Response, next: NextFuncti
  */
 export const setAvatar = async (req: Request, res: Response, next: NextFunction) => {
     try {
-        const userId = req.verifiedUser!.id;
-        const { imageBase64, mimeType } = req.body ?? {};
+        const hdr = req.header('x-user-id');
+        const userId = req.verifiedUser?.id ?? (typeof hdr === 'string' && hdr ? hdr : null);
+        if (!userId) {
+            res.status(401).json({ error: 'auth-required' });
+            return;
+        }
+        const { imageBase64 } = req.body ?? {};
         if (typeof imageBase64 !== 'string' || imageBase64.length === 0) {
             res.status(400).json({ error: 'image-required' });
             return;
         }
-        const mt = typeof mimeType === 'string' && /^image\/(jpeg|png|webp)$/.test(mimeType)
-            ? mimeType : 'image/jpeg';
-        const ext = mt === 'image/png' ? 'png' : mt === 'image/webp' ? 'webp' : 'jpg';
         const buf = Buffer.from(imageBase64, 'base64');
-        if (buf.length > 2 * 1024 * 1024) {
+        // Raw cap before compression; sharp shrinks it to a 256px JPEG anyway.
+        if (buf.length > 6 * 1024 * 1024) {
             res.status(413).json({ error: 'too-large' });
             return;
         }
-        const url = await uploadObject(`avatars/${userId}.${ext}`, buf, mt);
-        await pool.query(`UPDATE User SET avatarUrl = ? WHERE id = ?`, [url, userId]);
-        res.json({ avatarUrl: url });
+        // uploadAvatar returns the storage KEY (private bucket); persist it and
+        // hand back a freshly-signed URL the client can render immediately.
+        const key = await uploadAvatar(userId, buf);
+        await pool.query(`UPDATE User SET avatarUrl = ? WHERE id = ?`, [key, userId]);
+        res.json({ avatarUrl: await avatarSignedUrl(key) });
     } catch (e) { next(e); }
 };
 
@@ -267,7 +289,7 @@ export const fetchPublicProfile = async (req: Request, res: Response, next: Next
             return;
         }
         const [templates]: any = await pool.query(
-            `SELECT id, name, shareSlug, useCount, collectiveSavingsEur,
+            `SELECT id, name, shareSlug, useCount, visitCount, collectiveSavingsEur,
                     snapshotCheapestChainId, snapshotTotalEur, snapshotRunnerUpEur,
                     snapshotCalculatedAt,
                     (SELECT COUNT(*) FROM BasketTemplateItem bti WHERE bti.templateId = bt.id) AS itemCount
@@ -284,14 +306,19 @@ export const fetchPublicProfile = async (req: Request, res: Response, next: Next
             (s: number, t: any) => s + Number(t.useCount ?? 0),
             0,
         );
+        const totalVisits = templates.reduce(
+            (s: number, t: any) => s + Number(t.visitCount ?? 0),
+            0,
+        );
         res.json({
             username: user.username,
             displayName: user.displayName,
             bio: user.bio,
-            avatarUrl: user.avatarUrl,
+            avatarUrl: await avatarSignedUrl(user.avatarUrl),
             publicTemplateCount: templates.length,
             totalCollectiveSavingsEur: totalCollectiveSavings,
             totalInstantiations,
+            totalVisits,
             templates: templates.map((t: any) => ({
                 id: Number(t.id),
                 name: t.name,
