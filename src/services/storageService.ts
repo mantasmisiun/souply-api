@@ -63,6 +63,9 @@ const getClient = () => {
             useSSL,
             accessKey: process.env.MINIO_ACCESS_KEY || '',
             secretKey: process.env.MINIO_SECRET_KEY || '',
+            // R2 requires a region for SigV4 (set MINIO_REGION=auto for R2);
+            // MinIO ignores it. Undefined keeps the minio client default.
+            region: process.env.MINIO_REGION || undefined,
         });
         console.log('[MinIO] signing presigned URLs for', `${useSSL ? 'https' : 'http'}://${endPoint}:${port}`);
     }
@@ -330,6 +333,15 @@ export const deleteTemplateCover = async (storageKey: string): Promise<void> => 
 };
 
 const PRODUCT_IMAGES_BUCKET = process.env.MINIO_PRODUCT_IMAGES_BUCKET || 'product-images';
+// Public base for product images. On R2 set this to the bucket's custom domain
+// (e.g. https://images.souply.lt) — R2 isn't path-style, so the public URL is
+// <base>/<key>. Unset → MinIO path-style <publicUrlPrefix>/<bucket>/<key>.
+const PRODUCT_IMAGES_PUBLIC_BASE = process.env.MINIO_PRODUCT_IMAGES_PUBLIC_URL;
+
+const productImagePublicUrl = (objectName: string): string =>
+  PRODUCT_IMAGES_PUBLIC_BASE
+    ? `${PRODUCT_IMAGES_PUBLIC_BASE.replace(/\/$/, '')}/${objectName}`
+    : `${publicUrlPrefix()}/${PRODUCT_IMAGES_BUCKET}/${objectName}`;
 
 export const getPresignedProductImageUploadUrl = async (
   filename: string,
@@ -338,6 +350,6 @@ export const getPresignedProductImageUploadUrl = async (
   const client = getClient();
   const objectName = `${Date.now()}-${filename.replace(/[^\w.-]/g, '_')}`;
   const uploadUrl = await client.presignedPutObject(PRODUCT_IMAGES_BUCKET, objectName, 60 * 15);
-  const filePath = `${publicUrlPrefix()}/${PRODUCT_IMAGES_BUCKET}/${objectName}`;
+  const filePath = productImagePublicUrl(objectName);
   return { uploadUrl, filePath };
 };
