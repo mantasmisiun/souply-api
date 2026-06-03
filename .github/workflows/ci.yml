@@ -56,6 +56,9 @@ jobs:
           --health-retries=30
     env:
       NODE_ENV: test
+      # Match the dev/prod timezone so DATE columns don't shift a day under
+      # the runner's default UTC (Europe/Vilnius is +2/+3).
+      TZ: Europe/Vilnius
       DB_HOST: 127.0.0.1
       DB_PORT: "3306"
       DB_USER: root

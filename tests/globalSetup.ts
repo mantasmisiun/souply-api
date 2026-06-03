@@ -58,9 +58,15 @@ export default async function globalSetup() {
         }
 
         // Reference rows that tests assume exist. The "Nepriskirta"
-        // (unassigned) default category id 688 is used as a Product FK parent
-        // in adminReceipts.test.ts. Idempotent so it's safe on every run.
-        await conn.query("INSERT IGNORE INTO Category (id, name) VALUES (688, 'Nepriskirta')");
+        // (unassigned) default category id 688 is a Product FK parent in
+        // adminReceipts.test.ts AND the catch-all the matcher looks up by
+        // `name='Nepriskirta' AND isHidden=1` (receiptLineResolver) — so it
+        // MUST be hidden. ON DUPLICATE keeps it correct even if a stale row
+        // (isHidden=0) already exists. Idempotent.
+        await conn.query(
+            "INSERT INTO Category (id, name, isHidden) VALUES (688, 'Nepriskirta', 1) " +
+            "ON DUPLICATE KEY UPDATE isHidden = 1",
+        );
     } finally {
         await conn.end();
     }
