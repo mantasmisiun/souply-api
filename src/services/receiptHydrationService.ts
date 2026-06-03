@@ -121,7 +121,7 @@ const fetchUserRejectedLineSps = async (
  * The caller overlays this on top of the global resolution; it doesn't
  * change Product.categoryId, just the per-user receipt view.
  */
-const fetchUserPersonalRescues = async (
+export const fetchUserPersonalRescues = async (
     userId: string,
     productIds: number[],
     locale: Locale,
