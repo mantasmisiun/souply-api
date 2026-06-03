@@ -21,7 +21,7 @@
     "admin": "tsx src/scripts/adminCli.ts",
     "type": "module",
     "test": "NODE_ENV=test NODE_OPTIONS=--experimental-vm-modules jest --runInBand --forceExit",
-    "prepare": "husky"
+    "prepare": "node .husky/install.mjs"
   },
   "keywords": [],
   "author": "",
