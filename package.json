@@ -28,6 +28,7 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "@sentry/node": "^10.56.0",
     "bullmq": "^5.73.0",
     "cheerio": "^1.2.0",
     "cors": "^2.8.6",

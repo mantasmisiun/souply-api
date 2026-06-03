@@ -1,4 +1,5 @@
 import './config/env.js';
+import './config/sentry.js';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -31,6 +32,7 @@ import betaSignupRoutes from './routes/betaSignupRoutes.js';
 import swaggerUi from 'swagger-ui-express';
 import swaggerSpec from './config/swagger.js';
 import { refreshDiscountedSummary } from './models/productModel.js';
+import { Sentry } from './config/sentry.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -154,6 +156,10 @@ app.get('/health', async (req, res) => {
 app.use((req, res) => {
     res.status(404).json({ error: `Route ${req.method} ${req.path} not found` });
 });
+
+// Sentry's error handler captures any error reaching here before our own
+// handler formats the JSON response. No-op when Sentry is disabled (dev/test).
+Sentry.setupExpressErrorHandler(app);
 
 // Error handler must be last
 app.use(errorHandler);
