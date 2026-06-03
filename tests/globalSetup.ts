@@ -56,6 +56,11 @@ export default async function globalSetup() {
             // eslint-disable-next-line no-console
             console.log(`[testdb] bootstrapped ${dbName}: ${after.length} tables`);
         }
+
+        // Reference rows that tests assume exist. The "Nepriskirta"
+        // (unassigned) default category id 688 is used as a Product FK parent
+        // in adminReceipts.test.ts. Idempotent so it's safe on every run.
+        await conn.query("INSERT IGNORE INTO Category (id, name) VALUES (688, 'Nepriskirta')");
     } finally {
         await conn.end();
     }
