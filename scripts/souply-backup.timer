@@ -1,0 +1,11 @@
+[Unit]
+Description=Nightly Souply production backup
+
+[Timer]
+# 03:30 local time — after the 00:30 discounts refresh, before morning use.
+OnCalendar=*-*-* 03:30:00
+# If the box was off at 03:30, run as soon as it's back up.
+Persistent=true
+
+[Install]
+WantedBy=timers.target
