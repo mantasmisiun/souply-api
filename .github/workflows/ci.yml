@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [main, staging]
+  pull_request:
+    branches: [main, staging]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# souply-api imports the sibling `shared` repo (../shared/parsers/...), so we
+# check it out next to the api checkout. Needs a read-only PAT in the repo
+# secret SHARED_REPO_TOKEN (fine-grained token with Contents:read on `shared`).
+jobs:
+  typecheck-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: souply-api
+      - uses: actions/checkout@v4
+        with:
+          repository: mantasmisiun/souply-shared
+          path: shared
+          token: ${{ secrets.SHARED_REPO_TOKEN }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: souply-api/package-lock.json
+      - working-directory: souply-api
+        run: npm ci
+      - name: Typecheck
+        working-directory: souply-api
+        run: npx tsc --noEmit
+      - name: Build
+        working-directory: souply-api
+        run: npm run build
+
+  test:
+    runs-on: ubuntu-latest
+    services:
+      mariadb:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: ci_root_password
+          MARIADB_DATABASE: souply_test_ci
+        ports:
+          - "3306:3306"
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=30
+    env:
+      NODE_ENV: test
+      DB_HOST: 127.0.0.1
+      DB_PORT: "3306"
+      DB_USER: root
+      DB_PASSWORD: ci_root_password
+      DB_NAME: souply_test_ci
+      SESSION_JWT_SECRET: ci_session_secret_at_least_32_characters_long
+      MINIO_ENDPOINT: 127.0.0.1
+      MINIO_PORT: "9000"
+      MINIO_ACCESS_KEY: ci
+      MINIO_SECRET_KEY: ci
+      MINIO_BUCKET: receipts
+      MINIO_PRODUCT_IMAGES_BUCKET: product-images
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: souply-api
+      - uses: actions/checkout@v4
+        with:
+          repository: mantasmisiun/souply-shared
+          path: shared
+          token: ${{ secrets.SHARED_REPO_TOKEN }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: souply-api/package-lock.json
+      - working-directory: souply-api
+        run: npm ci
+      # globalSetup loads tests/schema/schema.sql into the empty souply_test_ci
+      # on first connect; .env.test is absent in CI so dotenv no-ops and the
+      # env block above is used.
+      - name: Test
+        working-directory: souply-api
+        run: npm test
