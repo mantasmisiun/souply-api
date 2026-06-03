@@ -73,7 +73,7 @@ export interface VerifiedTokenClaims {
     emailVerified: boolean;
 }
 
-export async function verifyGoogleIdToken(idToken: string, clientId: string): Promise<VerifiedTokenClaims> {
+export async function verifyGoogleIdToken(idToken: string, clientId: string | string[]): Promise<VerifiedTokenClaims> {
     const { payload } = await jose.jwtVerify(idToken, googleJwks, {
         issuer: [GOOGLE_ISSUER, `accounts.google.com`],
         audience: clientId,
@@ -87,7 +87,7 @@ export async function verifyGoogleIdToken(idToken: string, clientId: string): Pr
 
 // ── Apple ID token validation ────────────────────────────────────────────
 
-export async function verifyAppleIdToken(idToken: string, clientId: string): Promise<VerifiedTokenClaims> {
+export async function verifyAppleIdToken(idToken: string, clientId: string | string[]): Promise<VerifiedTokenClaims> {
     const { payload } = await jose.jwtVerify(idToken, appleJwks, {
         issuer: APPLE_ISSUER,
         audience: clientId,

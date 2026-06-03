@@ -15,8 +15,15 @@ import { SESSION_COOKIE } from '../middleware/requireVerifiedUser.js';
 
 const SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days, matches the JWT
 
-function getProviderClientId(provider: AuthProvider): string | null {
-    if (provider === 'google') return process.env.GOOGLE_OAUTH_CLIENT_ID ?? null;
+function getProviderClientId(provider: AuthProvider): string | string[] | null {
+    if (provider === 'google') {
+        // Comma-separated list so the server trusts ID tokens from ALL of this
+        // env's Google clients: the web client AND the native Android/iOS
+        // clients (a native token's `aud` is its own client ID, not the web's).
+        const ids = (process.env.GOOGLE_OAUTH_CLIENT_ID ?? '')
+            .split(',').map(s => s.trim()).filter(Boolean);
+        return ids.length === 0 ? null : ids.length === 1 ? ids[0] : ids;
+    }
     if (provider === 'apple')  return process.env.APPLE_OAUTH_CLIENT_ID  ?? null;
     return null;
 }
