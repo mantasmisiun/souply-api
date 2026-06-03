@@ -5,13 +5,14 @@
 #
 #   cd /opt/souply/souply-api          # main checkout
 #   docker compose -f docker-compose.prod.yml up -d --build
+name: souply-prod
 services:
   souply-api:
     build:
       context: ..
       dockerfile: souply-api/Dockerfile
     image: souply-api:prod
-    container_name: souply-api
+    container_name: souply-api-prod
     restart: unless-stopped
     env_file:
       - .env.production         # DB_NAME=souply_production, CORS=https://souply.lt, ENABLE_SCHEDULER=true
