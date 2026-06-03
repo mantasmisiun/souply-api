@@ -28,6 +28,7 @@ import {
 } from './swipeVoteService.js';
 import { getProductIdForStoreProduct } from './storeProductMergeService.js';
 import { awardSwipePoint } from './userPointsService.js';
+import { upsertEquivalence } from '../models/userEquivalenceModel.js';
 
 export interface CastDirectSpPairVoteInput {
     userId: string;
@@ -58,6 +59,15 @@ export const castDirectSpPairVote = async (
         // so bursts still earn their point.
 
         if (!burst) {
+            // Personal equivalence so the user's browse + product detail merge
+            // immediately — same mapping slot2 uses: identical|similar → 'same'
+            // (so both pull an orphan out of Nepriskirta for this user),
+            // different → 'different'. Burst votes are excluded here too, mirroring
+            // their exclusion from the global aggregate.
+            const equivalenceVerdict =
+                input.vote === 'identical' || input.vote === 'similar' ? 'same' : 'different';
+            await upsertEquivalence(input.userId, pair.spIdA, pair.spIdB, equivalenceVerdict, connection);
+
             const { previousVote } = await upsertMatchVote(
                 input.userId,
                 pair.spIdA,

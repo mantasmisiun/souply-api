@@ -1,5 +1,6 @@
 import pool from '../config/db.js';
 import { resolveEffectiveProductId } from '../services/storeProductMergeService.js';
+import { getPersonalComponentForProduct } from './userEquivalenceModel.js';
 import { buildFuzzyNameClause } from '../utils/fuzzyNameClause.js';
 import type { Locale } from '../middleware/locale.js';
 
@@ -52,13 +53,21 @@ export const createStoreProduct = async (
     return result.insertId;
 };
 
-export const getStoreProductsByProductId = async (productId: number) => {
+export const getStoreProductsByProductId = async (productId: number, userId?: string) => {
+    // With a userId, expand to the user's personal equivalence component so a
+    // product they swiped 'identical'/'similar' shows ALL its equivalent SPs —
+    // including ones still parked in the hidden Nepriskirta bucket (the 688
+    // "pull"). `getPersonalComponentForProduct` returns [productId] when the
+    // user has no equivalences, so the anonymous/no-vote path is unchanged.
+    const productIds = userId
+        ? await getPersonalComponentForProduct(userId, productId)
+        : [productId];
     const [rows]: any = await pool.query(
         `SELECT StoreProduct.*, StoreChain.name AS chainName, StoreChain.logoUrl
          FROM StoreProduct
          JOIN StoreChain ON StoreProduct.chainId = StoreChain.id
-         WHERE StoreProduct.productId = ?`,
-        [productId]
+         WHERE StoreProduct.productId IN (?)`,
+        [productIds]
     );
     return rows;
 };
@@ -70,7 +79,7 @@ export const getStoreProductsByProductId = async (productId: number) => {
  * variant side-by-side with its own chart, giving the user "all yogurts of
  * this base" at a glance.
  */
-export const getStoreProductsForCluster = async (productId: number) => {
+export const getStoreProductsForCluster = async (productId: number, userId?: string) => {
     // Follow mergedIntoId chain so a globally merged loser still shows its winner's cluster.
     const effectiveProductId = await resolveEffectiveProductId(productId);
 
@@ -84,14 +93,20 @@ export const getStoreProductsForCluster = async (productId: number) => {
     if (!headRows[0]) return [];
     const headId = Number(headRows[0].headId);
 
+    // Union the user's personal equivalence component into the cluster so SPs
+    // they swiped 'identical'/'similar' (incl. hidden-bucket orphans) appear on
+    // the detail view. Empty for anonymous / no-equivalence users → [0] keeps
+    // the IN (?) clause valid without matching anything.
+    const personalIds = userId ? await getPersonalComponentForProduct(userId, productId) : [];
+
     const [rows]: any = await pool.query(
         `SELECT sp.*, sc.name AS chainName, sc.logoUrl
            FROM StoreProduct sp
            JOIN StoreChain sc ON sc.id = sp.chainId
            JOIN Product p ON p.id = sp.productId
-          WHERE (p.id = ? OR p.baseProductId = ?)
-            AND p.mergedIntoId IS NULL`,
-        [headId, headId]
+          WHERE ((p.id = ? OR p.baseProductId = ?) AND p.mergedIntoId IS NULL)
+             OR p.id IN (?)`,
+        [headId, headId, personalIds.length ? personalIds : [0]]
     );
     return rows;
 };

@@ -27,6 +27,8 @@ import {
     demoteMergeByProductIds,
 } from '../src/services/storeProductMergeService.js';
 import { castSwipeVote } from '../src/services/swipeVoteService.js';
+import { castDirectSpPairVote } from '../src/services/directSpPairVoteService.js';
+import { getStoreProductsByProductId } from '../src/models/storeProductModel.js';
 
 jest.setTimeout(20000);
 
@@ -53,24 +55,34 @@ const SP_C   = 97003; // in CHAIN_ID, belongs to PROD_C
 const PROD_D = 97004;
 const SP_D   = 97004;
 
+// Orphan product parked in the hidden Nepriskirta bucket (688), for the
+// "pull a 688 member into the user's view" tests.
+const NEPRISKIRTA_CAT = 688;
+const PROD_ORPHAN = 97005;
+const SP_ORPHAN   = 97005;
+
+// Dedicated user for the account-deletion cascade test (so deleting it can't
+// disturb the U1/U2 fixtures the other suites rely on).
+const U_DEL = 'pltest-de1e-de1e-de1e-de1ede1ede1e';
+
 // ---------------------------------------------------------------------------
 // Global seed / teardown
 // ---------------------------------------------------------------------------
 
 async function wipeAll(conn: any) {
     await conn.query(`SET foreign_key_checks = 0`);
-    await conn.query(`DELETE FROM AdminReviewFlag WHERE spId IN (?,?,?,?)`, [SP_A, SP_B, SP_C, SP_D]);
-    await conn.query(`DELETE FROM StoreProductMatchVote WHERE userId IN (?,?)`, [U1, U2]);
-    await conn.query(`DELETE FROM UserStoreProductEquivalence WHERE userId IN (?,?)`, [U1, U2]);
+    await conn.query(`DELETE FROM AdminReviewFlag WHERE spId IN (?,?,?,?,?)`, [SP_A, SP_B, SP_C, SP_D, SP_ORPHAN]);
+    await conn.query(`DELETE FROM StoreProductMatchVote WHERE userId IN (?,?,?)`, [U1, U2, U_DEL]);
+    await conn.query(`DELETE FROM UserStoreProductEquivalence WHERE userId IN (?,?,?)`, [U1, U2, U_DEL]);
     await conn.query(`DELETE FROM Price WHERE receiptId IN (SELECT id FROM Receipt WHERE userId IN (?,?))`, [U1, U2]);
     await conn.query(`DELETE FROM ReceiptSwipeCandidate WHERE receiptId IN (SELECT id FROM Receipt WHERE userId IN (?,?))`, [U1, U2]);
     await conn.query(`DELETE FROM ReceiptLineIssue WHERE receiptId IN (SELECT id FROM Receipt WHERE userId IN (?,?))`, [U1, U2]);
     await conn.query(`DELETE FROM Basket WHERE userId IN (?,?)`, [U1, U2]);
     await conn.query(`DELETE FROM Receipt WHERE userId IN (?,?)`, [U1, U2]);
-    await conn.query(`DELETE FROM User WHERE id IN (?,?)`, [U1, U2]);
-    await conn.query(`DELETE FROM StoreProduct WHERE id IN (?,?,?,?)`, [SP_A, SP_B, SP_C, SP_D]);
-    await conn.query(`UPDATE Product SET mergedIntoId = NULL WHERE id IN (?,?,?,?)`, [PROD_A, PROD_B, PROD_C, PROD_D]);
-    await conn.query(`DELETE FROM Product WHERE id IN (?,?,?,?)`, [PROD_A, PROD_B, PROD_C, PROD_D]);
+    await conn.query(`DELETE FROM User WHERE id IN (?,?,?)`, [U1, U2, U_DEL]);
+    await conn.query(`DELETE FROM StoreProduct WHERE id IN (?,?,?,?,?)`, [SP_A, SP_B, SP_C, SP_D, SP_ORPHAN]);
+    await conn.query(`UPDATE Product SET mergedIntoId = NULL WHERE id IN (?,?,?,?,?)`, [PROD_A, PROD_B, PROD_C, PROD_D, PROD_ORPHAN]);
+    await conn.query(`DELETE FROM Product WHERE id IN (?,?,?,?,?)`, [PROD_A, PROD_B, PROD_C, PROD_D, PROD_ORPHAN]);
     await conn.query(`DELETE FROM Store WHERE id = ?`, [STORE_ID]);
     await conn.query(`DELETE FROM StoreChain WHERE id = ?`, [CHAIN_ID]);
     await conn.query(`DELETE FROM Category WHERE id = ?`, [CAT_ID]);
@@ -94,6 +106,11 @@ beforeAll(async () => {
         await conn.query(`INSERT INTO StoreProduct (id, productId, chainId, storeProductName) VALUES (?,?,?,?) ON DUPLICATE KEY UPDATE id=id`, [SP_B, PROD_B, CHAIN_ID, 'SP B']);
         await conn.query(`INSERT INTO StoreProduct (id, productId, chainId, storeProductName) VALUES (?,?,?,?) ON DUPLICATE KEY UPDATE id=id`, [SP_C, PROD_C, CHAIN_ID, 'SP C']);
         await conn.query(`INSERT INTO StoreProduct (id, productId, chainId, storeProductName) VALUES (?,?,?,?) ON DUPLICATE KEY UPDATE id=id`, [SP_D, PROD_D, CHAIN_ID, 'SP D']);
+        // Orphan product on the hidden Nepriskirta (688) category. 688 is
+        // seeded by tests/globalSetup; ensure it exists so the FK holds.
+        await conn.query(`INSERT INTO Category (id, name, isHidden) VALUES (?, 'Nepriskirta', 1) ON DUPLICATE KEY UPDATE isHidden = 1`, [NEPRISKIRTA_CAT]);
+        await conn.query(`INSERT INTO Product (id, categoryId, name) VALUES (?,?,?) ON DUPLICATE KEY UPDATE id=id`, [PROD_ORPHAN, NEPRISKIRTA_CAT, 'Bananai Cavendish 20+']);
+        await conn.query(`INSERT INTO StoreProduct (id, productId, chainId, storeProductName) VALUES (?,?,?,?) ON DUPLICATE KEY UPDATE id=id`, [SP_ORPHAN, PROD_ORPHAN, CHAIN_ID, 'SP Orphan']);
         await conn.query(`INSERT INTO User (id, isAdmin, points) VALUES (?,0,0) ON DUPLICATE KEY UPDATE points=0`, [U1]);
         await conn.query(`INSERT INTO User (id, isAdmin, points) VALUES (?,0,0) ON DUPLICATE KEY UPDATE points=0`, [U2]);
     } finally {
@@ -113,8 +130,8 @@ afterAll(async () => {
 
 // Clean up equivalence rows between tests so each describe starts fresh.
 afterEach(async () => {
-    await pool.query(`DELETE FROM UserStoreProductEquivalence WHERE userId IN (?,?)`, [U1, U2]);
-    await pool.query(`DELETE FROM StoreProductMatchVote WHERE userId IN (?,?)`, [U1, U2]);
+    await pool.query(`DELETE FROM UserStoreProductEquivalence WHERE userId IN (?,?,?)`, [U1, U2, U_DEL]);
+    await pool.query(`DELETE FROM StoreProductMatchVote WHERE userId IN (?,?,?)`, [U1, U2, U_DEL]);
     await pool.query(`DELETE FROM AdminReviewFlag WHERE spId IN (?,?,?,?)`, [SP_A, SP_B, SP_C, SP_D]);
     await pool.query(`UPDATE Product SET mergedIntoId = NULL WHERE id IN (?,?,?,?)`, [PROD_A, PROD_B, PROD_C, PROD_D]);
     await pool.query(`UPDATE StoreProductMatchVote SET dwellMs = NULL WHERE userId IN (?,?)`, [U1, U2]);
@@ -586,5 +603,100 @@ describe('castSwipeVote — non-burst cross-pair vote', () => {
             [U1, a, b],
         );
         expect(rows[0].needsReverification).toBe(0);
+    });
+});
+
+// ===========================================================================
+// 11. getStoreProductsByProductId — personal component union (the 688 pull)
+// ===========================================================================
+
+describe('getStoreProductsByProductId — personal component union (688 pull)', () => {
+    it('without userId returns only the product\'s own SPs', async () => {
+        await upsertEquivalence(U1, SP_A, SP_ORPHAN, 'same');
+        const rows = await getStoreProductsByProductId(PROD_A);
+        expect(rows.map((r: any) => Number(r.id))).toEqual([SP_A]);
+    });
+
+    it('with userId unions SPs across the component, pulling the 688 orphan in', async () => {
+        // User swiped the catalog product (PROD_A) identical to the Nepriskirta
+        // orphan (PROD_ORPHAN, categoryId 688) — its SP should now surface.
+        await upsertEquivalence(U1, SP_A, SP_ORPHAN, 'same');
+        const rows = await getStoreProductsByProductId(PROD_A, U1);
+        expect(new Set(rows.map((r: any) => Number(r.id)))).toEqual(new Set([SP_A, SP_ORPHAN]));
+    });
+
+    it('is per-user — a user without the vote still sees only the own SP', async () => {
+        await upsertEquivalence(U1, SP_A, SP_ORPHAN, 'same');
+        const rows = await getStoreProductsByProductId(PROD_A, U2);
+        expect(rows.map((r: any) => Number(r.id))).toEqual([SP_A]);
+    });
+});
+
+// ===========================================================================
+// 12. castDirectSpPairVote — personal equivalence mapping (Slot 1/3 parity)
+// ===========================================================================
+
+describe('castDirectSpPairVote — personal equivalence mapping', () => {
+    const a = Math.min(SP_A, SP_C);
+    const b = Math.max(SP_A, SP_C);
+    async function verdictFor(userId: string) {
+        const [rows]: any = await pool.query(
+            `SELECT verdict FROM UserStoreProductEquivalence WHERE userId = ? AND spIdA = ? AND spIdB = ?`,
+            [userId, a, b],
+        );
+        return rows[0]?.verdict ?? null;
+    }
+
+    it("identical → 'same'", async () => {
+        await castDirectSpPairVote({ userId: U1, spIdA: SP_A, spIdB: SP_C, vote: 'identical', dwellMs: 2000 });
+        expect(await verdictFor(U1)).toBe('same');
+    });
+
+    it("similar → 'same' (so it also pulls from Nepriskirta for the user)", async () => {
+        await castDirectSpPairVote({ userId: U1, spIdA: SP_A, spIdB: SP_C, vote: 'similar', dwellMs: 2000 });
+        expect(await verdictFor(U1)).toBe('same');
+    });
+
+    it("different → 'different'", async () => {
+        await castDirectSpPairVote({ userId: U1, spIdA: SP_A, spIdB: SP_C, vote: 'different', dwellMs: 2000 });
+        expect(await verdictFor(U1)).toBe('different');
+    });
+
+    it('burst vote writes no personal equivalence', async () => {
+        await castDirectSpPairVote({ userId: U1, spIdA: SP_A, spIdB: SP_C, vote: 'identical', dwellMs: 50 });
+        expect(await verdictFor(U1)).toBeNull();
+    });
+});
+
+// ===========================================================================
+// 13. Account deletion — equivalence cascade + global-vote anonymisation
+// ===========================================================================
+
+describe('account deletion — equivalence cascade + global vote anonymisation', () => {
+    it('DELETE FROM User cascades the user\'s equivalences but anonymises their global votes', async () => {
+        await pool.query(`INSERT INTO User (id, isAdmin, points) VALUES (?,0,0) ON DUPLICATE KEY UPDATE points=0`, [U_DEL]);
+        // One non-burst vote writes BOTH a personal equivalence and a global vote.
+        await castDirectSpPairVote({ userId: U_DEL, spIdA: SP_A, spIdB: SP_B, vote: 'identical', dwellMs: 2000 });
+
+        const [eqBefore]: any = await pool.query(`SELECT id FROM UserStoreProductEquivalence WHERE userId = ?`, [U_DEL]);
+        expect(eqBefore.length).toBeGreaterThan(0);
+        const [voteBefore]: any = await pool.query(`SELECT id FROM StoreProductMatchVote WHERE userId = ?`, [U_DEL]);
+        expect(voteBefore.length).toBeGreaterThan(0);
+        const voteId = Number(voteBefore[0].id);
+
+        await pool.query(`DELETE FROM User WHERE id = ?`, [U_DEL]);
+
+        // Personal overlay gone (fk_uspe_user ON DELETE CASCADE).
+        const [eqAfter]: any = await pool.query(`SELECT id FROM UserStoreProductEquivalence WHERE userId = ?`, [U_DEL]);
+        expect(eqAfter).toHaveLength(0);
+
+        // Global vote survives, anonymised (fk_spmv_user ON DELETE SET NULL) →
+        // the community catalog is preserved when an individual is deleted.
+        const [voteAfter]: any = await pool.query(`SELECT userId FROM StoreProductMatchVote WHERE id = ?`, [voteId]);
+        expect(voteAfter).toHaveLength(1);
+        expect(voteAfter[0].userId).toBeNull();
+
+        // Clean up the now-anonymous vote (afterEach only matches by userId).
+        await pool.query(`DELETE FROM StoreProductMatchVote WHERE id = ?`, [voteId]);
     });
 });
