@@ -82,11 +82,14 @@ app.use('/api', categoryRoutes);
 app.use('/api', productRoutes);
 app.use('/api', storeProductRoutes);
 app.use('/api', priceRoutes);
+// authRoutes BEFORE userRoutes: its specific /users/* paths
+// (username-available, @:username, me/*) must match before userRoutes'
+// generic GET /users/:id, which would otherwise swallow them (→ 404).
+app.use('/api', authRoutes);
 app.use('/api', userRoutes);
 app.use('/api', basketRoutes);
 app.use('/api', basketItemRoutes);
 app.use('/api', basketTemplateRoutes);
-app.use('/api', authRoutes);
 app.use('/api', shoppingListRoutes);
 app.use('/api', shoppingListItemRoutes);
 app.use('/api', receiptRoutes);
