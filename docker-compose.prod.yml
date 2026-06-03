@@ -1,0 +1,39 @@
+# PRODUCTION souply-api → :3001 → souply_production (api.souply.lt).
+#
+# Built from the `main` worktree on OMV. Image tag: souply-api:prod.
+# Build context is the parent (/opt/souply) so the shared/ sibling is included.
+#
+#   cd /opt/souply/souply-api          # main checkout
+#   docker compose -f docker-compose.prod.yml up -d --build
+services:
+  souply-api:
+    build:
+      context: ..
+      dockerfile: souply-api/Dockerfile
+    image: souply-api:prod
+    container_name: souply-api
+    restart: unless-stopped
+    env_file:
+      - .env.production         # DB_NAME=souply_production, CORS=https://souply.lt, ENABLE_SCHEDULER=true
+    ports:
+      - "3001:3000"
+    networks:
+      - mysql_net
+      - minio_2_default
+      - souply_redis_default
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+networks:
+  mysql_net:
+    external: true
+    name: mysql_net
+  minio_2_default:
+    external: true
+    name: minio_2_default
+  souply_redis_default:
+    external: true
+    name: souply_redis_default
