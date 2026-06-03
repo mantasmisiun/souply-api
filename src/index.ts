@@ -30,7 +30,6 @@ import uploadRoutes from './routes/uploadRoutes.js';
 import betaSignupRoutes from './routes/betaSignupRoutes.js';
 import swaggerUi from 'swagger-ui-express';
 import swaggerSpec from './config/swagger.js';
-import './scrapers/scheduler.js';
 import { refreshDiscountedSummary } from './models/productModel.js';
 
 const app = express();
@@ -162,6 +161,21 @@ if (process.env.NODE_ENV !== 'test') {
         console.log(`Server running on port ${PORT}`);
         refreshDiscountedSummary().catch(e => console.error('[Startup] Discounts summary refresh failed:', e.message));
     });
+
+    // Scheduler (store scrapers, discount-refresh cron, daily Telegram digest)
+    // runs in PRODUCTION ONLY — staging/dev must never scrape the stores.
+    // Explicit ENABLE_SCHEDULER wins; otherwise default to NODE_ENV==='production'.
+    // Staging is NODE_ENV=production too, so .env.staging sets ENABLE_SCHEDULER=false.
+    // (The boot refreshDiscountedSummary above still runs everywhere — it only
+    // re-aggregates existing price data, it does not scrape.)
+    const schedulerEnabled = process.env.ENABLE_SCHEDULER
+        ? process.env.ENABLE_SCHEDULER === 'true'
+        : process.env.NODE_ENV === 'production';
+    if (schedulerEnabled) {
+        void import('./scrapers/scheduler.js').then(() => console.log('[Scheduler] enabled'));
+    } else {
+        console.log('[Scheduler] disabled (non-production)');
+    }
 
     // Admin work-queue lease sweeper. Runs hourly inside this process —
     // expired leases get marked abandoned so their SPs return to the
