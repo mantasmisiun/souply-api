@@ -226,6 +226,14 @@ export const addTemplateFromBasket = async (req: Request, res: Response, next: N
             if (items.length > 0) {
                 await insertTemplateItemsBatch(templateId, items, conn as any);
             }
+            // Link the source basket back to the new template so it becomes
+            // that template's first instance — the basket then inherits the
+            // template's cover (emoji/colour/name) and the template-derived UI
+            // via Basket.sourceTemplateId (no separate copy of those fields).
+            await conn.query(
+                'UPDATE Basket SET sourceTemplateId = ? WHERE id = ?',
+                [templateId, basketId],
+            );
             await conn.commit();
             res.status(201).json({ id: templateId, userId: basket.userId, name: nameCheck.name, itemCount: items.length });
         } catch (txErr) {
