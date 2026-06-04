@@ -126,6 +126,10 @@ export async function computeSnapshotForTemplate(templateId: number): Promise<Sn
             quantity: Number(it.quantity) || 1,
             matchMode: 'sku',
             name: String(it.productName ?? ''),
+            // Prefer the creator's intended pack size when the cluster spans
+            // multiple variants (snapAmount captured at save time).
+            anchorAmount: it.snapAmount != null ? Number(it.snapAmount) : null,
+            anchorUnit: it.snapUnit ?? null,
         })),
     });
 
@@ -380,12 +384,19 @@ export async function resolveSlug(
             mostExpensiveTotalEur: row.snapshotMostExpensiveEur !== null ? Number(row.snapshotMostExpensiveEur) : null,
             calculatedAt: row.snapshotCalculatedAt ? new Date(row.snapshotCalculatedAt).toISOString() : null,
         },
-        items: items.map((it: any) => ({
-            productId: Number(it.productId),
-            productName: String(it.productName ?? ''),
-            quantity: Number(it.quantity),
-            unit: it.unit ?? null,
-            imageUrls: Array.isArray(it.imageUrls) ? it.imageUrls : null,
-        })),
+        items: items.map((it: any) => {
+            const liveImages = Array.isArray(it.imageUrls) ? it.imageUrls : null;
+            return {
+                productId: Number(it.productId),
+                // Show what the creator saw when they built the template — the
+                // frozen snapshot name/image — so the shared view never drifts.
+                // Falls back to the live Product for items saved before the
+                // snapshot existed (null snap*).
+                productName: String(it.snapName ?? it.productName ?? ''),
+                quantity: Number(it.quantity),
+                unit: it.unit ?? null,
+                imageUrls: it.snapImageUrl ? [it.snapImageUrl] : liveImages,
+            };
+        }),
     };
 }

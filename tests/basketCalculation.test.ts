@@ -175,6 +175,48 @@ describe('pickCheapestForQuantity — non-weighable per-total semantics', () => 
 });
 
 // ---------------------------------------------------------------------------
+// pickCheapestForQuantity — anchor (nearest-attribute) preference
+// A shared template item carries the creator's intended pack size; resolution
+// should prefer the matching-size variant in a loose cluster, not silently
+// pick a cheaper different-size one.
+// ---------------------------------------------------------------------------
+
+describe('pickCheapestForQuantity — anchor preference', () => {
+    // Cluster spans 0.5 L and 1 L. The 0.5 L is cheaper per litre, so without
+    // an anchor the 1 L wouldn't necessarily win for a 1-unit ask. With a 1 L
+    // anchor we must land on the 1 L SP even if another size is cheaper.
+    const sp500 = makeSpRow({ id: 1, price: '0.60', amount: '500', unit: 'ml', isWeighable: false });
+    const sp1L  = makeSpRow({ id: 2, price: '1.10', amount: '1', unit: 'l', isWeighable: false });
+    const canonical = canonicalize([
+        { id: 1, amount: 500, unit: 'ml' },
+        { id: 2, amount: 1, unit: 'l' },
+    ])!;
+
+    it('prefers the SP matching the anchor pack size over a cheaper other size', () => {
+        // userQuantity 1 (canonical L). 500ml: ceil(1/0.5)=2 × 0.60 = 1.20;
+        // 1L: 1 × 1.10 = 1.10. 1L is cheaper here anyway — flip the prices so
+        // the wrong-size one is cheaper, to prove the anchor is what decides.
+        const cheapHalf = makeSpRow({ id: 1, price: '0.30', amount: '500', unit: 'ml', isWeighable: false });
+        const result = pickCheapestForQuantity([cheapHalf, sp1L], 1, canonical,
+            { amount: 1, unit: 'l' });
+        expect(result!.id).toBe(2); // the 1 L anchor match, despite 0.5 L being cheaper
+    });
+
+    it('falls back to the whole cluster when no SP matches the anchor size', () => {
+        // Anchor asks for 2 L; only 0.5 L and 1 L exist → no exact match → the
+        // normal cheapest-for-quantity pick stands (1 L wins for a 1-unit ask).
+        const result = pickCheapestForQuantity([sp500, sp1L], 1, canonical,
+            { amount: 2, unit: 'l' });
+        expect(result!.id).toBe(2);
+    });
+
+    it('behaves exactly as before when no anchor is supplied', () => {
+        const result = pickCheapestForQuantity([sp500, sp1L], 1, canonical);
+        expect(result).not.toBeNull(); // default path unchanged
+    });
+});
+
+// ---------------------------------------------------------------------------
 // priceItem
 // ---------------------------------------------------------------------------
 

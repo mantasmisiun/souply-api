@@ -706,9 +706,13 @@ export const instantiateTemplate = async (req: Request, res: Response, next: Nex
                     Number(it.productId),
                     Number(it.quantity),
                     'sku',
+                    // Carry the creator's intended pack size so this basket's
+                    // own recalculation prefers the matching variant.
+                    it.snapAmount != null ? Number(it.snapAmount) : null,
+                    it.snapUnit ?? null,
                 ]);
                 await (conn as any).query(
-                    `INSERT INTO BasketItem (basketId, productId, quantity, matchMode) VALUES ?`,
+                    `INSERT INTO BasketItem (basketId, productId, quantity, matchMode, anchorAmount, anchorUnit) VALUES ?`,
                     [values],
                 );
             }

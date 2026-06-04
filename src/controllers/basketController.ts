@@ -32,13 +32,16 @@ export const copyBasket = async (req: Request, res: Response, next: NextFunction
             await conn.beginTransaction();
             const newId = await createBasket(userId, newSourceTemplateId, conn);
             const [items]: any = await conn.query(
-                `SELECT productId, quantity, matchMode FROM BasketItem WHERE basketId = ?`,
+                `SELECT productId, quantity, matchMode, anchorAmount, anchorUnit FROM BasketItem WHERE basketId = ?`,
                 [sourceId],
             );
             if (items.length > 0) {
-                const values = items.map((it: any) => [newId, it.productId, it.quantity, it.matchMode ?? 'sku']);
+                const values = items.map((it: any) => [
+                    newId, it.productId, it.quantity, it.matchMode ?? 'sku',
+                    it.anchorAmount ?? null, it.anchorUnit ?? null,
+                ]);
                 await conn.query(
-                    `INSERT INTO BasketItem (basketId, productId, quantity, matchMode) VALUES ?`,
+                    `INSERT INTO BasketItem (basketId, productId, quantity, matchMode, anchorAmount, anchorUnit) VALUES ?`,
                     [values],
                 );
             }
