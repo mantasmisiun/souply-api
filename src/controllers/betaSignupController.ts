@@ -38,16 +38,37 @@ export const createBetaSignup = async (req: Request, res: Response, next: NextFu
             [cleanName, cleanEmail, cleanPlatform],
         );
 
-        // Internal ops ping (to the team).
+        // Has this address already been invited? `invitedAt` is only set after
+        // a successful send, so this both dedupes (never re-send to an invited
+        // address — anti-spam / mail-bomb) and is idempotent for the form.
+        const [rows]: any = await pool.query(
+            `SELECT invitedAt FROM BetaSignup WHERE email = ? LIMIT 1`,
+            [cleanEmail],
+        );
+        if (rows.length > 0 && rows[0].invitedAt != null) {
+            res.status(200).json({ ok: true, emailSent: true, alreadyInvited: true });
+            return;
+        }
+
+        // First invite for this address. Await the send so the landing form can
+        // show a real loading → sent / error state. The signup row is already
+        // saved, so a failed send returns 502 and is safely retryable (invitedAt
+        // stays NULL until a send succeeds).
+        try {
+            await sendBetaInviteEmail({ to: cleanEmail, name: cleanName, platform: cleanPlatform, lang: cleanLang });
+        } catch (e: any) {
+            console.error('[betaSignup] invite email failed:', e?.message);
+            res.status(502).json({ ok: false, emailSent: false });
+            return;
+        }
+        await pool.query(`UPDATE BetaSignup SET invitedAt = NOW() WHERE email = ?`, [cleanEmail]);
+
+        // Internal ops ping (to the team) — fire-and-forget, once, after the
+        // first successful invite.
         sendBetaSignupNotification({ name: cleanName, email: cleanEmail, platform: cleanPlatform })
             .catch((e) => console.error('[betaSignup] notification email failed:', e?.message));
 
-        // User-facing invite (to the signer). Both are fire-and-forget so a
-        // mail hiccup never fails a signup that's already saved.
-        sendBetaInviteEmail({ to: cleanEmail, name: cleanName, platform: cleanPlatform, lang: cleanLang })
-            .catch((e) => console.error('[betaSignup] invite email failed:', e?.message));
-
-        res.status(201).json({ ok: true });
+        res.status(201).json({ ok: true, emailSent: true });
     } catch (e) {
         next(e);
     }
