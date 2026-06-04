@@ -24,7 +24,14 @@ function getProviderClientId(provider: AuthProvider): string | string[] | null {
             .split(',').map(s => s.trim()).filter(Boolean);
         return ids.length === 0 ? null : ids.length === 1 ? ids[0] : ids;
     }
-    if (provider === 'apple')  return process.env.APPLE_OAUTH_CLIENT_ID  ?? null;
+    if (provider === 'apple') {
+        // Comma-separated like Google: native iOS tokens carry aud = the app's
+        // bundle id (lt.souply.app); web (Sign in with Apple JS) tokens carry
+        // aud = the Services ID (lt.souply.web). Trust both.
+        const ids = (process.env.APPLE_OAUTH_CLIENT_ID ?? '')
+            .split(',').map(s => s.trim()).filter(Boolean);
+        return ids.length === 0 ? null : ids.length === 1 ? ids[0] : ids;
+    }
     return null;
 }
 
