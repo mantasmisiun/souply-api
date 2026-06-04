@@ -71,7 +71,16 @@ export interface VerifiedTokenClaims {
     subject: string;
     email: string | null;
     emailVerified: boolean;
+    /** Profile fields from the provider token (Google `profile` scope). Used to
+     *  seed displayName/firstName/lastName/avatar on first link so the account
+     *  isn't nameless. Null for providers/tokens that don't carry them. */
+    name: string | null;
+    givenName: string | null;
+    familyName: string | null;
+    picture: string | null;
 }
+
+const str = (v: unknown): string | null => (typeof v === 'string' && v.trim() ? v : null);
 
 export async function verifyGoogleIdToken(idToken: string, clientId: string | string[]): Promise<VerifiedTokenClaims> {
     const { payload } = await jose.jwtVerify(idToken, googleJwks, {
@@ -82,6 +91,10 @@ export async function verifyGoogleIdToken(idToken: string, clientId: string | st
         subject: String(payload.sub ?? ''),
         email: typeof payload.email === 'string' ? payload.email : null,
         emailVerified: payload.email_verified === true,
+        name: str(payload.name),
+        givenName: str(payload.given_name),
+        familyName: str(payload.family_name),
+        picture: str(payload.picture),
     };
 }
 
@@ -97,6 +110,12 @@ export async function verifyAppleIdToken(idToken: string, clientId: string | str
         email: typeof payload.email === 'string' ? payload.email : null,
         // Apple flips `email_verified` to 'true' (string) sometimes — accept both.
         emailVerified: payload.email_verified === true || payload.email_verified === 'true',
+        // Apple only returns the name in the FIRST authorization's separate
+        // `user` field, never in the ID token — so there's nothing to seed here.
+        name: null,
+        givenName: null,
+        familyName: null,
+        picture: null,
     };
 }
 
@@ -128,6 +147,25 @@ export interface LinkOutcome {
  *      treat this as `loginExisting` so the client falls back to the
  *      already-verified account.
  */
+/**
+ * Seed displayName / firstName / lastName / avatar from the provider token,
+ * but ONLY for columns that are still empty — never overwrite a name the user
+ * has edited themselves. Runs on every sign-in so an account that predates
+ * name capture (or never had a name set) gets backfilled on its next login.
+ */
+async function backfillProfileFromClaims(userId: string, claims: VerifiedTokenClaims): Promise<void> {
+    if (!claims.name && !claims.givenName && !claims.familyName && !claims.picture) return;
+    await pool.query(
+        `UPDATE User
+            SET displayName = COALESCE(NULLIF(displayName, ''), ?),
+                firstName   = COALESCE(NULLIF(firstName, ''), ?),
+                lastName    = COALESCE(NULLIF(lastName, ''), ?),
+                avatarUrl   = COALESCE(NULLIF(avatarUrl, ''), ?)
+          WHERE id = ?`,
+        [claims.name, claims.givenName, claims.familyName, claims.picture, userId],
+    );
+}
+
 export async function linkOrCreateVerifiedUser(opts: {
     anonymousUserId: string;
     provider: AuthProvider;
@@ -143,7 +181,10 @@ export async function linkOrCreateVerifiedUser(opts: {
         [provider, claims.subject],
     );
     if (existing.length > 0) {
-        return { userId: String(existing[0].id), action: 'loginExisting' };
+        const userId = String(existing[0].id);
+        // Backfill the name on existing accounts whose fields are still empty.
+        await backfillProfileFromClaims(userId, claims);
+        return { userId, action: 'loginExisting' };
     }
 
     // Ensure the anonymous user row exists (clients sometimes call OAuth
@@ -169,6 +210,8 @@ export async function linkOrCreateVerifiedUser(opts: {
           WHERE id = ?`,
         [provider, claims.subject, claims.email, claims.emailVerified ? 1 : 0, anonymousUserId],
     );
+    // Seed the name/avatar from the provider on this first link.
+    await backfillProfileFromClaims(anonymousUserId, claims);
     return { userId: anonymousUserId, action: 'linked' };
 }
 

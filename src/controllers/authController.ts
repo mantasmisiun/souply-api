@@ -103,6 +103,11 @@ export const oauthSignIn = async (req: Request, res: Response, next: NextFunctio
                 id: link.userId,
                 username: user?.username ?? null,
                 displayName: user?.displayName ?? null,
+                // firstName/lastName were omitted here, so the web (which builds
+                // its display name from them) fell back to the email local-part
+                // right after OAuth. Include them to match /auth/me + the app.
+                firstName: user?.firstName ?? null,
+                lastName: user?.lastName ?? null,
                 bio: user?.bio ?? null,
                 avatarUrl: user?.avatarUrl ?? null,
                 email: user?.email ?? null,
