@@ -150,6 +150,29 @@ export const incrementTemplateUseCount = async (id: number, conn?: Connection) =
 };
 
 /**
+ * Record one engagement of `kind` for (template, actor) today and report
+ * whether it was the FIRST today. Backed by a per-day unique key, so callers
+ * bump useCount/visitCount at most once per actor per template per day (burst
+ * protection) while a genuine recurring shopper still counts once daily.
+ * `actorKey` = user UUID for known users, or `ip:<addr>` for anonymous web
+ * visitors. Self-exclusion (creator's own actions) is enforced by the caller.
+ */
+export const recordTemplateEngagementOncePerDay = async (
+    templateId: number,
+    actorKey: string,
+    kind: 'use' | 'visit',
+    conn?: Connection,
+): Promise<boolean> => {
+    const db = (conn ?? pool) as any;
+    const [r]: any = await db.query(
+        `INSERT IGNORE INTO TemplateEngagementDay (templateId, actorKey, kind, day)
+         VALUES (?, ?, ?, CURRENT_DATE())`,
+        [templateId, actorKey, kind],
+    );
+    return r?.affectedRows === 1;
+};
+
+/**
  * Stamp a content edit (name / cover / items) — drives the "Redaguota" stat.
  * Deliberately separate from `updatedAt` (which auto-bumps on every write,
  * including counters/shares) so the stat only reflects real edits.

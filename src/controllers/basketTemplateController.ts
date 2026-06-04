@@ -579,7 +579,10 @@ export const fetchSharedTemplate = async (req: Request, res: Response, next: Nex
             res.status(400).json({ error: 'Invalid slug' });
             return;
         }
-        const resolved = await resolveSlug(slug);
+        // Identify the viewer for the visit anti-inflation rules: the app sends
+        // its user id via x-user-id; anonymous web visitors fall back to IP.
+        const viewerUserId = typeof req.headers['x-user-id'] === 'string' ? req.headers['x-user-id'] : null;
+        const resolved = await resolveSlug(slug, { userId: viewerUserId, ip: req.ip ?? null });
         if (!resolved) {
             res.status(404).json({ error: 'Not found' });
             return;
