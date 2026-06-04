@@ -271,6 +271,54 @@ const BLENDED_ORDER_BY = `
     END DESC
 `;
 
+const parseChainLogos = (cl: any): { chainId: number; logoUrl: string | null }[] => {
+    if (!cl) return [];
+    if (typeof cl === 'string') { try { return JSON.parse(cl) || []; } catch { return []; } }
+    return Array.isArray(cl) ? cl : [];
+};
+
+/**
+ * Union, into each list product's chainLogos, the chains of the products the
+ * user personally swiped 'same' with — including off-list / Nepriskirta(688)
+ * orphans that aren't in this category. So a personally-merged "Bananai" shows
+ * BOTH Maxima + Rimi in the browse list, matching the detail screen. One hop is
+ * enough because equivalences are normalised to the root on write.
+ */
+async function attachPersonalChainLogos(userId: string, products: any[]): Promise<any[]> {
+    const productIds = products.map(p => Number(p.id)).filter(Boolean);
+    if (productIds.length === 0) return products;
+    const [rows]: any = await pool.query(
+        `SELECT
+             CASE WHEN sp1.productId IN (?) THEN sp1.productId ELSE sp2.productId END AS listProductId,
+             sc.id AS chainId, sc.miniLogoUrl AS logoUrl
+           FROM UserStoreProductEquivalence e
+           JOIN StoreProduct sp1 ON sp1.id = e.spIdA
+           JOIN StoreProduct sp2 ON sp2.id = e.spIdB
+           JOIN StoreProduct spOther
+             ON spOther.productId = (CASE WHEN sp1.productId IN (?) THEN sp2.productId ELSE sp1.productId END)
+           JOIN StoreChain sc ON sc.id = spOther.chainId
+          WHERE e.userId = ? AND e.verdict = 'same'
+            AND (sp1.productId IN (?) OR sp2.productId IN (?))`,
+        [productIds, productIds, userId, productIds, productIds],
+    );
+    if (rows.length === 0) return products;
+    const extraByProduct = new Map<number, Map<number, string | null>>();
+    for (const r of rows) {
+        const pid = Number(r.listProductId);
+        if (!extraByProduct.has(pid)) extraByProduct.set(pid, new Map());
+        extraByProduct.get(pid)!.set(Number(r.chainId), r.logoUrl ?? null);
+    }
+    for (const p of products) {
+        const extra = extraByProduct.get(Number(p.id));
+        if (!extra) continue;
+        const byChain = new Map<number, { chainId: number; logoUrl: string | null }>();
+        for (const cl of parseChainLogos(p.chainLogos)) byChain.set(cl.chainId, cl);
+        for (const [chainId, logoUrl] of extra) if (!byChain.has(chainId)) byChain.set(chainId, { chainId, logoUrl });
+        p.chainLogos = Array.from(byChain.values());
+    }
+    return products;
+}
+
 export const getProductsByCategoryWithAmounts = async (
     categoryId: number,
     mode: BrowseMode = 'base',
@@ -316,7 +364,8 @@ export const getProductsByCategoryWithAmounts = async (
     // basket +/- buttons to know the right step size + display unit).
     const productIds = products.map(p => Number(p.id));
     const canonicals = await loadCanonicalsForProducts(productIds);
-    return attachCanonicalFields(products, canonicals);
+    const withCanon = attachCanonicalFields(products, canonicals);
+    return userId ? await attachPersonalChainLogos(userId, withCanon) : withCanon;
 };
 
 const DISCOUNT_AMOUNT_EXPR = `
@@ -522,5 +571,6 @@ export const getAllProductsByL2WithAmounts = async (
 
     const productIds = products.map(p => Number(p.id));
     const canonicals = await loadCanonicalsForProducts(productIds);
-    return attachCanonicalFields(products, canonicals);
+    const withCanon = attachCanonicalFields(products, canonicals);
+    return userId ? await attachPersonalChainLogos(userId, withCanon) : withCanon;
 };
