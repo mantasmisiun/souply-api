@@ -14,6 +14,7 @@
  */
 
 import * as path from 'path';
+import { fileURLToPath } from 'node:url';
 import qrcode from 'qrcode';
 import sharp from 'sharp';
 import { uploadObject } from './storageService.js';
@@ -44,7 +45,13 @@ export async function buildBrandedQrPng(url: string): Promise<Buffer> {
     // shape so we sit it directly on the QR with no halo / outline
     // ring (per UX request — the asset reads as its own brand chip).
     const logoSize = Math.round(QR_SIZE * LOGO_RATIO);
-    const logoPath = path.resolve(process.cwd(), 'assets/logo.png');
+    // Resolve relative to THIS module, not process.cwd(): in prod the runtime
+    // cwd is /app while the asset ships at /app/dist/souply-api/assets, so a
+    // cwd-based path silently missed the logo and fell back to a bare QR. From
+    // the compiled service dir (dist/souply-api/src/services) and the dev source
+    // dir (src/services), the asset is two levels up under assets/.
+    const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+    const logoPath = path.resolve(moduleDir, '../../assets/logo.png');
     let logo: Buffer;
     try {
         logo = await sharp(logoPath).resize(logoSize, logoSize, { fit: 'contain' }).png().toBuffer();

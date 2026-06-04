@@ -226,6 +226,14 @@ export const addTemplateFromBasket = async (req: Request, res: Response, next: N
             if (items.length > 0) {
                 await insertTemplateItemsBatch(templateId, items, conn as any);
             }
+            // Link the source basket back to the new template so it becomes
+            // that template's first instance — the basket then inherits the
+            // template's cover (emoji/colour/name) and the template-derived UI
+            // via Basket.sourceTemplateId (no separate copy of those fields).
+            await conn.query(
+                'UPDATE Basket SET sourceTemplateId = ? WHERE id = ?',
+                [templateId, basketId],
+            );
             await conn.commit();
             res.status(201).json({ id: templateId, userId: basket.userId, name: nameCheck.name, itemCount: items.length });
         } catch (txErr) {
@@ -571,7 +579,10 @@ export const fetchSharedTemplate = async (req: Request, res: Response, next: Nex
             res.status(400).json({ error: 'Invalid slug' });
             return;
         }
-        const resolved = await resolveSlug(slug);
+        // Identify the viewer for the visit anti-inflation rules: the app sends
+        // its user id via x-user-id; anonymous web visitors fall back to IP.
+        const viewerUserId = typeof req.headers['x-user-id'] === 'string' ? req.headers['x-user-id'] : null;
+        const resolved = await resolveSlug(slug, { userId: viewerUserId, ip: req.ip ?? null });
         if (!resolved) {
             res.status(404).json({ error: 'Not found' });
             return;
@@ -695,9 +706,13 @@ export const instantiateTemplate = async (req: Request, res: Response, next: Nex
                     Number(it.productId),
                     Number(it.quantity),
                     'sku',
+                    // Carry the creator's intended pack size so this basket's
+                    // own recalculation prefers the matching variant.
+                    it.snapAmount != null ? Number(it.snapAmount) : null,
+                    it.snapUnit ?? null,
                 ]);
                 await (conn as any).query(
-                    `INSERT INTO BasketItem (basketId, productId, quantity, matchMode) VALUES ?`,
+                    `INSERT INTO BasketItem (basketId, productId, quantity, matchMode, anchorAmount, anchorUnit) VALUES ?`,
                     [values],
                 );
             }

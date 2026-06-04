@@ -19,7 +19,7 @@ WORKDIR /app
 # npm install layer caches independently of source changes.
 COPY souply-api/package*.json ./souply-api/
 WORKDIR /app/souply-api
-RUN npm ci
+RUN npm pkg delete scripts.prepare && npm ci
 
 # Copy the rest of the source (TS + shared parsers).
 WORKDIR /app
@@ -49,8 +49,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Prod deps only (playwright itself is a prod dep — scrapers need it).
+# Strip the husky `prepare` script first: it's dev-only and would abort the
+# build here (devDeps + .husky/ aren't present in this stage). sharp/playwright
+# install scripts still run — only the root prepare is removed.
 COPY souply-api/package*.json ./
-RUN npm ci --omit=dev && npm cache clean --force
+RUN npm pkg delete scripts.prepare && npm ci --omit=dev && npm cache clean --force
 
 # Download Chromium + all required system libraries into the image.
 # Must run after npm ci so the playwright CLI is available.

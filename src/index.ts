@@ -1,4 +1,5 @@
 import './config/env.js';
+import './config/sentry.js';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -28,13 +29,20 @@ import adminRoutes from './routes/adminRoutes.js';
 import adminInviteRoutes from './routes/adminInviteRoutes.js';
 import uploadRoutes from './routes/uploadRoutes.js';
 import betaSignupRoutes from './routes/betaSignupRoutes.js';
+import { signupLimiter, publicLimiter } from './middleware/rateLimit.js';
 import swaggerUi from 'swagger-ui-express';
 import swaggerSpec from './config/swagger.js';
-import './scrapers/scheduler.js';
 import { refreshDiscountedSummary } from './models/productModel.js';
+import { Sentry } from './config/sentry.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Trust the single reverse proxy (Nginx/Traefik) in front of the API so
+// `req.ip` resolves to the real client IP — required for the per-IP rate
+// limiter below to bucket per visitor rather than per proxy. Assumes ONE
+// proxy hop; bump the number if another hop (e.g. Cloudflare) is added.
+app.set('trust proxy', 1);
 
 // Allow-list of origins permitted to talk to this API from a browser.
 // Mobile app + scripts skip preflight; only the web client needs CORS.
@@ -78,16 +86,26 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));
 app.use(resolveLocale);
 
+// Per-IP rate limits on the public, unauthenticated endpoints (registered
+// before the routers so they run first). Strict on the beta-signup form,
+// moderate on the geocode proxy and OAuth sign-in.
+app.use('/api/beta-signups', signupLimiter);
+app.use('/api/geocode', publicLimiter);
+app.use('/api/auth/oauth', publicLimiter);
+
 app.use('/api', storeRoutes);
 app.use('/api', categoryRoutes);
 app.use('/api', productRoutes);
 app.use('/api', storeProductRoutes);
 app.use('/api', priceRoutes);
+// authRoutes BEFORE userRoutes: its specific /users/* paths
+// (username-available, @:username, me/*) must match before userRoutes'
+// generic GET /users/:id, which would otherwise swallow them (→ 404).
+app.use('/api', authRoutes);
 app.use('/api', userRoutes);
 app.use('/api', basketRoutes);
 app.use('/api', basketItemRoutes);
 app.use('/api', basketTemplateRoutes);
-app.use('/api', authRoutes);
 app.use('/api', shoppingListRoutes);
 app.use('/api', shoppingListItemRoutes);
 app.use('/api', receiptRoutes);
@@ -153,6 +171,10 @@ app.use((req, res) => {
     res.status(404).json({ error: `Route ${req.method} ${req.path} not found` });
 });
 
+// Sentry's error handler captures any error reaching here before our own
+// handler formats the JSON response. No-op when Sentry is disabled (dev/test).
+Sentry.setupExpressErrorHandler(app);
+
 // Error handler must be last
 app.use(errorHandler);
 
@@ -162,6 +184,21 @@ if (process.env.NODE_ENV !== 'test') {
         console.log(`Server running on port ${PORT}`);
         refreshDiscountedSummary().catch(e => console.error('[Startup] Discounts summary refresh failed:', e.message));
     });
+
+    // Scheduler (store scrapers, discount-refresh cron, daily Telegram digest)
+    // runs in PRODUCTION ONLY — staging/dev must never scrape the stores.
+    // Explicit ENABLE_SCHEDULER wins; otherwise default to NODE_ENV==='production'.
+    // Staging is NODE_ENV=production too, so .env.staging sets ENABLE_SCHEDULER=false.
+    // (The boot refreshDiscountedSummary above still runs everywhere — it only
+    // re-aggregates existing price data, it does not scrape.)
+    const schedulerEnabled = process.env.ENABLE_SCHEDULER
+        ? process.env.ENABLE_SCHEDULER === 'true'
+        : process.env.NODE_ENV === 'production';
+    if (schedulerEnabled) {
+        void import('./scrapers/scheduler.js').then(() => console.log('[Scheduler] enabled'));
+    } else {
+        console.log('[Scheduler] disabled (non-production)');
+    }
 
     // Admin work-queue lease sweeper. Runs hourly inside this process —
     // expired leases get marked abandoned so their SPs return to the

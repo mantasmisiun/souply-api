@@ -1,5 +1,6 @@
 import pool from '../config/db.js';
 import type { Locale } from '../middleware/locale.js';
+import { fetchUserPersonalRescues } from './receiptHydrationService.js';
 
 const CHAIN_COLORS: Record<string, string> = {
     'Rimi':   '#E31E2D',
@@ -154,6 +155,9 @@ export const getUserStats = async (userId: string, locale: Locale = 'lt') => {
     const spToProductId = new Map<number, number>();
     // spId → [{price, qty}] collected from all receipt items with a matched SP.
     const spPriceList = new Map<number, Array<{ price: number; qty: number }>>();
+    // productId → the user's personal orphan rescue (Nepriskirta → real category
+    // via their own "same" votes). Empty when there are no matched SPs.
+    let rescueByProduct = new Map<number, { categoryId: number | null; leafName: string | null; l2Name: string | null }>();
 
     if (receipts.length > 0) {
         // Pass 1: collect all unique storeProductIds for the batch SP lookup.
@@ -183,7 +187,7 @@ export const getUserStats = async (userId: string, locale: Locale = 'lt') => {
         if (allSpIds.length > 0) {
             const uniqueSpIds = [...new Set(allSpIds)];
             const [spRows]: any = await pool.query(
-                `SELECT sp.id AS spId, sp.productId,
+                `SELECT sp.id AS spId, sp.productId, p.categoryId AS rawCategoryId,
                         CASE
                           WHEN c.parentCategoryId IS NULL  THEN NULL
                           WHEN c2.parentCategoryId IS NULL THEN COALESCE(ct.name, c.name)
@@ -198,9 +202,24 @@ export const getUserStats = async (userId: string, locale: Locale = 'lt') => {
                   WHERE sp.id IN (?)`,
                 [locale, locale, uniqueSpIds],
             );
+            const orphanProductIds = new Set<number>();
             for (const row of spRows) {
                 spCategoryMap.set(Number(row.spId), row.categoryName);
                 spToProductId.set(Number(row.spId), Number(row.productId));
+                // 688 = hidden Nepriskirta bucket (same constant the resolver +
+                // receiptHydrationService use). Only these need a rescue.
+                if (Number(row.rawCategoryId) === 688) orphanProductIds.add(Number(row.productId));
+            }
+
+            // Apply the user's personal orphan rescues — the SAME source the
+            // receipt detail uses (fetchUserPersonalRescues) — but ONLY when an
+            // actual Nepriskirta orphan is present, so the common case keeps its
+            // 3-query budget. Orphans have no catalog L2 (the CASE returns NULL)
+            // and would vanish from the donut; the rescue maps them to the
+            // category the user sees on the receipt. Keyed by productId so a vote
+            // on one chain's SP rescues every sibling SP.
+            if (orphanProductIds.size > 0) {
+                rescueByProduct = await fetchUserPersonalRescues(userId, [...orphanProductIds], locale);
             }
         }
 
@@ -214,9 +233,11 @@ export const getUserStats = async (userId: string, locale: Locale = 'lt') => {
             if (!(chainName in chainMiniLogoMap)) {
                 chainMiniLogoMap[chainName] = receipt.chainMiniLogoUrl ?? null;
             }
-            const month = receipt.receiptDate
-                ? new Date(receipt.receiptDate).toISOString().slice(0, 7)
-                : null;
+            // Local calendar month — NOT toISOString(), which shifts by the
+            // container's UTC offset and can file a late-evening receipt in the
+            // previous month. Matches the bucket keys generated below.
+            const md = receipt.receiptDate ? new Date(receipt.receiptDate) : null;
+            const month = md ? `${md.getFullYear()}-${String(md.getMonth() + 1).padStart(2, '0')}` : null;
 
             for (const item of items) {
                 // Use promoPrice when set — that's what the user actually paid.
@@ -228,7 +249,15 @@ export const getUserStats = async (userId: string, locale: Locale = 'lt') => {
                 if (itemTotal <= 0) continue;
                 storeMap[chainName] = (storeMap[chainName] ?? 0) + itemTotal;
                 const spId = item.storeProductId ? Number(item.storeProductId) : 0;
-                const catName = spId ? spCategoryMap.get(spId) : undefined;
+                let catName = spId ? spCategoryMap.get(spId) : undefined;
+                // Orphan (Nepriskirta) lines have no catalog L2 → fall back to
+                // the user's personal rescue so they appear under the category
+                // shown on the receipt instead of being dropped.
+                if (!catName && spId) {
+                    const pid = spToProductId.get(spId);
+                    const rescued = pid != null ? rescueByProduct.get(pid)?.l2Name : undefined;
+                    if (rescued) catName = rescued;
+                }
                 if (catName) {
                     categoryMap[catName] = (categoryMap[catName] ?? 0) + itemTotal;
                 }
@@ -324,16 +353,33 @@ export const getUserStats = async (userId: string, locale: Locale = 'lt') => {
         color: CATEGORY_COLORS[(TOP_CATEGORIES + i) % CATEGORY_COLORS.length],
     }));
 
+    // Full monthly series from the earliest month with data (or 6 months ago,
+    // whichever is earlier) up to the current month, zero-filled. The client
+    // shows a 6-month window and can page back to see older data. Keys use
+    // local calendar components to match the month assignment in Pass 2.
     const now = new Date();
-    const monthlySpending = Array.from({ length: 6 }, (_, i) => {
-        const d = new Date(now.getFullYear(), now.getMonth() - (5 - i), 1);
-        const key = d.toISOString().slice(0, 7);
-        return {
+    const fmtKey = (y: number, mZero: number) => `${y}-${String(mZero + 1).padStart(2, '0')}`;
+    const currentKey = fmtKey(now.getFullYear(), now.getMonth());
+    const sixAgo = new Date(now.getFullYear(), now.getMonth() - 5, 1);
+    const sixAgoKey = fmtKey(sixAgo.getFullYear(), sixAgo.getMonth());
+    const dataKeys = Object.keys(monthMap).sort();
+    const earliestKey = dataKeys.length > 0 && dataKeys[0] < sixAgoKey ? dataKeys[0] : sixAgoKey;
+
+    const monthlySpending: { month: string; label: string; total: number }[] = [];
+    let [yy, mm] = earliestKey.split('-').map(Number); // mm is 1..12
+    // Guard caps the series at 20 years so a corrupt far-past date can't
+    // generate a runaway array.
+    for (let guard = 0; guard < 240; guard++) {
+        const key = `${yy}-${String(mm).padStart(2, '0')}`;
+        monthlySpending.push({
             month: key,
-            label: LT_MONTHS[d.getMonth()],
+            label: LT_MONTHS[mm - 1],
             total: Math.round((monthMap[key] ?? 0) * 100) / 100,
-        };
-    });
+        });
+        if (key === currentKey) break;
+        mm++;
+        if (mm > 12) { mm = 1; yy++; }
+    }
 
     return { storeBreakdown, categoryBreakdown, kitaBreakdown, monthlySpending, totalSavings };
 };

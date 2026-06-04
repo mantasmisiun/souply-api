@@ -91,9 +91,12 @@ export const fetchStoreProductsByProductId = async (req: Request, res: Response,
         // (head + variants) for the detail view. Default 'sku' keeps the
         // original single-Product behavior for old clients.
         const mode = req.query.mode === 'base' ? 'base' : 'sku';
+        // Optional: personalise the SP set to the caller's equivalence
+        // component (unions swiped-equivalent SPs, incl. 688-bucket orphans).
+        const userId = typeof req.query.userId === 'string' && req.query.userId ? req.query.userId : undefined;
         const storeProducts = mode === 'base'
-            ? await getStoreProductsForCluster(productId)
-            : await getStoreProductsByProductId(productId);
+            ? await getStoreProductsForCluster(productId, userId)
+            : await getStoreProductsByProductId(productId, userId);
         res.json(storeProducts);
     } catch (error) {
         next(error);

@@ -56,6 +56,17 @@ export default async function globalSetup() {
             // eslint-disable-next-line no-console
             console.log(`[testdb] bootstrapped ${dbName}: ${after.length} tables`);
         }
+
+        // Reference rows that tests assume exist. The "Nepriskirta"
+        // (unassigned) default category id 688 is a Product FK parent in
+        // adminReceipts.test.ts AND the catch-all the matcher looks up by
+        // `name='Nepriskirta' AND isHidden=1` (receiptLineResolver) — so it
+        // MUST be hidden. ON DUPLICATE keeps it correct even if a stale row
+        // (isHidden=0) already exists. Idempotent.
+        await conn.query(
+            "INSERT INTO Category (id, name, isHidden) VALUES (688, 'Nepriskirta', 1) " +
+            "ON DUPLICATE KEY UPDATE isHidden = 1",
+        );
     } finally {
         await conn.end();
     }

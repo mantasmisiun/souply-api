@@ -18,7 +18,7 @@ import {
     duplicateListItems,
 } from '../models/shoppingListItemModel.js';
 import { getBasketById, updateBasketStatus } from '../models/basketModel.js';
-import { addCollectiveSavings, incrementTemplateUseCount } from '../models/basketTemplateModel.js';
+import { addCollectiveSavings, incrementTemplateUseCount, getTemplateById, recordTemplateEngagementOncePerDay } from '../models/basketTemplateModel.js';
 import { addShoppingListMember, isShoppingListMember } from '../models/shoppingListMemberModel.js';
 import {
     createShareToken,
@@ -106,9 +106,20 @@ export const addShoppingList = async (req: Request, res: Response, next: NextFun
                     const basket = await getBasketById(Number(basketId));
                     if (basket?.sourceTemplateId) {
                         const templateId = Number(basket.sourceTemplateId);
-                        await incrementTemplateUseCount(templateId, conn);
+                        const template = await getTemplateById(templateId);
+                        // Anti-inflation: never count a creator's own use of their
+                        // template, and count any user's use at most once per day
+                        // (a genuine weekly shopper still adds ~1/week). Savings
+                        // stay on the existing per-basket logic, just skipped for
+                        // self-use too.
+                        const isSelfUse = !template || template.userId === userId;
+                        const firstUseToday = !isSelfUse
+                            && await recordTemplateEngagementOncePerDay(templateId, String(userId), 'use', conn);
+                        if (firstUseToday) {
+                            await incrementTemplateUseCount(templateId, conn);
+                        }
                         const savings = Number(savingsEur);
-                        if (Number.isFinite(savings) && savings > 0) {
+                        if (!isSelfUse && Number.isFinite(savings) && savings > 0) {
                             // Anti-tamper cap: a realised saving can't exceed the
                             // basket's own value (Σ chosen-store item prices).
                             const basketValue = Array.isArray(items)

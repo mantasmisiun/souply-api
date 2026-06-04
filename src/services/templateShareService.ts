@@ -16,7 +16,7 @@
 
 import pool from '../config/db.js';
 import { calculateBasketForStores, type StoreResult } from './basketCalculationService.js';
-import { getTemplateItems, getTemplateById } from '../models/basketTemplateModel.js';
+import { getTemplateItems, getTemplateById, recordTemplateEngagementOncePerDay } from '../models/basketTemplateModel.js';
 import { generateBrandedQrWithDataUri } from './templateQrService.js';
 import { shareUrlForSlug } from '../config/urls.js';
 
@@ -126,6 +126,10 @@ export async function computeSnapshotForTemplate(templateId: number): Promise<Sn
             quantity: Number(it.quantity) || 1,
             matchMode: 'sku',
             name: String(it.productName ?? ''),
+            // Prefer the creator's intended pack size when the cluster spans
+            // multiple variants (snapAmount captured at save time).
+            anchorAmount: it.snapAmount != null ? Number(it.snapAmount) : null,
+            anchorUnit: it.snapUnit ?? null,
         })),
     });
 
@@ -300,12 +304,15 @@ export interface ResolvedSlug {
     }>;
 }
 
-export async function resolveSlug(slug: string): Promise<ResolvedSlug | null> {
+export async function resolveSlug(
+    slug: string,
+    viewer?: { userId?: string | null; ip?: string | null },
+): Promise<ResolvedSlug | null> {
     // Match the slug regardless of visibility so a since-made-private template
     // resolves to a "made private" state rather than a 404 (the link the
     // creator already shared keeps opening — it just explains it's off now).
     const [rows]: any = await pool.query(
-        `SELECT id, name, creatorHandle, useCount, visibility,
+        `SELECT id, userId, name, creatorHandle, useCount, visibility,
                 coverColor, coverImage,
                 snapshotCheapestChainId, snapshotTotalEur, snapshotRunnerUpEur,
                 snapshotMostExpensiveEur, snapshotCalculatedAt
@@ -341,10 +348,22 @@ export async function resolveSlug(slug: string): Promise<ResolvedSlug | null> {
         };
     }
 
-    // Count this resolve as a visit. Fire-and-forget — an approximate
-    // counter is fine for a creator-facing "Apsilankymai" metric, and we
-    // never want a counter write to fail the public page load.
-    pool.query(`UPDATE BasketTemplate SET visitCount = visitCount + 1 WHERE id = ?`, [row.id]).catch(() => {});
+    // Count this resolve as a visit — but never for the creator opening their
+    // own link (self-boost), and at most once per viewer per day (burst
+    // protection). Viewer key = the app's user id, else the web visitor's IP.
+    // Fire-and-forget: a counter write must never fail the public page load.
+    const viewerUserId = viewer?.userId ?? null;
+    const actorKey = viewerUserId ?? (viewer?.ip ? `ip:${viewer.ip}` : null);
+    const isCreator = viewerUserId != null && viewerUserId === row.userId;
+    if (!isCreator && actorKey) {
+        recordTemplateEngagementOncePerDay(Number(row.id), actorKey, 'visit')
+            .then((firstToday) => {
+                if (firstToday) {
+                    pool.query(`UPDATE BasketTemplate SET visitCount = visitCount + 1 WHERE id = ?`, [row.id]).catch(() => {});
+                }
+            })
+            .catch(() => {});
+    }
 
     const items = await getTemplateItems(Number(row.id));
 
@@ -365,12 +384,23 @@ export async function resolveSlug(slug: string): Promise<ResolvedSlug | null> {
             mostExpensiveTotalEur: row.snapshotMostExpensiveEur !== null ? Number(row.snapshotMostExpensiveEur) : null,
             calculatedAt: row.snapshotCalculatedAt ? new Date(row.snapshotCalculatedAt).toISOString() : null,
         },
-        items: items.map((it: any) => ({
-            productId: Number(it.productId),
-            productName: String(it.productName ?? ''),
-            quantity: Number(it.quantity),
-            unit: it.unit ?? null,
-            imageUrls: Array.isArray(it.imageUrls) ? it.imageUrls : null,
-        })),
+        items: items.map((it: any) => {
+            const liveImages = Array.isArray(it.imageUrls) ? it.imageUrls : null;
+            return {
+                productId: Number(it.productId),
+                // Show what the creator saw when they built the template — the
+                // frozen snapshot name/image — so the shared view never drifts.
+                // Falls back to the live Product for items saved before the
+                // snapshot existed (null snap*).
+                productName: String(it.snapName ?? it.productName ?? ''),
+                quantity: Number(it.quantity),
+                unit: it.unit ?? null,
+                imageUrls: it.snapImageUrl ? [it.snapImageUrl] : liveImages,
+                // The representative SP's pack size (e.g. 1 l, 500 g) — shown
+                // muted under the name. Null for pre-snapshot items.
+                packAmount: it.snapAmount != null ? Number(it.snapAmount) : null,
+                packUnit: it.snapUnit ?? null,
+            };
+        }),
     };
 }

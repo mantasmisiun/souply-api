@@ -3,6 +3,9 @@ dist/
 .env
 .env.test
 schema.sql
+# ...but the structure-only test schema MUST be tracked — CI loads it to
+# bootstrap the empty souply_test_ci database (no data, no secrets).
+!tests/schema/schema.sql
 
 # Transient debug outputs
 swipe-debug.log

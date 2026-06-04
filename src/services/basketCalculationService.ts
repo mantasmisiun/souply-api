@@ -75,7 +75,17 @@ export interface CalculateOptions {
     /** When provided, skip the `Basket` table read and price these items
      *  directly. Used by the šablonai share-snapshot pipeline so a virtual
      *  template can be priced without first persisting a temp basket. */
-    items?: Array<{ productId: number; quantity: number; matchMode?: 'sku' | 'base'; name?: string }>;
+    items?: Array<{
+        productId: number;
+        quantity: number;
+        matchMode?: 'sku' | 'base';
+        name?: string;
+        /** The creator's intended variant (from the template item's anchor
+         *  snapshot). When present, resolution prefers in-cluster SPs whose
+         *  pack size matches before falling back to the whole cluster. */
+        anchorAmount?: number | null;
+        anchorUnit?: string | null;
+    }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -208,12 +218,13 @@ function getCheapestFromCache(
     matchMode: MatchMode,
     userQuantity: number,
     canonical: CanonicalMeta | null,
+    anchor: { amount: number; unit: string } | null = null,
 ): (SpRow & { effectivePrice: number }) | null {
     const direct = cache.sku.get(storeId)?.get(productId) ?? [];
     const cluster = matchMode === 'base'
         ? (cache.cluster.get(storeId)?.get(productId) ?? [])
         : [];
-    return pickCheapestForQuantity([...direct, ...cluster], userQuantity, canonical);
+    return pickCheapestForQuantity([...direct, ...cluster], userQuantity, canonical, anchor);
 }
 
 /**
@@ -255,6 +266,8 @@ export const calculateBasketForStores = async (
               quantity: Number(it.quantity),
               matchMode: it.matchMode ?? 'sku',
               name: it.name ?? '',
+              anchorAmount: it.anchorAmount ?? null,
+              anchorUnit: it.anchorUnit ?? null,
           }))
         : await getBasketProductIds(basketId);
 
@@ -297,6 +310,11 @@ export const calculateBasketForStores = async (
             const itemResults = await Promise.all(
                 basketItems.map((basketItem: any) => {
                     const pid = Number(basketItem.productId);
+                    const anchorAmount = basketItem.anchorAmount != null
+                        ? Number(basketItem.anchorAmount) : null;
+                    const anchor = anchorAmount != null && Number.isFinite(anchorAmount)
+                        ? { amount: anchorAmount, unit: String(basketItem.anchorUnit ?? '') }
+                        : null;
                     return resolveItemAtStore(
                         pid,
                         parseFloat(basketItem.quantity),
@@ -308,6 +326,7 @@ export const calculateBasketForStores = async (
                         tier3Cache,
                         tier4Cache,
                         canonicalByProduct.get(pid) ?? null,
+                        anchor,
                     );
                 })
             );
@@ -378,6 +397,7 @@ async function resolveItemAtStore(
     tier3Cache: Map<string, (SpRow & { effectivePrice: number }) | null>,
     tier4Cache: Map<number, (SpRow & { effectivePrice: number }) | null>,
     canonical: CanonicalMeta | null,
+    anchor: { amount: number; unit: string } | null = null,
 ): Promise<ItemResult> {
     // Tier 1 / 2: served from the pre-fetched cache — no DB call. Pricing
     // is per-total: for non-weighable items with multiple pack sizes, the
@@ -385,7 +405,7 @@ async function resolveItemAtStore(
     // small quantity (e.g. 4-pack at 0.40 beats 30-pack at 2.50 for a
     // basket of 5). pickCheapestForQuantity computes the actual basket
     // cost per SP and picks the cheapest total.
-    const direct = getCheapestFromCache(tier12Cache, storeId, productId, matchMode, userQuantity, canonical);
+    const direct = getCheapestFromCache(tier12Cache, storeId, productId, matchMode, userQuantity, canonical, anchor);
     if (direct) {
         return priceItem(productId, userQuantity, productName, matchMode, direct,
             { isSubstituted: false, isCrossChainAverage: false }, canonical);
@@ -724,6 +744,7 @@ export function pickCheapestForQuantity(
     rows: SpRow[],
     userQuantity: number,
     canonical: CanonicalMeta | null,
+    anchor: { amount: number; unit: string } | null = null,
 ): (SpRow & { effectivePrice: number }) | null {
     const priced = rows.filter(r => r.price !== null);
     if (!priced.length) return null;
@@ -733,7 +754,28 @@ export function pickCheapestForQuantity(
         : priced;
     // Fall back to all-priced when canonical exists but no in-family SPs
     // are stocked at this store (rare — e.g. only outlier SPs available).
-    const candidates = eligible.length > 0 ? eligible : priced;
+    let candidates = eligible.length > 0 ? eligible : priced;
+
+    // Nearest-attribute preference: when the item carries an anchor (the
+    // creator's intended variant), restrict to in-cluster SPs whose pack size
+    // matches the anchor's before picking the cheapest — so a shared template
+    // doesn't silently resolve to a different-size variant. Falls back to the
+    // whole cluster when no SP at this store matches the anchor size.
+    if (anchor && Number.isFinite(anchor.amount) && anchor.amount > 0) {
+        const anchorCanon = canonical
+            ? (toCanonicalAmount(anchor.amount, anchor.unit ?? '', canonical) ?? anchor.amount)
+            : anchor.amount;
+        if (anchorCanon > 0) {
+            const nearest = candidates.filter(sp => {
+                const raw = sp.amount ? parseFloat(String(sp.amount)) : 1;
+                const canon = canonical
+                    ? (toCanonicalAmount(raw, sp.unit ?? '', canonical) ?? raw)
+                    : raw;
+                return Math.abs(canon - anchorCanon) <= anchorCanon * 0.01; // ~same pack size
+            });
+            if (nearest.length > 0) candidates = nearest;
+        }
+    }
 
     let best: (SpRow & { effectivePrice: number }) | null = null;
     let bestTotal = Infinity;

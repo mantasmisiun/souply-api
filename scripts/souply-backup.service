@@ -1,0 +1,13 @@
+[Unit]
+Description=Souply production backup (DB + MinIO images + secrets)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+# Adjust the path if the prod clone lives elsewhere.
+ExecStart=/opt/souply/souply-api/scripts/backup-prod.sh
+# Backups must finish even if slow; no hard timeout for the dump+rsync.
+TimeoutStartSec=0
+Nice=10
+IOSchedulingClass=idle

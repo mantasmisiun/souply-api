@@ -1,0 +1,41 @@
+# STAGING souply-api → :3002 → souply_staging (api.souply.manofoto.dpdns.org).
+#
+# Built from the `staging` worktree on OMV. Image tag: souply-api:staging.
+# Independent of prod — staging can run ahead of main. Build context is the
+# parent so the shared/ sibling is included (worktree must place shared/ there).
+#
+#   cd /opt/souply-staging/souply-api  # staging worktree
+#   docker compose -f docker-compose.staging.yml up -d --build
+name: souply-staging
+services:
+  souply-api-staging:
+    build:
+      context: ..
+      dockerfile: souply-api/Dockerfile
+    image: souply-api:staging
+    container_name: souply-api-staging
+    restart: unless-stopped
+    env_file:
+      - .env.staging            # DB_NAME=souply_staging, CORS=https://souply.manofoto.dpdns.org, ENABLE_SCHEDULER=false
+    ports:
+      - "3002:3000"
+    networks:
+      - mysql_net
+      - minio_2_default
+      - souply_redis_default
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+networks:
+  mysql_net:
+    external: true
+    name: mysql_net
+  minio_2_default:
+    external: true
+    name: minio_2_default
+  souply_redis_default:
+    external: true
+    name: souply_redis_default
