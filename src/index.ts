@@ -29,6 +29,7 @@ import adminRoutes from './routes/adminRoutes.js';
 import adminInviteRoutes from './routes/adminInviteRoutes.js';
 import uploadRoutes from './routes/uploadRoutes.js';
 import betaSignupRoutes from './routes/betaSignupRoutes.js';
+import { signupLimiter, publicLimiter } from './middleware/rateLimit.js';
 import swaggerUi from 'swagger-ui-express';
 import swaggerSpec from './config/swagger.js';
 import { refreshDiscountedSummary } from './models/productModel.js';
@@ -36,6 +37,12 @@ import { Sentry } from './config/sentry.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Trust the single reverse proxy (Nginx/Traefik) in front of the API so
+// `req.ip` resolves to the real client IP — required for the per-IP rate
+// limiter below to bucket per visitor rather than per proxy. Assumes ONE
+// proxy hop; bump the number if another hop (e.g. Cloudflare) is added.
+app.set('trust proxy', 1);
 
 // Allow-list of origins permitted to talk to this API from a browser.
 // Mobile app + scripts skip preflight; only the web client needs CORS.
@@ -78,6 +85,13 @@ app.use(cors({
 
 app.use(express.json({ limit: '10mb' }));
 app.use(resolveLocale);
+
+// Per-IP rate limits on the public, unauthenticated endpoints (registered
+// before the routers so they run first). Strict on the beta-signup form,
+// moderate on the geocode proxy and OAuth sign-in.
+app.use('/api/beta-signups', signupLimiter);
+app.use('/api/geocode', publicLimiter);
+app.use('/api/auth/oauth', publicLimiter);
 
 app.use('/api', storeRoutes);
 app.use('/api', categoryRoutes);
