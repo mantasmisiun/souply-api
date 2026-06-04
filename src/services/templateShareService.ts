@@ -396,6 +396,10 @@ export async function resolveSlug(
                 quantity: Number(it.quantity),
                 unit: it.unit ?? null,
                 imageUrls: it.snapImageUrl ? [it.snapImageUrl] : liveImages,
+                // The representative SP's pack size (e.g. 1 l, 500 g) — shown
+                // muted under the name. Null for pre-snapshot items.
+                packAmount: it.snapAmount != null ? Number(it.snapAmount) : null,
+                packUnit: it.snapUnit ?? null,
             };
         }),
     };
