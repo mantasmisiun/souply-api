@@ -62,46 +62,76 @@ export async function sendBetaInviteEmail(opts: {
 }): Promise<void> {
     const from = process.env.SMTP_FROM ?? 'Souply <noreply@souply.lt>';
     const isIos = opts.platform === 'ios';
-    const storeUrl = (isIos ? process.env.BETA_TESTFLIGHT_URL : process.env.BETA_PLAYSTORE_URL) || '#';
     const year = new Date().getFullYear();
     const en = opts.lang === 'en';
+    // Android closed-testing self-serve: testers join the Google Group, then
+    // open the Play opt-in link. iOS isn't live yet → TestFlight URL if set.
+    const groupUrl = process.env.BETA_GROUP_URL || 'https://groups.google.com/g/souply-testers';
+    const optinUrl = process.env.BETA_OPTIN_URL || 'https://play.google.com/apps/testing/lt.souply.app';
+    const testflightUrl = process.env.BETA_TESTFLIGHT_URL || '#';
 
     const t = en ? {
         lang: 'en',
-        subject: 'Welcome to the Souply beta 🎉',
-        heading: "You're on the beta list 🎉",
+        subject: 'Your Souply beta invite 🎉',
+        heading: "You're invited to test Souply 🎉",
         greeting: `Hi ${opts.name}!`,
-        body: 'Thanks for joining the Souply beta. Every Lithuanian store in one place — so you shop smarter. Install the app to get started:',
-        button: isIos ? 'Download on TestFlight' : 'Get it on Google Play',
-        fallback: "If the button doesn't work, copy this link:",
+        intro: "Here's how to start — two quick steps:",
+        step1Title: '1. Join the testers group',
+        step1Btn: 'Join the group',
+        step1Note: 'Sign in with your Google account and tap “Join group”.',
+        step2Title: '2. Install the app',
+        step2Btn: 'Install from Google Play',
+        step2Note: 'Tap “Become a tester”, then “Download it on Google Play”.',
+        sameAccount: 'Use the same Google account for both steps.',
+        iosBody: 'Thanks for joining! Install the app on TestFlight to get started:',
+        iosBtn: 'Download on TestFlight',
         footerQ: 'Questions? Email',
         slogan: 'Shop smart',
     } : {
         lang: 'lt',
-        subject: 'Sveika(s) atvykę į Souply beta 🎉',
-        heading: 'Tu beta sąraše 🎉',
+        subject: 'Tavo Souply testavimo kvietimas 🎉',
+        heading: 'Tapk Souply testuotoju 🎉',
         greeting: `Sveika(s), ${opts.name}!`,
-        body: 'Ačiū, kad prisijungei prie Souply beta. Visos Lietuvos parduotuvės vienoje vietoje — kad pirktum pigiau. Įsidiek programėlę ir pradėk:',
-        button: isIos ? 'Atsisiųsti per TestFlight' : 'Atsisiųsti iš Google Play',
-        fallback: 'Jei mygtukas neveikia, nukopijuok nuorodą:',
+        intro: 'Štai kaip pradėti — du paprasti žingsniai:',
+        step1Title: '1. Prisijunk prie testuotojų grupės',
+        step1Btn: 'Prisijungti prie grupės',
+        step1Note: 'Prisijunk su savo Google paskyra ir paspausk „Join group“.',
+        step2Title: '2. Įsidiek programėlę',
+        step2Btn: 'Įdiegti iš Google Play',
+        step2Note: 'Paspausk „Become a tester“, tada „Download it on Google Play“.',
+        sameAccount: 'Naudok tą pačią Google paskyrą abiem žingsniams.',
+        iosBody: 'Ačiū, kad prisijungei! Įsidiek programėlę per TestFlight:',
+        iosBtn: 'Atsisiųsti per TestFlight',
         footerQ: 'Turi klausimų? Parašyk',
         slogan: 'Apsipirk išmaniai',
     };
+
+    const btn = (href: string, label: string) =>
+        `<a href="${href}" style="display:inline-block;background:#EB6784;color:#ffffff;text-decoration:none;font-size:15px;font-weight:600;padding:13px 30px;border-radius:9999px;">${label}</a>`;
+    const step = (title: string, button: string, note: string) =>
+        `<tr><td style="padding-bottom:22px;">
+          <div style="font-size:16px;font-weight:700;color:#1f1b1d;padding-bottom:10px;">${title}</div>
+          <div style="padding-bottom:8px;">${button}</div>
+          <div style="font-size:13px;line-height:1.5;color:#9b9498;">${note}</div>
+        </td></tr>`;
+
+    const ctaHtml = isIos
+        ? `<tr><td align="center" style="font-size:15px;line-height:1.6;color:#5b5358;padding-bottom:24px;">${t.iosBody}</td></tr>
+           <tr><td align="center" style="padding-bottom:20px;">${btn(testflightUrl, t.iosBtn)}</td></tr>`
+        : `<tr><td align="center" style="font-size:15px;line-height:1.6;color:#5b5358;padding-bottom:26px;">${t.intro}</td></tr>
+           ${step(t.step1Title, btn(groupUrl, t.step1Btn), t.step1Note)}
+           ${step(t.step2Title, btn(optinUrl, t.step2Btn), t.step2Note)}
+           <tr><td style="padding-bottom:24px;"><div style="font-size:13px;line-height:1.5;color:#5b5358;background:#fdf0f3;border-radius:12px;padding:12px 16px;">⚠️ ${t.sameAccount}</div></td></tr>`;
+
+    const textLines = isIos
+        ? [t.greeting, '', t.iosBody, '', testflightUrl]
+        : [t.greeting, '', t.intro, '', `${t.step1Title}: ${groupUrl}`, '', `${t.step2Title}: ${optinUrl}`, '', `! ${t.sameAccount}`];
 
     await transporter.sendMail({
         from,
         to: opts.to,
         subject: t.subject,
-        text: [
-            t.greeting,
-            '',
-            t.body,
-            '',
-            storeUrl,
-            '',
-            `${t.footerQ} support@souply.lt`,
-            '— Souply',
-        ].join('\n'),
+        text: [...textLines, '', `${t.footerQ} support@souply.lt`, '— Souply'].join('\n'),
         html: `<!DOCTYPE html>
 <html lang="${t.lang}">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"></head>
@@ -118,17 +148,10 @@ export async function sendBetaInviteEmail(opts: {
         <tr><td align="center" style="font-size:24px;line-height:1.25;font-weight:700;color:#1f1b1d;letter-spacing:-.02em;padding-bottom:14px;">
           ${t.heading}
         </td></tr>
-        <tr><td align="center" style="font-size:15px;line-height:1.6;color:#5b5358;padding-bottom:32px;">
-          ${t.greeting}<br>
-          ${t.body}
+        <tr><td align="center" style="font-size:15px;line-height:1.6;color:#5b5358;padding-bottom:28px;">
+          ${t.greeting}
         </td></tr>
-        <tr><td align="center" style="padding-bottom:24px;">
-          <a href="${storeUrl}" style="display:inline-block;background:#EB6784;color:#ffffff;text-decoration:none;font-size:16px;font-weight:600;padding:15px 36px;border-radius:9999px;">${t.button}</a>
-        </td></tr>
-        <tr><td align="center" style="font-size:12px;line-height:1.5;color:#9b9498;padding-bottom:32px;">
-          ${t.fallback}<br>
-          <span style="color:#5b5358;word-break:break-all;">${storeUrl}</span>
-        </td></tr>
+        ${ctaHtml}
         <tr><td style="border-top:1px solid #ece8e7;padding-bottom:20px;"></td></tr>
         <tr><td align="center" style="font-size:12px;line-height:1.6;color:#b9b1b5;">
           ${t.footerQ} <a href="mailto:support@souply.lt" style="color:#EB6784;text-decoration:none;">support@souply.lt</a><br>
