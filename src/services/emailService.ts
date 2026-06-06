@@ -65,10 +65,10 @@ export async function sendBetaInviteEmail(opts: {
     const year = new Date().getFullYear();
     const en = opts.lang === 'en';
     // Android closed-testing self-serve: testers join the Google Group, then
-    // open the Play opt-in link. iOS isn't live yet → TestFlight URL if set.
+    // open the Play opt-in link. iOS testers get the public TestFlight link.
     const groupUrl = process.env.BETA_GROUP_URL || 'https://groups.google.com/g/souply-testers';
     const optinUrl = process.env.BETA_OPTIN_URL || 'https://play.google.com/apps/testing/lt.souply.app';
-    const testflightUrl = process.env.BETA_TESTFLIGHT_URL || '#';
+    const testflightUrl = process.env.BETA_TESTFLIGHT_URL || 'https://testflight.apple.com/join/XYTFFyEu';
 
     const t = en ? {
         lang: 'en',
