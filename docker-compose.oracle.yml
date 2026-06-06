@@ -1,0 +1,96 @@
+# ORACLE CLOUD VM — self-contained full prod stack (mariadb + api + web + tunnel).
+#
+# Unlike docker-compose.prod.yml (OMV-coupled: external mysql_net / minio_2 /
+# redis networks), this is fully standalone. Redis was an orphan (no client in
+# package.json) and is dropped. Images come from R2, so no MinIO. Ingress is a
+# Cloudflare Tunnel — NO host ports are published, so Oracle's VCN + iptables
+# stay closed to everything but SSH.
+#
+# Lives in /opt/souply/souply-api/ on the VM (build contexts are relative:
+# api needs the parent for shared/, web is its own dir).
+#
+#   cd /opt/souply/souply-api
+#   docker compose -f docker-compose.oracle.yml up -d --build
+#
+# Two env files:
+#   .env             (this dir) — compose substitution: DB_ROOT_PASSWORD + CLOUDFLARE_TUNNEL_TOKEN
+#   .env.production  (this dir) — the souply-api runtime env (DB_HOST=mariadb, R2, SMTP, …)
+name: souply-prod
+services:
+  mariadb:
+    image: mariadb:11.4            # match OMV's major version (check: docker exec souply-mariadb mariadb --version)
+    container_name: souply-mariadb
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?set DB_ROOT_PASSWORD in .env}
+      MARIADB_DATABASE: souply_production
+    volumes:
+      - mariadb_data:/var/lib/mysql
+    # No host port — only souply-api reaches it over the compose network.
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  souply-api:
+    build:
+      context: ..                  # /opt/souply — includes the shared/ sibling
+      dockerfile: souply-api/Dockerfile
+    image: souply-api:prod
+    container_name: souply-api-prod
+    restart: unless-stopped
+    env_file:
+      - .env.production            # DB_HOST=mariadb, DB_PORT=3306, R2 MINIO_*, SMTP, ENABLE_SCHEDULER=true
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    expose:
+      - "3000"                     # internal only; the tunnel reaches it by name
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+  souply-web:
+    build:
+      context: ../souply-web
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: https://api.souply.lt
+        VITE_GOOGLE_CLIENT_ID: 554949767682-oqvvbc2a3klc1tedqvbdotmg4uqkj5s3.apps.googleusercontent.com
+        VITE_APP_ENV: prod
+        VITE_APPLE_SERVICES_ID: lt.souply.web
+        VITE_APPLE_REDIRECT_URI: https://souply.lt/auth/callback
+    image: souply-web:prod
+    container_name: souply-web-prod
+    restart: unless-stopped
+    environment:
+      SSR_API_URL: http://souply-api:3000      # in-network, replaces the OMV 192.168.1.212:3001
+      PUBLIC_ORIGIN: https://souply.lt
+      OG_FALLBACK_IMAGE: https://souply.lt/og-default.png
+    expose:
+      - "80"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:80/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: souply-cloudflared
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:?set CLOUDFLARE_TUNNEL_TOKEN in .env}
+    depends_on:
+      - souply-api
+      - souply-web
+
+volumes:
+  mariadb_data:
