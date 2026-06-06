@@ -73,7 +73,11 @@ export const oauthSignIn = async (req: Request, res: Response, next: NextFunctio
             claims = provider === 'google'
                 ? await verifyGoogleIdToken(idToken, clientId)
                 : await verifyAppleIdToken(idToken, clientId);
-        } catch {
+        } catch (e: any) {
+            // Surface WHY verification failed (aud mismatch, expired, signature,
+            // JWKS fetch). `clientId` here is the accepted-audience list, so a
+            // mismatch line shows both the expected list and the token's aud.
+            console.error(`[oauth] ${provider} verify failed (accepted aud=${JSON.stringify(clientId)}):`, e?.message ?? e);
             res.status(401).json({ error: 'invalid-token' });
             return;
         }
