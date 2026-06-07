@@ -120,7 +120,11 @@ export const oauthSignIn = async (req: Request, res: Response, next: NextFunctio
                 firstName: user?.firstName ?? null,
                 lastName: user?.lastName ?? null,
                 bio: user?.bio ?? null,
-                avatarUrl: user?.avatarUrl ?? null,
+                // Sign it like /auth/me does — User.avatarUrl stores a bare
+                // bucket KEY for uploaded avatars, which is not renderable. The
+                // raw value leaked to the web/app session and broke (gray /
+                // "not found" circle) once they rendered the login value.
+                avatarUrl: await avatarSignedUrl(user?.avatarUrl ?? null),
                 email: user?.email ?? null,
                 authProvider: user?.authProvider ?? null,
             },
