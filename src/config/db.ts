@@ -30,6 +30,12 @@ const pool = mysql.createPool({
     user: process.env.DB_USER,
     password: process.env.DB_PASSWORD,
     database: process.env.DB_NAME,
+    // The schema is utf8mb4, but mysql2 defaults the CONNECTION to utf8mb3 (3-byte)
+    // unless told otherwise — so 4-byte chars (emoji in template names/covers)
+    // get mangled or truncated in transit: an emoji cover corrupts the
+    // coverImage JSON → CHECK(json_valid) rejects the INSERT (save fails), and
+    // an emoji name is truncated → empty/garbled. Pin the connection to utf8mb4.
+    charset: 'utf8mb4',
     waitForConnections: true,
     connectionLimit: 10,
     timezone: process.env.DB_TIMEZONE || '+02:00',

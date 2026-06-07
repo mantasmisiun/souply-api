@@ -1,5 +1,6 @@
 import { Router } from 'express';
-import { addBasket, fetchBasketsByUserId, fetchBasketById, updateBasket, changeBasketStatus, removeBasket, renameBasket, calculateBasket, copyBasket } from '../controllers/basketController.js';
+import { addBasket, fetchBasketsByUserId, fetchBasketById, updateBasket, changeBasketStatus, removeBasket, renameBasket, calculateBasket, getBasketStorePrices, copyBasket } from '../controllers/basketController.js';
+import { storePricesLimiter } from '../middleware/rateLimit.js';
 
 const router = Router();
 /**
@@ -145,6 +146,10 @@ router.delete('/baskets/:id', removeBasket);
 router.patch('/baskets/:id/name', renameBasket);
 
 router.post('/baskets/:id/calculate', calculateBasket);
+
+// On-demand map pricing — body { storeIds:number[1..10], lat?, lng? }.
+// Read-only, cached, rate-limited. Powers tap-a-pin + "calculate this area".
+router.post('/baskets/:id/store-prices', storePricesLimiter, getBasketStorePrices);
 
 router.post('/baskets/:id/copy', copyBasket);
 
