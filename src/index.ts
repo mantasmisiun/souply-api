@@ -84,17 +84,6 @@ app.use(cors({
 }));
 
 app.use(express.json({ limit: '10mb' }));
-
-// TEMP DEBUG (non-prod only) — receive client-side debug lines so the app's
-// id values land in the same container log as the API's. Remove after the
-// template-identity bug is diagnosed.
-if (process.env.NODE_ENV !== 'production') {
-    app.post('/api/debug/log', (req, res) => {
-        console.warn('[DBG-APP]', JSON.stringify(req.body));
-        res.status(204).end();
-    });
-}
-
 app.use(resolveLocale);
 
 // Per-IP rate limits on the public, unauthenticated endpoints (registered
