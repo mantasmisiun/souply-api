@@ -182,12 +182,17 @@ export const uploadAvatar = async (userId: string, body: Buffer): Promise<string
  */
 export const avatarSignedUrl = async (stored: string | null | undefined): Promise<string | null> => {
     if (!stored) return null;
-    // Normalise: strip any host + bucket prefix + query, leaving the object key.
-    let key = stored;
     const marker = `${AVATARS_BUCKET}/`;
     const i = stored.indexOf(marker);
-    if (i >= 0) key = stored.slice(i + marker.length);
-    key = key.split('?')[0];
+    // External avatar (e.g. a Google `lh3.googleusercontent.com/...` picture
+    // backfilled on first OAuth link) — NOT one of our avatars-bucket objects.
+    // Pass it through untouched; presigning it as a MinIO key yields a broken/
+    // null URL — the bug where the app showed initials while the web (which uses
+    // the raw OAuth value) showed the photo.
+    if (i < 0 && /^https?:\/\//i.test(stored)) return stored;
+    // Otherwise it's an avatars-bucket object: a full MinIO URL (strip to the
+    // key) or a bare storage key (uploaded avatars persist `avatars/{id}.jpg`).
+    const key = (i >= 0 ? stored.slice(i + marker.length) : stored).split('?')[0];
     try {
         await ensureAvatarsBucket();
         return await getClient().presignedGetObject(AVATARS_BUCKET, key, AVATAR_GET_TTL_SECONDS);
