@@ -230,8 +230,12 @@ export const addTemplateFromBasket = async (req: Request, res: Response, next: N
             // that template's first instance — the basket then inherits the
             // template's cover (emoji/colour/name) and the template-derived UI
             // via Basket.sourceTemplateId (no separate copy of those fields).
+            // Reset userEditedAfterCreation: this basket *defined* the template,
+            // so at creation it matches it exactly (no drift). Otherwise any
+            // edits made earlier (while it was a plain draft) would make the
+            // now-template-linked basket wrongly read as "Redaguota".
             await conn.query(
-                'UPDATE Basket SET sourceTemplateId = ? WHERE id = ?',
+                'UPDATE Basket SET sourceTemplateId = ?, userEditedAfterCreation = 0 WHERE id = ?',
                 [templateId, basketId],
             );
             await conn.commit();

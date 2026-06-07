@@ -348,15 +348,19 @@ export async function resolveSlug(
         };
     }
 
-    // Count this resolve as a visit — but never for the creator opening their
-    // own link (self-boost), and at most once per viewer per day (burst
-    // protection). Viewer key = the app's user id, else the web visitor's IP.
+    // Count this resolve as a visit ONLY for a genuine app open (authenticated
+    // viewer), never for the creator's own link, and at most once per user per
+    // day (burst protection). We deliberately do NOT count anonymous/web (IP)
+    // resolves: a single scan touches this endpoint several times across the
+    // funnel (web landing IP, app-open before the user id hydrates, app-open
+    // with the user id — sometimes on different networks), and those distinct
+    // actor keys would inflate one person into 2-3 "visits". Keying purely on
+    // the app's userId collapses the whole journey to a single visit.
     // Fire-and-forget: a counter write must never fail the public page load.
     const viewerUserId = viewer?.userId ?? null;
-    const actorKey = viewerUserId ?? (viewer?.ip ? `ip:${viewer.ip}` : null);
     const isCreator = viewerUserId != null && viewerUserId === row.userId;
-    if (!isCreator && actorKey) {
-        recordTemplateEngagementOncePerDay(Number(row.id), actorKey, 'visit')
+    if (!isCreator && viewerUserId) {
+        recordTemplateEngagementOncePerDay(Number(row.id), viewerUserId, 'visit')
             .then((firstToday) => {
                 if (firstToday) {
                     pool.query(`UPDATE BasketTemplate SET visitCount = visitCount + 1 WHERE id = ?`, [row.id]).catch(() => {});

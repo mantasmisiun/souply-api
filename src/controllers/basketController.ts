@@ -249,3 +249,71 @@ export const calculateBasket = async (req: Request, res: Response, next: NextFun
         next(error);
     }
 };
+
+// ── On-demand per-store basket pricing ─────────────────────────────────────
+// Lazily price the basket at SPECIFIC stores — powers the map's "tap a pin to
+// price it" and the capped "calculate this area" batch. Reuses the same
+// calculateBasketForStores engine as /calculate (identical result shape), but:
+//   • takes an explicit, small storeIds list (capped) instead of top-N,
+//   • is READ-ONLY — never flips basket status or persists a cheapest total,
+//   • memoises per (basket version × user location × store) so re-taps and
+//     revisits within a results session are free and the engine isn't re-run.
+const STORE_PRICE_CACHE = new Map<string, { ts: number; result: any }>();
+const STORE_PRICE_TTL_MS = 2 * 60 * 60 * 1000; // 2h — a results session
+const STORE_PRICE_MAX_IDS = 10;                 // matches the client's batch cap
+
+export const getBasketStorePrices = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const id = Number(req.params.id);
+        if (isNaN(id)) { res.status(400).json({ error: 'Invalid basket ID' }); return; }
+        const basket = await getBasketById(id);
+        if (!basket) { res.status(404).json({ error: 'Basket not found' }); return; }
+
+        const rawStoreIds = req.body?.storeIds;
+        const storeIds: number[] = Array.isArray(rawStoreIds)
+            ? Array.from(new Set(rawStoreIds.map(Number).filter((n: number) => n > 0 && Number.isFinite(n)))).slice(0, STORE_PRICE_MAX_IDS)
+            : [];
+        if (storeIds.length === 0) { res.status(400).json({ error: 'storeIds required (1-10)' }); return; }
+
+        const rawLat = Number(req.body?.lat);
+        const rawLng = Number(req.body?.lng);
+        const lat = Number.isFinite(rawLat) ? rawLat : undefined;
+        const lng = Number.isFinite(rawLng) ? rawLng : undefined;
+
+        // Cache version: a basket edit (updatedAt) AND the user's location
+        // (rounded to ~100 m) both bust the cache — either can change a store's
+        // result (price / distance).
+        const ver = (basket as any).updatedAt ? new Date((basket as any).updatedAt).getTime() : 0;
+        const locKey = `${lat != null ? lat.toFixed(3) : '_'}:${lng != null ? lng.toFixed(3) : '_'}`;
+        const keyOf = (sid: number) => `${id}:${ver}:${locKey}:${sid}`;
+
+        const now = Date.now();
+        const cached: any[] = [];
+        const toCompute: number[] = [];
+        for (const sid of storeIds) {
+            const hit = STORE_PRICE_CACHE.get(keyOf(sid));
+            if (hit && now - hit.ts < STORE_PRICE_TTL_MS) cached.push(hit.result);
+            else toCompute.push(sid);
+        }
+
+        let computed: any[] = [];
+        if (toCompute.length) {
+            const { calculateBasketForStores } = await import('../services/basketCalculationService.js');
+            computed = await calculateBasketForStores(id, { storeIds: toCompute, lat, lng }) as any[];
+            for (const r of computed) {
+                const sid = Number(r?.storeId);
+                if (sid > 0) STORE_PRICE_CACHE.set(keyOf(sid), { ts: now, result: r });
+            }
+            // Lazy sweep so the cache can't grow unbounded across baskets.
+            if (STORE_PRICE_CACHE.size > 10000) {
+                for (const [k, v] of STORE_PRICE_CACHE) {
+                    if (now - v.ts >= STORE_PRICE_TTL_MS) STORE_PRICE_CACHE.delete(k);
+                }
+            }
+        }
+
+        res.json([...cached, ...computed]);
+    } catch (error) {
+        next(error);
+    }
+};

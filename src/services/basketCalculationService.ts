@@ -12,6 +12,10 @@ import {
 const VILNIUS_LAT = 54.6872;
 const VILNIUS_LNG = 25.2797;
 const NEPRISKIRTA_CATEGORY_ID = MatchThresholds.nepriskirtaCategoryId;
+// Size of the nearest-store reference pool used to build the tier-3/tier-4
+// fallback caches when only specific stores are priced (e.g. a map-tap via
+// /store-prices). Mirrors getClosestStores(…, 10) used by the full list calc.
+const APPROX_POOL_SIZE = 12;
 
 type MatchMode = 'sku' | 'base';
 
@@ -287,21 +291,46 @@ export const calculateBasketForStores = async (
     const productSpData = await fetchAllSpMetadata(productIds);
     const canonicalByProduct = computeCanonicalByProduct(productSpData);
 
-    // Tier 1/2: single batch query — sync lookup inside the loop.
+    // Fallback price pool for tiers 3 & 4. These tiers (substitute + cross-chain
+    // average) need a spread of nearby stores to draw prices from. We must NOT
+    // tie that pool to the *target* stores: pricing a single store (e.g. a map
+    // tap via /store-prices passes one storeId) would otherwise collapse the
+    // pool to one store, so substitutes/averages find nothing and items wrongly
+    // fall through to "missing" — making a tapped store's total disagree with
+    // the same store in the 10-store list. So when specific stores are
+    // requested, union them with the nearest stores to the search point to form
+    // a stable reference pool, identical to what the list calc sees.
+    let poolStoreIds = storeIds;
+    let poolChainIds = chainIds;
+    if (opts.storeIds?.length) {
+        const nearby = ((await getClosestStores(lat, lng, APPROX_POOL_SIZE)) as any[])
+            .filter(s => s.distance != null);
+        const ids = new Set<number>(storeIds);
+        const chains = new Set<number>(chainIds);
+        for (const s of nearby) { ids.add(Number(s.id)); chains.add(Number(s.chainId)); }
+        poolStoreIds = [...ids];
+        poolChainIds = [...chains];
+    }
+
+    // Tier 1/2: single batch query — sync lookup inside the loop. Uses the
+    // TARGET stores only — this is the store's own direct price.
     const tier12Cache = await batchFetchTier12Prices(storeIds, chainIds, productIds);
 
     // Tier 3: one query per (chainId × productId) instead of per (storeId × productId).
     // Results keyed as "chainId:productId" → best-substitute SpRow per store.
-    const tier3Cache = await batchFetchTier3Substitutes(productIds, basketItems, storeIds, chainIds);
+    // Priced over the fallback pool so substitutes resolve regardless of how
+    // many target stores were requested.
+    const tier3Cache = await batchFetchTier3Substitutes(productIds, basketItems, poolStoreIds, poolChainIds);
 
     // Tier 4: cross-chain average per productId. Reuses the SP metadata
     // already loaded above — only the latest-prices query is per-product.
+    // Averaged over the fallback pool (not the target stores) for consistency.
     const tier4Cache = new Map<number, (SpRow & { effectivePrice: number }) | null>();
     await Promise.all(
         productIds.map(async pid => {
             const canonical = canonicalByProduct.get(pid) ?? null;
             const spMeta = productSpData.get(pid) ?? [];
-            tier4Cache.set(pid, await approximateCrossChain(pid, storeIds, spMeta, canonical));
+            tier4Cache.set(pid, await approximateCrossChain(pid, poolStoreIds, spMeta, canonical));
         })
     );
 

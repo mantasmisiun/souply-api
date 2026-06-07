@@ -69,3 +69,8 @@ export const signupLimiter = createRateLimiter({ windowMs: 15 * 60 * 1000, max: 
 // Moderate: other public, unauthenticated endpoints (geocode proxy, OAuth
 // sign-in). Generous enough for normal sessions, low enough to blunt abuse.
 export const publicLimiter = createRateLimiter({ windowMs: 60 * 1000, max: 30 });
+
+// On-demand map pricing (tap-a-pin to price + "calculate this area"). Generous
+// for a real browsing session (many pin taps + a few capped batches), tight
+// enough to blunt scripted abuse of the comparison engine.
+export const storePricesLimiter = createRateLimiter({ windowMs: 60 * 1000, max: 40 });
