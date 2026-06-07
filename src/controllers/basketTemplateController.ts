@@ -62,6 +62,8 @@ async function loadOwnedTemplate(req: Request, res: Response): Promise<any | nul
     const tpl = await getTemplateById(id);
     if (!tpl) { res.status(404).json({ error: 'Template not found' }); return null; }
     const cid = callerId(req);
+    console.warn('[DBG-API tpl-load] id=%s cid=%s owner=%s xUserId=%s verified=%s match=%s',
+        id, cid, tpl.userId, req.header('x-user-id'), req.verifiedUser?.id, String(tpl.userId) === cid);
     if (!cid || String(tpl.userId) !== cid) { res.status(403).json({ error: 'forbidden' }); return null; }
     return tpl;
 }
@@ -72,8 +74,11 @@ export const listTemplates = async (req: Request, res: Response, next: NextFunct
     try {
         const userId = String(req.params.userId);
         // Only the owner may list their templates.
+        console.warn('[DBG-API tpl-list] paramUserId=%s cid=%s xUserId=%s verified=%s',
+            userId, callerId(req), req.header('x-user-id'), req.verifiedUser?.id);
         if (callerId(req) !== userId) { res.status(403).json({ error: 'forbidden' }); return; }
         const templates = await getTemplatesByUserId(userId);
+        console.warn('[DBG-API tpl-list] paramUserId=%s returned=%s', userId, templates.length);
         res.json(templates);
     } catch (e) { next(e); }
 };
@@ -96,6 +101,8 @@ export const addTemplate = async (req: Request, res: Response, next: NextFunctio
             res.status(400).json({ error: 'userId is required' });
             return;
         }
+        console.warn('[DBG-API tpl-create] body.userId=%s xUserId=%s verified=%s',
+            userId, req.header('x-user-id'), req.verifiedUser?.id);
         const nameCheck = validateName(name);
         if (!nameCheck.ok) {
             res.status(400).json({ error: nameCheck.error });
