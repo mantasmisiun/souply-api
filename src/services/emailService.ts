@@ -59,6 +59,9 @@ export async function sendBetaInviteEmail(opts: {
     platform: 'ios' | 'android';
     /** Visitor's site language; falls back to Lithuanian. */
     lang?: 'lt' | 'en';
+    /** Re-invite: prepend a "the previous link didn't work, this one does and is
+     *  safe to tap" note + a clearer subject. For the one-time TestFlight fix. */
+    reinvite?: boolean;
 }): Promise<void> {
     const from = process.env.SMTP_FROM ?? 'Souply <noreply@souply.lt>';
     const isIos = opts.platform === 'ios';
@@ -85,6 +88,8 @@ export async function sendBetaInviteEmail(opts: {
         sameAccount: 'Use the same Google account for both steps.',
         iosBody: 'Thanks for joining! Install the app on TestFlight to get started:',
         iosBtn: 'Download on TestFlight',
+        reinviteSubject: 'Your working Souply TestFlight link 🎉',
+        reinviteNote: 'Heads up — the TestFlight link we sent you earlier didn’t work. This one is fixed and safe to tap. Sorry for the mix-up!',
         footerQ: 'Questions? Email',
         slogan: 'Shop smart',
     } : {
@@ -102,6 +107,8 @@ export async function sendBetaInviteEmail(opts: {
         sameAccount: 'Naudok tą pačią Google paskyrą abiem žingsniams.',
         iosBody: 'Ačiū, kad prisijungei! Įsidiek programėlę per TestFlight:',
         iosBtn: 'Atsisiųsti per TestFlight',
+        reinviteSubject: 'Veikianti Souply TestFlight nuoroda 🎉',
+        reinviteNote: 'Atsiprašome — anksčiau siųsta TestFlight nuoroda neveikė. Ši jau pataisyta ir ją spausti saugu.',
         footerQ: 'Turi klausimų? Parašyk',
         slogan: 'Apsipirk išmaniai',
     };
@@ -123,14 +130,19 @@ export async function sendBetaInviteEmail(opts: {
            ${step(t.step2Title, btn(optinUrl, t.step2Btn), t.step2Note)}
            <tr><td style="padding-bottom:24px;"><div style="font-size:13px;line-height:1.5;color:#5b5358;background:#fdf0f3;border-radius:12px;padding:12px 16px;">⚠️ ${t.sameAccount}</div></td></tr>`;
 
+    // Re-invite reassurance note (iOS only), shown above the CTA.
+    const reinviteHtml = opts.reinvite
+        ? `<tr><td style="padding-bottom:20px;"><div style="font-size:13px;line-height:1.55;color:#1f1b1d;background:#eef9f0;border-radius:12px;padding:12px 16px;">✅ ${t.reinviteNote}</div></td></tr>`
+        : '';
+
     const textLines = isIos
-        ? [t.greeting, '', t.iosBody, '', testflightUrl]
+        ? [t.greeting, '', ...(opts.reinvite ? [t.reinviteNote, ''] : []), t.iosBody, '', testflightUrl]
         : [t.greeting, '', t.intro, '', `${t.step1Title}: ${groupUrl}`, '', `${t.step2Title}: ${optinUrl}`, '', `! ${t.sameAccount}`];
 
     await transporter.sendMail({
         from,
         to: opts.to,
-        subject: t.subject,
+        subject: opts.reinvite ? t.reinviteSubject : t.subject,
         text: [...textLines, '', `${t.footerQ} support@souply.lt`, '— Souply'].join('\n'),
         html: `<!DOCTYPE html>
 <html lang="${t.lang}">
@@ -151,6 +163,7 @@ export async function sendBetaInviteEmail(opts: {
         <tr><td align="center" style="font-size:15px;line-height:1.6;color:#5b5358;padding-bottom:28px;">
           ${t.greeting}
         </td></tr>
+        ${reinviteHtml}
         ${ctaHtml}
         <tr><td style="border-top:1px solid #ece8e7;padding-bottom:20px;"></td></tr>
         <tr><td align="center" style="font-size:12px;line-height:1.6;color:#b9b1b5;">

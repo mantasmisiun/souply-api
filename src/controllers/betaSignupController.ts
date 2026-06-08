@@ -31,6 +31,19 @@ export const createBetaSignup = async (req: Request, res: Response, next: NextFu
             return;
         }
 
+        // Read prior state BEFORE the upsert so we can tell a genuine platform
+        // switch from a plain re-submit. Re-invite when: brand new, a prior send
+        // failed (invitedAt NULL), OR the tester switched platform — so the
+        // stored platform never drifts from the invite they actually received
+        // (the iOS-then-Android case), and a real switch sends the invite for
+        // their new device.
+        const [prevRows]: any = await pool.query(
+            `SELECT platform, invitedAt FROM BetaSignup WHERE email = ? LIMIT 1`,
+            [cleanEmail],
+        );
+        const prev = prevRows[0] ?? null;
+        const shouldInvite = !prev || prev.invitedAt == null || prev.platform !== cleanPlatform;
+
         await pool.query(
             `INSERT INTO BetaSignup (name, email, platform)
              VALUES (?, ?, ?)
@@ -38,22 +51,14 @@ export const createBetaSignup = async (req: Request, res: Response, next: NextFu
             [cleanName, cleanEmail, cleanPlatform],
         );
 
-        // Has this address already been invited? `invitedAt` is only set after
-        // a successful send, so this both dedupes (never re-send to an invited
-        // address — anti-spam / mail-bomb) and is idempotent for the form.
-        const [rows]: any = await pool.query(
-            `SELECT invitedAt FROM BetaSignup WHERE email = ? LIMIT 1`,
-            [cleanEmail],
-        );
-        if (rows.length > 0 && rows[0].invitedAt != null) {
+        if (!shouldInvite) {
             res.status(200).json({ ok: true, emailSent: true, alreadyInvited: true });
             return;
         }
 
-        // First invite for this address. Await the send so the landing form can
-        // show a real loading → sent / error state. The signup row is already
-        // saved, so a failed send returns 502 and is safely retryable (invitedAt
-        // stays NULL until a send succeeds).
+        // Await the send so the landing form can show a real loading → sent /
+        // error state. The row is already saved, so a failed send returns 502
+        // and is safely retryable (invitedAt stays NULL until a send succeeds).
         try {
             await sendBetaInviteEmail({ to: cleanEmail, name: cleanName, platform: cleanPlatform, lang: cleanLang });
         } catch (e: any) {
