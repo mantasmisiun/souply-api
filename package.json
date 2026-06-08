@@ -12,6 +12,7 @@
     "receipts:cleanup": "tsx src/scripts/receiptBatch/cleanupTestReceipts.ts",
     "truths:bootstrap": "tsx src/scripts/bootstrapTruthsFromLogs.ts",
     "truths:review": "tsx src/scripts/reviewProvisionalTruth.ts",
+    "beta:reinvite": "tsx src/scripts/reinviteBeta.ts",
     "scrape:rimi": "tsx src/scrapers/runRimi.ts",
     "scrape:iki": "tsx src/scrapers/runIki.ts",
     "scrape:barbora": "tsx src/scrapers/runBarbora.ts",
