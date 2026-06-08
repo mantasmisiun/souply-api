@@ -108,7 +108,7 @@ export async function sendBetaInviteEmail(opts: {
         iosBody: 'Ačiū, kad prisijungei! Įsidiek programėlę per TestFlight:',
         iosBtn: 'Atsisiųsti per TestFlight',
         reinviteSubject: 'Veikianti Souply TestFlight nuoroda 🎉',
-        reinviteNote: 'Atsiprašome — anksčiau siųsta TestFlight nuoroda neveikė. Ši jau pataisyta ir ją spausti saugu.',
+        reinviteNote: 'Atsiprašome — anksčiau siųsta TestFlight nuoroda neveikė.',
         footerQ: 'Turi klausimų? Parašyk',
         slogan: 'Apsipirk išmaniai',
     };
