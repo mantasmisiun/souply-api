@@ -87,6 +87,7 @@ export const getListItemsByShoppingListId = async (listId: number) => {
                 c3.name AS l3CategoryName,
                 c2.id   AS l2CategoryId,
                 c2.name AS l2CategoryName,
+                c1.id   AS l1CategoryId,
                 (SELECT CONCAT('-', ROUND((1 - pr.promoPrice / pr.price) * 100), '%')
                  FROM Price pr
                  WHERE pr.storeProductId = sli.storeProductId
@@ -99,6 +100,7 @@ export const getListItemsByShoppingListId = async (listId: number) => {
          LEFT JOIN StoreProduct sp ON sli.storeProductId = sp.id
          LEFT JOIN Category c3 ON p.categoryId = c3.id
          LEFT JOIN Category c2 ON c3.parentCategoryId = c2.id
+         LEFT JOIN Category c1 ON c2.parentCategoryId = c1.id
          WHERE sli.listId = ?
          ORDER BY sli.isChecked ASC,
                   COALESCE(sp.storeProductName, p.name, sli.customName, '') ASC,

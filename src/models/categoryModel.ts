@@ -34,7 +34,7 @@ export const getAllL2Categories = async (locale: Locale = 'lt') => {
          ${tr1.joinSql}
          WHERE c2.parentCategoryId IN (SELECT id FROM Category WHERE parentCategoryId IS NULL)
            AND c2.isHidden = 0
-         ORDER BY c1.id, name`,
+         ORDER BY c1.id, c2.id`,
         [tr2.localeParam, tr1.localeParam],
     );
     return rows;
@@ -65,7 +65,8 @@ export const getTopLevelCategories = async (locale: Locale = 'lt') => {
                 c.name AS nameKey
          FROM Category c
          ${tr.joinSql}
-         WHERE c.parentCategoryId IS NULL AND c.isHidden = 0`,
+         WHERE c.parentCategoryId IS NULL AND c.isHidden = 0
+         ORDER BY c.id`,
         [tr.localeParam],
     );
     return rows;
@@ -79,7 +80,8 @@ export const getSubCategories = async (parentCategoryId: number, locale: Locale 
                 c.name AS nameKey
          FROM Category c
          ${tr.joinSql}
-         WHERE c.parentCategoryId = ? AND c.isHidden = 0`,
+         WHERE c.parentCategoryId = ? AND c.isHidden = 0
+         ORDER BY c.id`,
         [tr.localeParam, parentCategoryId],
     );
     return rows;
@@ -96,7 +98,8 @@ export const getSubCategoriesWithProductCounts = async (parentCategoryId: number
          ${tr.joinSql}
          LEFT JOIN Product p ON p.categoryId = c.id AND p.mergedIntoId IS NULL
          WHERE c.parentCategoryId = ? AND c.isHidden = 0
-         GROUP BY c.id`,
+         GROUP BY c.id
+         ORDER BY c.id`,
         [tr.localeParam, parentCategoryId],
     );
     return rows;
@@ -110,7 +113,8 @@ export const getAllCategories = async (locale: Locale = 'lt') => {
                 c.name AS nameKey
          FROM Category c
          ${tr.joinSql}
-         WHERE c.isHidden = 0`,
+         WHERE c.isHidden = 0
+         ORDER BY c.id`,
         [tr.localeParam],
     );
     return rows;
