@@ -131,10 +131,21 @@ export const getBasketsByUserId = async (userId: string) => {
     const [rows]: any = await pool.query(
         `SELECT Basket.*,
                 COUNT(BasketItem.id) as itemCount,
-                (SELECT ROUND(SUM(sli.price * sli.quantity), 2)
+                -- The card shows the total of the LAST shopping list created
+                -- from this basket (re-creating different lists must not sum
+                -- together). Scope to the most-recent creation batch via
+                -- MAX(createdAt) — for a split that's the 2-3 lists made in one
+                -- go (same timestamp), for a single store just that one. sli.price
+                -- is already the per-item LINE total (item.totalPrice), so SUM it
+                -- directly (no "* quantity" — that double-counted and inflated it).
+                (SELECT ROUND(SUM(sli.price), 2)
                    FROM ShoppingList sl
                    JOIN ShoppingListItem sli ON sli.listId = sl.id
                   WHERE sl.basketId = Basket.id
+                    AND sl.createdAt = (
+                        SELECT MAX(s2.createdAt) FROM ShoppingList s2
+                         WHERE s2.basketId = Basket.id
+                    )
                     AND sli.price IS NOT NULL) AS selectedStoreTotal,
                 t.coverColor   AS templateCoverColor,
                 t.coverImage   AS templateCoverImage,
