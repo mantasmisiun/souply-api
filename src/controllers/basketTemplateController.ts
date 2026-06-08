@@ -680,11 +680,16 @@ export const instantiateTemplate = async (req: Request, res: Response, next: Nex
         // zeroing both flags before the decision call. The pure logic
         // then routes through createFresh with all of them in the
         // deleteAbandonedIds list.
-        const considered: BasketSnapshot[] = force
-            ? existing.map(b => ({ ...b, hasBeenCalculated: 0, userEditedAfterCreation: 0 }))
-            : existing;
-
-        const decision = decideInstantiation(considered);
+        // `force` = the user explicitly chose "Sukurti naują" in the resume
+        // prompt → always create a fresh basket, but KEEP resumable siblings
+        // intact. Previously-created baskets (and the shopping lists made from
+        // them) derive their template cosmetics from a live JOIN on
+        // `sourceTemplateId`, so deleting the old basket is what stripped its
+        // theming. Force now only cleans genuinely-abandoned empty drafts.
+        const base = decideInstantiation(existing);
+        const decision = force
+            ? { kind: 'createFresh' as const, deleteAbandonedIds: base.deleteAbandonedIds }
+            : base;
 
         const conn = await pool.getConnection();
         try {
