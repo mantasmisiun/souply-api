@@ -48,9 +48,11 @@ export const getShoppingListsByUserId = async (userId: string) => {
     // drops legitimate rows and de-duplicates on GROUP BY.
     const [rows]: any = await pool.query(
         `SELECT ShoppingList.*, Store.address, Store.name AS storeName,
+                Store.chainId AS chainId,
                 StoreChain.name AS chainName, StoreChain.logoUrl,
                 COUNT(ShoppingListItem.id) AS itemCount,
-                SUM(CASE WHEN ShoppingListItem.isChecked = 1 THEN 1 ELSE 0 END) AS checkedCount
+                SUM(CASE WHEN ShoppingListItem.isChecked = 1 THEN 1 ELSE 0 END) AS checkedCount,
+                (SELECT COUNT(*) FROM Receipt r WHERE r.shoppingListId = ShoppingList.id) AS receiptCount
          FROM ShoppingList
          JOIN Store ON ShoppingList.storeId = Store.id
          JOIN StoreChain ON Store.chainId = StoreChain.id
@@ -81,6 +83,37 @@ export const updateShoppingListStatus = async (id: number, status: string) => {
         'UPDATE ShoppingList SET status = ? WHERE id = ?',
         [status, id]
     );
+};
+
+/**
+ * Link a receipt to a list row (the store trip it covers) by setting
+ * Receipt.shoppingListId. Used by the upload flow and the duplicate-link path
+ * (a re-photographed receipt already in the DB is pointed at the list instead
+ * of inserting a new row).
+ */
+export const linkReceiptToList = async (receiptId: number, listId: number) => {
+    await pool.query('UPDATE Receipt SET shoppingListId = ? WHERE id = ?', [listId, receiptId]);
+};
+
+/**
+ * Count of the user's "awaiting receipt" list groups for the List-tab badge: a
+ * completed list row with no Receipt pointing at it. Grouped by basketId so a
+ * 2/3-store split counts once until all its stores' receipts are in; standalone
+ * single-store lists (no basketId) count per row.
+ */
+export const countListsAwaitingReceipt = async (userId: string): Promise<number> => {
+    const [rows]: any = await pool.query(
+        `SELECT COUNT(*) AS cnt FROM (
+            SELECT COALESCE(sl.basketId, -sl.id) AS grp
+            FROM ShoppingList sl
+            JOIN ShoppingListMember slm ON slm.listId = sl.id AND slm.userId = ?
+            WHERE sl.status = 'completed'
+              AND NOT EXISTS (SELECT 1 FROM Receipt r WHERE r.shoppingListId = sl.id)
+            GROUP BY grp
+         ) g`,
+        [userId],
+    );
+    return Number(rows[0]?.cnt ?? 0);
 };
 
 export const deleteShoppingList = async (id: number) => {

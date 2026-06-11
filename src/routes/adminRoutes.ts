@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { requireAdmin } from '../middleware/requireAdmin.js';
 import { adminRateLimit } from '../middleware/adminRateLimit.js';
 import { deleteUserAccount } from '../controllers/adminController.js';
+import { getFailedReceiptsQueue, resolveFailedReceipt } from '../controllers/adminFailedReceiptsController.js';
 import {
     getImageQueue,
     claimImageBatch,
@@ -72,6 +73,11 @@ const router = Router();
 
 // Unified queue counts — badge numbers for filter chips in the Eilė tab.
 router.get('/admin/queue/counts', requireAdmin, getQueueCounts);
+
+// Failed-receipts queue (unprocessable uploads). Reads = requireAdmin; the
+// resolve write also passes adminRateLimit.
+router.get('/admin/failed-receipts', requireAdmin, getFailedReceiptsQueue);
+router.post('/admin/failed-receipts/:id/resolve', requireAdmin, adminRateLimit, resolveFailedReceipt);
 
 // Existing — user deletion. requireAdmin only; no audit/rate-limit because
 // the action goes through a dedicated service with its own logging.

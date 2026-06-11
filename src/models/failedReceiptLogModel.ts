@@ -1,10 +1,13 @@
 import pool from '../config/db.js';
+import { resolveEnv } from '../scrapers/shared/telegramAlert.js';
 
 export type FailReason =
     | 'ocr_no_text'
     | 'ocr_error'
     | 'chain_unrecognized'
-    | 'store_unrecognized';
+    | 'store_unrecognized'
+    | 'parse_failed'
+    | 'mask_failed';
 
 export interface LogFailureInput {
     userId: string | null;
@@ -14,6 +17,12 @@ export interface LogFailureInput {
     detectedChainName?: string | null;
     extractedStoreAddress?: string | null;
     imageFilePath?: string | null;
+    /** Path of the (already card-masked) image in the failedReceipts bucket. */
+    failedBucketPath?: string | null;
+    /** The list row the upload was meant for (so an admin fix can re-link). */
+    shoppingListId?: number | null;
+    /** OCR/parsed payload captured at fail time, for later admin correction. */
+    parsedData?: string | null;
 }
 
 /**
@@ -48,26 +57,35 @@ export const logFailedReceipt = async (
     try {
         const [res]: any = await pool.query(
             `INSERT INTO FailedReceiptLog
-                   (userId, failReason, ocrLineCount, ocrPreview,
-                    detectedChainName, extractedStoreAddress, imageFilePath)
-             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+                   (userId, failReason, environment, ocrLineCount, ocrPreview,
+                    detectedChainName, extractedStoreAddress, imageFilePath,
+                    failedBucketPath, shoppingListId, parsedData)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
                 input.userId ?? null,
                 input.failReason,
+                resolveEnv(),
                 input.ocrLineCount ?? null,
                 preview,
                 input.detectedChainName ?? null,
                 input.extractedStoreAddress ?? null,
                 input.imageFilePath ?? null,
+                input.failedBucketPath ?? null,
+                input.shoppingListId ?? null,
+                input.parsedData ?? null,
             ]
         );
         return Number(res?.insertId ?? 0);
     } catch (err: any) {
-        if (err?.code === 'ER_NO_SUCH_TABLE') {
+        // Missing table (no base migration) OR missing column (no v2 migration
+        // for environment/failedBucketPath/shoppingListId/parsedData) — both
+        // mean this DB hasn't been migrated. Degrade to a console line instead
+        // of 500-ing the client's bail path; the failure detail isn't lost.
+        if (err?.code === 'ER_NO_SUCH_TABLE' || err?.code === 'ER_BAD_FIELD_ERROR') {
             if (!warnedAboutMissingTable) {
                 console.warn(
-                    '[logFailedReceipt] FailedReceiptLog table missing — ' +
-                        'logging failures to console only. Run the migration ' +
+                    '[logFailedReceipt] FailedReceiptLog table/columns missing — ' +
+                        'logging failures to console only. Run the migration(s) ' +
                         'on this database to enable persistent failure logs.',
                 );
                 warnedAboutMissingTable = true;
@@ -83,4 +101,62 @@ export const logFailedReceipt = async (
         }
         throw err;
     }
+};
+
+export interface FailedReceiptRow {
+    id: number;
+    userId: string | null;
+    failReason: FailReason;
+    environment: string;
+    ocrLineCount: number | null;
+    ocrPreview: string | null;
+    detectedChainName: string | null;
+    extractedStoreAddress: string | null;
+    failedBucketPath: string | null;
+    shoppingListId: number | null;
+    parsedData: string | null;
+    status: string;
+    createdAt: string;
+}
+
+/** Admin queue: failures for this environment (default the unresolved ones). */
+export const getFailedReceipts = async (
+    environment: string,
+    status: 'new' | 'resolved' = 'new',
+    limit = 100,
+): Promise<FailedReceiptRow[]> => {
+    const [rows]: any = await pool.query(
+        `SELECT id, userId, failReason, environment, ocrLineCount, ocrPreview,
+                detectedChainName, extractedStoreAddress, failedBucketPath,
+                shoppingListId, parsedData, status, createdAt
+           FROM FailedReceiptLog
+          WHERE environment = ? AND status = ?
+          ORDER BY createdAt DESC
+          LIMIT ?`,
+        [environment, status, limit],
+    );
+    return rows as FailedReceiptRow[];
+};
+
+/** Count of unresolved failures for this env (admin badge). Resilient to an
+ *  un-migrated DB (no environment/status columns) → 0. */
+export const countNewFailedReceipts = async (environment: string): Promise<number> => {
+    try {
+        const [rows]: any = await pool.query(
+            `SELECT COUNT(*) AS n FROM FailedReceiptLog WHERE environment = ? AND status = 'new'`,
+            [environment],
+        );
+        return Number(rows?.[0]?.n ?? 0);
+    } catch (e: any) {
+        if (e?.code === 'ER_NO_SUCH_TABLE' || e?.code === 'ER_BAD_FIELD_ERROR') return 0;
+        throw e;
+    }
+};
+
+/** Mark a failed receipt resolved (admin dismissed it or promoted it to a Receipt). */
+export const markFailedReceiptResolved = async (id: number): Promise<void> => {
+    await pool.query(
+        `UPDATE FailedReceiptLog SET status = 'resolved', resolvedAt = NOW() WHERE id = ?`,
+        [id],
+    );
 };

@@ -1,5 +1,5 @@
 import pool from '../config/db.js';
-import { notifyTelegram } from '../scrapers/shared/telegramAlert.js';
+import { notifyTelegram, resolveEnv } from '../scrapers/shared/telegramAlert.js';
 
 /**
  * Daily 20:00 Europe/Vilnius Telegram digest of pending
@@ -63,7 +63,43 @@ async function queryPendingCounts(): Promise<PendingCounts> {
     };
 }
 
-function formatDigest(counts: PendingCounts): string {
+/** Last-24h unprocessable-receipt failures for this environment (status='new'). */
+async function queryFailedReceiptCounts(): Promise<{ total: number; byReason: Record<string, number> }> {
+    try {
+        const [rows]: any = await pool.query(
+            `SELECT failReason, COUNT(*) AS n
+               FROM FailedReceiptLog
+              WHERE environment = ?
+                AND status = 'new'
+                AND createdAt > NOW() - INTERVAL 24 HOUR
+              GROUP BY failReason`,
+            [resolveEnv()],
+        );
+        const byReason: Record<string, number> = {};
+        let total = 0;
+        for (const r of rows ?? []) {
+            const n = Number(r.n ?? 0);
+            byReason[r.failReason] = n;
+            total += n;
+        }
+        return { total, byReason };
+    } catch (e: any) {
+        // Un-migrated DB (missing column/table) → no failed section, don't crash.
+        if (e?.code === 'ER_NO_SUCH_TABLE' || e?.code === 'ER_BAD_FIELD_ERROR') return { total: 0, byReason: {} };
+        throw e;
+    }
+}
+
+const FAIL_REASON_LT: Record<string, string> = {
+    ocr_no_text: 'OCR be teksto',
+    ocr_error: 'OCR klaida',
+    chain_unrecognized: 'Neatpažintas tinklas',
+    store_unrecognized: 'Neatpažinta parduotuvė',
+    parse_failed: 'Nepavyko išanalizuoti',
+    mask_failed: 'Nepavyko paslėpti kortelės',
+};
+
+function formatDigest(counts: PendingCounts, failed: { total: number; byReason: Record<string, number> }): string {
     // HTML mode — `notifyTelegram` already sets parse_mode=HTML.
     const lines: string[] = [];
     lines.push('📋 <b>Vartotojų pranešimai</b>');
@@ -77,19 +113,31 @@ function formatDigest(counts: PendingCounts): string {
     if (byFlag.image > 0)    lines.push(`• Nuotrauka: ${byFlag.image}`);
     lines.push('');
     lines.push('Eik į Žymos kortelę administratoriaus paneleje.');
+
+    if (failed.total > 0) {
+        lines.push('');
+        lines.push('🧾 <b>Nepavykę kvitai (24h)</b>');
+        lines.push(`Iš viso: <b>${failed.total}</b>`);
+        for (const [reason, n] of Object.entries(failed.byReason)) {
+            if (n > 0) lines.push(`• ${FAIL_REASON_LT[reason] ?? reason}: ${n}`);
+        }
+    }
     return lines.join('\n');
 }
 
 export async function sendDailyReceiptIssuesReport(): Promise<void> {
     try {
         const counts = await queryPendingCounts();
-        if (counts.total === 0) {
-            console.log('[adminDailyReport] no pending ReceiptLineIssues — skipping Telegram digest');
+        const failed = await queryFailedReceiptCounts();
+        // Skip only when BOTH the Žymos inbox and the failed-receipt log are
+        // quiet, so the digest still fires when only failures came in.
+        if (counts.total === 0 && failed.total === 0) {
+            console.log('[adminDailyReport] nothing pending (issues + failures) — skipping digest');
             return;
         }
-        const msg = formatDigest(counts);
+        const msg = formatDigest(counts, failed);
         await notifyTelegram(msg);
-        console.log(`[adminDailyReport] sent — total=${counts.total} last24h=${counts.last24h}`);
+        console.log(`[adminDailyReport] sent — issues total=${counts.total} last24h=${counts.last24h} failed24h=${failed.total}`);
     } catch (e: any) {
         console.error('[adminDailyReport] failed —', e?.message ?? e);
     }

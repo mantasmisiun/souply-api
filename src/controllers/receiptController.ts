@@ -23,6 +23,7 @@ import {
     type FailReason,
 } from "../models/failedReceiptLogModel.js";
 import { createUser } from "../models/userModel.js";
+import { notifyTelegram, resolveEnv } from "../scrapers/shared/telegramAlert.js";
 
 export const markSwipesDone = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -196,9 +197,14 @@ export const createReceiptFromOcr = async (req: Request, res: Response, next: Ne
                 } catch (cleanupErr) {
                     console.warn('Failed to clean up orphan receipt', receiptId, cleanupErr);
                 }
+                // Cross-account: a DIFFERENT user already uploaded this
+                // physical receipt. Flag it so the client doesn't tell the
+                // current user "you already uploaded this" (they didn't) and
+                // doesn't try to link someone else's receipt to their list.
                 res.status(409).json({
                     error: 'duplicate',
-                    message: 'Receipt already uploaded',
+                    crossAccount: true,
+                    message: 'Receipt already registered to another account',
                 });
                 return;
             }
@@ -696,6 +702,8 @@ const VALID_FAIL_REASONS: ReadonlySet<FailReason> = new Set([
     'ocr_error',
     'chain_unrecognized',
     'store_unrecognized',
+    'parse_failed',
+    'mask_failed',
 ]);
 
 export const logAnalizeFailure = async (
@@ -712,6 +720,9 @@ export const logAnalizeFailure = async (
             detectedChainName,
             extractedStoreAddress,
             imageFilePath,
+            failedBucketPath,
+            shoppingListId,
+            parsedData,
         } = req.body ?? {};
 
         if (!failReason || !VALID_FAIL_REASONS.has(failReason)) {
@@ -721,20 +732,41 @@ export const logAnalizeFailure = async (
             return;
         }
 
+        const cleanChain =
+            typeof detectedChainName === 'string' ? detectedChainName.slice(0, 64) : null;
+        const cleanAddress =
+            typeof extractedStoreAddress === 'string' ? extractedStoreAddress.slice(0, 255) : null;
+
         const id = await logFailedReceipt({
             userId: typeof userId === 'string' && userId.trim() ? userId.trim() : null,
             failReason,
             ocrLineCount: Number.isFinite(ocrLineCount) ? Number(ocrLineCount) : null,
             ocrPreview: typeof ocrPreview === 'string' ? ocrPreview : null,
-            detectedChainName:
-                typeof detectedChainName === 'string' ? detectedChainName.slice(0, 64) : null,
-            extractedStoreAddress:
-                typeof extractedStoreAddress === 'string'
-                    ? extractedStoreAddress.slice(0, 255)
-                    : null,
+            detectedChainName: cleanChain,
+            extractedStoreAddress: cleanAddress,
             imageFilePath:
                 typeof imageFilePath === 'string' ? imageFilePath.slice(0, 512) : null,
+            failedBucketPath:
+                typeof failedBucketPath === 'string' ? failedBucketPath.slice(0, 512) : null,
+            shoppingListId: Number.isFinite(shoppingListId) ? Number(shoppingListId) : null,
+            parsedData:
+                parsedData == null
+                    ? null
+                    : typeof parsedData === 'string'
+                        ? parsedData
+                        : JSON.stringify(parsedData),
         });
+
+        // Telegram cadence by env: staging = immediate per failure; dev =
+        // silent; production = rolled into the 20:00 digest (not here).
+        if (resolveEnv() === 'staging') {
+            notifyTelegram(
+                `⚠️ <b>Nepavyko apdoroti kvito</b>\n` +
+                `Priežastis: <code>${failReason}</code>` +
+                (cleanChain ? `\nTinklas: ${cleanChain}` : '') +
+                (cleanAddress ? `\nAdresas: ${cleanAddress}` : ''),
+            ).catch((e) => console.warn('[logAnalizeFailure] telegram failed:', e?.message ?? e));
+        }
 
         res.status(201).json({ id });
     } catch (error) {

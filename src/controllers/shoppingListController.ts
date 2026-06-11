@@ -11,6 +11,7 @@ import {
     getShoppingListByBasketAndStore,
     getBasketIdByListId,
     duplicateShoppingList,
+    linkReceiptToList,
 } from '../models/shoppingListModel.js';
 import {
     createListItemsBatch,
@@ -205,6 +206,36 @@ export const changeShoppingListStatus = async (req: Request, res: Response, next
         }
 
         res.json({ message: 'Status updated successfully' });
+    } catch (error) {
+        next(error);
+    }
+};
+
+/**
+ * POST /api/shopping-lists/:id/link-receipt
+ * Body: { receiptId }
+ *
+ * Link an uploaded/scanned Receipt to the completed list row (the store
+ * trip it covers). Sets Receipt.shoppingListId. Used both by the
+ * post-completion upload flow and the duplicate silent-link path (a
+ * re-photographed receipt already in the DB is pointed at the list
+ * instead of inserting a new row).
+ */
+export const linkReceiptToShoppingList = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const id = Number(req.params.id);
+        const receiptId = Number(req.body?.receiptId);
+        if (!Number.isFinite(id) || !Number.isFinite(receiptId)) {
+            res.status(400).json({ error: 'Valid list id and receiptId are required' });
+            return;
+        }
+        const list = await getShoppingListById(id);
+        if (!list) {
+            res.status(404).json({ error: 'Shopping list not found' });
+            return;
+        }
+        await linkReceiptToList(receiptId, id);
+        res.json({ success: true });
     } catch (error) {
         next(error);
     }

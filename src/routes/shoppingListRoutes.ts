@@ -9,6 +9,7 @@ import {
     createListShareToken,
     getShareTokenStatus,
     claimShareToken,
+    linkReceiptToShoppingList,
 } from '../controllers/shoppingListController.js';
 
 const router = Router();
@@ -107,6 +108,10 @@ router.delete('/shopping-lists/:id', removeShoppingList);
 router.patch('/shopping-lists/:id/status', changeShoppingListStatus);
 
 router.post('/shopping-lists/:id/duplicate', duplicateList);
+
+// Link an uploaded/scanned receipt to a completed list row (post-completion
+// receipt upload flow + duplicate silent-link).
+router.post('/shopping-lists/:id/link-receipt', linkReceiptToShoppingList);
 
 // Sharing: creator mints a token, scanner claims it. The /status route
 // is polled by the creator-side QR modal (~1.5s cadence) to detect a
