@@ -3,9 +3,14 @@ import type { RecoveryFields } from '../utils/receiptIntrospect.js';
 
 /** How many failed attempts in a rolling 24h window before lockout. */
 export const RATE_LIMIT_MAX_FAILURES = 3;
-/** Tolerance on total-sum match (euros). Defensive against floating-point /
- *  rounding noise from re-OCR; tight enough that a real misread fails. */
-export const TOTAL_MATCH_TOLERANCE_EUR = 0.01;
+/** Tolerance on total-sum match (euros). The match ALSO requires an exact
+ *  `receiptNo` (a long structured string) + exact `date`, which together
+ *  already near-uniquely identify the stored receipt — so the total is only a
+ *  "did the user actually OCR this receipt" confirmation, not the identifier.
+ *  Kept loose enough to survive a single-digit re-OCR misread in the amount
+ *  (e.g. 11.34 vs 11.24 — a 0.10 drift that previously failed recovery at the
+ *  old 0.01 window), tight enough that a wildly different total still fails. */
+export const TOTAL_MATCH_TOLERANCE_EUR = 0.5;
 
 export type FailureReason =
     | 'no-match'

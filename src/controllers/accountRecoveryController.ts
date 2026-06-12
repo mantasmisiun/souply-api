@@ -162,11 +162,21 @@ async function tryMatch(submitted: RecoveryFields[], freshUserId: string): Promi
         // recover them to themselves).
         const others = candidates.filter(c => c.userId !== freshUserId && c.userId !== null);
         if (others.length === 0) {
-            // Print the submission + near-misses ONLY on failure, so the
-            // happy-path log stays quiet. Tells you which field diverged
-            // (receiptNo OK + total off → OCR misread the total, etc.).
-            console.log(`[recover] no-match on submission[${i}]: receiptNo="${fields.receiptNo}" date=${fields.date} total=${fields.total}`);
-            await logDiagnosticMisses(fields);
+            // Distinguish the SELF-MATCH case: the fields matched a stored
+            // receipt, but it belongs to THIS device's own current account, so
+            // it was filtered out. That's not an OCR/field divergence — the user
+            // is already signed into the account they're trying to recover (a
+            // common dev pitfall: re-installing with the same persisted UUID).
+            const selfMatched = candidates.some(c => c.userId === freshUserId);
+            if (selfMatched) {
+                console.log(`[recover] no-match on submission[${i}]: matched receipt belongs to the CURRENT device account (freshUserId=${freshUserId}) — you are already on this account, nothing to recover. receiptNo="${fields.receiptNo}"`);
+            } else {
+                // Print the submission + near-misses ONLY on failure, so the
+                // happy-path log stays quiet. Tells you which field diverged
+                // (receiptNo OK + total off → OCR misread the total, etc.).
+                console.log(`[recover] no-match on submission[${i}]: receiptNo="${fields.receiptNo}" date=${fields.date} total=${fields.total}`);
+                await logDiagnosticMisses(fields);
+            }
             return { status: 'failed', reason: 'no-match' };
         }
         const c = others[0];
