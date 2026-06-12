@@ -22,6 +22,10 @@ export const createBetaSignup = async (req: Request, res: Response, next: NextFu
         const cleanPlatform = platform === 'android' ? 'android' : 'ios';
         const cleanLang = lang === 'en' ? 'en' : 'lt';
 
+        // Entry log: makes EVERY attempt visible (incl. validation rejects), so a
+        // tester report is diagnosable even when the row is never created.
+        console.log(`[betaSignup] request: email=${cleanEmail || '(none)'} platform=${cleanPlatform}`);
+
         if (cleanName.length < 2) {
             res.status(400).json({ error: 'Name is required' });
             return;
@@ -59,14 +63,26 @@ export const createBetaSignup = async (req: Request, res: Response, next: NextFu
         // Await the send so the landing form can show a real loading → sent /
         // error state. The row is already saved, so a failed send returns 502
         // and is safely retryable (invitedAt stays NULL until a send succeeds).
+        // The outcome is persisted to BetaSignup.status/.error so a tester who
+        // sees an error can be diagnosed straight from the DB on retry.
         try {
             await sendBetaInviteEmail({ to: cleanEmail, name: cleanName, platform: cleanPlatform, lang: cleanLang });
         } catch (e: any) {
-            console.error('[betaSignup] invite email failed:', e?.message);
+            const msg = String(e?.message ?? e).slice(0, 1000);
+            console.error(`[betaSignup] invite email failed for ${cleanEmail}:`, msg);
+            await pool.query(
+                `UPDATE BetaSignup SET status = 'failed', error = ? WHERE email = ?`,
+                [msg, cleanEmail],
+            ).catch((dbErr) => console.error('[betaSignup] failed to record failure status:', dbErr?.message));
             res.status(502).json({ ok: false, emailSent: false });
             return;
         }
         await pool.query(`UPDATE BetaSignup SET invitedAt = NOW() WHERE email = ?`, [cleanEmail]);
+        // status/error are best-effort: a DB that hasn't had the
+        // beta_signup_status.sql migration applied yet still signs testers up.
+        await pool.query(`UPDATE BetaSignup SET status = 'sent', error = NULL WHERE email = ?`, [cleanEmail])
+            .catch((dbErr) => console.error('[betaSignup] failed to record sent status:', dbErr?.message));
+        console.log(`[betaSignup] invite sent to ${cleanEmail} (${cleanPlatform})`);
 
         // Internal ops ping (to the team) — fire-and-forget, once, after the
         // first successful invite.
