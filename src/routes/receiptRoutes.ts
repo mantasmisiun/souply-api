@@ -3,6 +3,7 @@ import {
     fetchReceiptById,
     fetchReceiptsByUserId,
     removeReceipt,
+    // ^ dev-only cascade purge; route below is gated server-side too.
     fetchReceiptImage,
     createReceiptFromOcr,
     updateReceiptFromOcr,
@@ -59,5 +60,9 @@ router.get('/receipts/:id/comparison', fetchReceiptComparison);
 router.get('/receipts/:id/swipe-queue', fetchReceiptSwipeQueue);
 router.post('/receipts/:id/complete-swipes', markSwipesDone);
 router.post('/receipts/:id/lines/:idx/report-issue', reportReceiptLineIssue);
+
+// DEV-ONLY hard delete: receipt + its prices + orphan SPs/Products + MinIO
+// image. The controller refuses when NODE_ENV==='production' (prod/staging).
+router.delete('/receipts/:id', removeReceipt);
 
 export default router;

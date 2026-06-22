@@ -64,7 +64,24 @@ export const upsertCandidates = async (
 ): Promise<number> => {
     if (rows.length === 0) return 0;
     const db = conn ?? pool;
-    const values = rows.map(r => [
+
+    // TOCTOU guard: these rows come from an in-memory snapshot that can go stale
+    // between load and insert — a referenced StoreProduct may have been deleted
+    // or merged away (e.g. a concurrent receipt delete, or this receipt's own
+    // post-commit orphan consolidation). Inserting a dangling orphanSpId /
+    // candidateSpId trips the FK and aborts the WHOLE batch. Drop rows whose SPs
+    // no longer exist so the surviving candidates still seed. (Runs against the
+    // same connection/pool, so it sees committed state.)
+    const spIds = [...new Set(rows.flatMap(r => [r.orphanSpId, r.candidateSpId]))];
+    const [liveSpRows]: any = await (db as any).query(
+        `SELECT id FROM StoreProduct WHERE id IN (?)`,
+        [spIds],
+    );
+    const liveSp = new Set((liveSpRows as RowDataPacket[]).map(r => Number((r as any).id)));
+    const safeRows = rows.filter(r => liveSp.has(r.orphanSpId) && liveSp.has(r.candidateSpId));
+    if (safeRows.length === 0) return 0;
+
+    const values = safeRows.map(r => [
         r.orphanProductId,
         r.candidateProductId,
         r.orphanSpId,

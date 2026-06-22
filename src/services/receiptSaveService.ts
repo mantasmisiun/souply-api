@@ -378,11 +378,17 @@ export const persistReceiptPrices = async (
 
     // Fire-and-forget: seed OrphanSwipeCandidate rows for any 688-category SPs
     // resolved during this upload so they surface in slot2a immediately.
+    // Gated to the points-awarding (create / final-confirm) save only: each
+    // refill does a full-table snapshot load, so running it on every debounced
+    // edit auto-save needlessly hammers the connection pool — which can stall the
+    // concurrent product-match calls and leave the client stuck on "scanning".
+    // Edits that create new orphans are covered by the periodic batch seed +
+    // on-demand refillForOrphan from the extra-queue endpoint.
     const resolvedSpIds = (parsedData?.products ?? [])
         .map((p: any) => Number(p?.storeProductId))
         .filter((id: number) => Number.isFinite(id) && id > 0);
 
-    if (resolvedSpIds.length > 0) {
+    if (awardPoints && resolvedSpIds.length > 0) {
         void (async () => {
             try {
                 const [orphanRows]: any = await pool.query(

@@ -4,6 +4,7 @@ import { runIkiPromoScraper } from './iki/index.js';
 import { runNorfaPromoScraper } from './norfa/index.js';
 import { runRimiPromoScraper } from './rimi/index.js';
 import { runLidlPromoScraper } from './lidl/index.js';
+import { runScraperWithRetry } from './shared/runWithRetry.js';
 import { recalcGlobalScores } from '../models/productInteractionModel.js';
 import { refreshDiscountedSummary } from '../models/productModel.js';
 import { propagateCrossChainImages } from '../services/imagePropagationService.js';
@@ -22,7 +23,7 @@ import { sendDailyReceiptIssuesReport } from '../services/adminDailyReportServic
 
 let running = false;
 
-async function run(label: string, scrapers: (() => Promise<any>)[]) {
+async function run(label: string, scrapers: { name: string; fn: () => Promise<any> }[]) {
     if (running) {
         console.warn(`[Scheduler] ${label}: previous scrape still running — skipping`);
         return;
@@ -30,7 +31,10 @@ async function run(label: string, scrapers: (() => Promise<any>)[]) {
     running = true;
     console.log(`[Scheduler] ${label}: starting…`);
     try {
-        for (const scraper of scrapers) await scraper();
+        // Each scraper retries on its own (up to 5 attempts, 1h apart) and only
+        // alerts after the final failure; a chain that exhausts retries is
+        // skipped (not thrown) so the rest of the batch + refresh still run.
+        for (const s of scrapers) await runScraperWithRetry(s.name, s.fn);
         console.log(`[Scheduler] ${label}: finished. Refreshing discounts summary…`);
         await refreshDiscountedSummary();
         console.log(`[Scheduler] ${label}: discounts summary refreshed.`);
@@ -42,16 +46,16 @@ async function run(label: string, scrapers: (() => Promise<any>)[]) {
 }
 
 // Monday 06:00 — IKI + Lidl weekly deals start
-cron.schedule('0 6 * * 1', () => run('Mon', [runIkiPromoScraper, runLidlPromoScraper]), { timezone: 'Europe/Vilnius' });
+cron.schedule('0 6 * * 1', () => run('Mon', [{ name: 'IKI', fn: runIkiPromoScraper }, { name: 'Lidl', fn: runLidlPromoScraper }]), { timezone: 'Europe/Vilnius' });
 
 // Tuesday 06:00 — Rimi + Barbora weekly deals start
-cron.schedule('0 6 * * 2', () => run('Tue', [runRimiPromoScraper, runBarboraPromoScraper]), { timezone: 'Europe/Vilnius' });
+cron.schedule('0 6 * * 2', () => run('Tue', [{ name: 'Rimi', fn: runRimiPromoScraper }, { name: 'Barbora', fn: runBarboraPromoScraper }]), { timezone: 'Europe/Vilnius' });
 
 // Thursday 06:00 — Norfa weekly + kasoje deals start
-cron.schedule('0 6 * * 4', () => run('Thu', [runNorfaPromoScraper]), { timezone: 'Europe/Vilnius' });
+cron.schedule('0 6 * * 4', () => run('Thu', [{ name: 'Norfa', fn: runNorfaPromoScraper }]), { timezone: 'Europe/Vilnius' });
 
 // Saturday 06:00 — Lidl weekend "super savaitgalis" starts
-cron.schedule('0 6 * * 6', () => run('Sat', [runLidlPromoScraper]), { timezone: 'Europe/Vilnius' });
+cron.schedule('0 6 * * 6', () => run('Sat', [{ name: 'Lidl', fn: runLidlPromoScraper }]), { timezone: 'Europe/Vilnius' });
 
 // Nightly 03:00 — keep globalScore fresh for anonymous browse
 cron.schedule('0 3 * * *', () => {

@@ -15,6 +15,7 @@ import {
 } from "../models/receiptLineIssueModel.js";
 import { getPresignedUrl } from "../services/storageService.js";
 import { persistReceiptPrices } from '../services/receiptSaveService.js';
+import { deleteReceiptWithData } from '../services/receiptDeletionService.js';
 import { getReceiptComparison } from '../services/receiptComparisonService.js';
 import { hydrateReceiptCategoriesIfNeeded } from '../services/receiptHydrationService.js';
 import { generateDefaultTemplate } from '../services/defaultTemplateService.js';
@@ -66,15 +67,29 @@ export const fetchReceiptById = async (req: Request, res: Response, next: NextFu
     }
 };
 
+/**
+ * DEV-ONLY: hard delete a receipt and ALL the data it spawned (prices, orphan
+ * StoreProducts/Products, MinIO image). Refuses in production/staging
+ * (NODE_ENV==='production') so it can never wipe real price data from the
+ * internet-facing API — the phone only exposes the long-press entry in dev.
+ */
 export const removeReceipt = async (req: Request, res: Response, next: NextFunction) => {
     try {
+        if (process.env.NODE_ENV === 'production') {
+            res.status(403).json({ error: 'Receipt purge is disabled in this environment' });
+            return;
+        }
         const id = Number(req.params.id);
         if (isNaN(id)) {
             res.status(400).json({ error: 'Invalid receipt ID' });
             return;
         }
-        await deleteReceipt(id);
-        res.status(204).send();
+        const result = await deleteReceiptWithData(id);
+        if (!result.deleted) {
+            res.status(404).json({ error: 'Receipt not found' });
+            return;
+        }
+        res.status(200).json(result);
     } catch (error) {
         next(error);
     }
