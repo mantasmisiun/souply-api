@@ -28,10 +28,17 @@ export interface ReceiptMatchCandidate {
 }
 
 /**
- * Match query for a single submitted receipt. Looks up by receiptNo + date
- * + total (with tolerance). Joins Store→StoreChain to expose chainId for
- * the 2-chain rule. Returns 0..N candidates; collisions are statistically
- * vanishing given the three-field key, but the algorithm handles >1 anyway.
+ * Match query for a single submitted receipt. Identifies by the STABLE
+ * date + total pair (total within tolerance) — NOT receiptNo. The receiptNo
+ * can legitimately diverge between two parses of the same physical receipt
+ * (the canonical "Kvito Nr.", the shorter "Kvitas" sequence number, or a
+ * synthetic date+time+total id — whichever OCR could read that time), so
+ * requiring it would break recovery for a receipt re-scanned via a different
+ * fallback. The short "Kvitas" number is also NOT globally unique, so it must
+ * never be the sole key. date+total identifies the receipt either way; the
+ * 3-receipt / 2-chain / same-user floor in tryMatch supplies the security, and
+ * an ambiguity guard there rejects a date+total collision across users.
+ * storedReceiptNo is still returned for diagnostics. Joins Store for chainId.
  */
 export async function findRecoveryCandidates(
     fields: RecoveryFields,
@@ -45,15 +52,14 @@ export async function findRecoveryCandidates(
                 CAST(JSON_EXTRACT(r.parsedData, '$.footer.total') AS DECIMAL(10,2)) AS storedTotal
            FROM Receipt r
            LEFT JOIN Store s ON s.id = r.storeId
-          WHERE r.receiptNo = ?
-            AND DATE(r.receiptDate) = ?
+          WHERE DATE(r.receiptDate) = ?
             AND r.processingStatus = 'completed'
             AND r.parsedData IS NOT NULL
             AND r.userId IS NOT NULL
             AND ABS(
                 CAST(JSON_EXTRACT(r.parsedData, '$.footer.total') AS DECIMAL(10,2)) - ?
             ) <= ?`,
-        [fields.receiptNo, fields.date, fields.total, TOTAL_MATCH_TOLERANCE_EUR],
+        [fields.date, fields.total, TOTAL_MATCH_TOLERANCE_EUR],
     );
     return (rows as any[]).map(r => ({
         receiptId: Number(r.receiptId),

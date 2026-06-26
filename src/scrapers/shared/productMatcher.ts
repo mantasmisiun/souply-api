@@ -4,6 +4,7 @@
 
 import pool from '../../config/db.js';
 import { unitFamily } from '../../services/canonicalUnit.js';
+import { sharesRequiredAnchor } from '../../utils/nameMatchGate.js';
 
 export interface ProductEntry { id: number; categoryId: number; normName: string; }
 export interface SpEntry     { id: number; productId: number; normName: string; amount: number | null; unit: string | null; }
@@ -135,7 +136,13 @@ export async function fuzzyMatchProduct(
     const index = await getProductIndex();
     const norm = normalizeName(name);
     const result = findBest(norm, index, threshold);
-    return result?.entry ?? null;
+    if (!result) return null;
+    // Anchor-token gate: never cluster a single-significant-word name into a
+    // Product unless they share that exact word. Catalog names are clean (no
+    // OCR), so no char-similarity escape is needed here. Stops short-name,
+    // similar-ending mis-clusters like "Airanas" ↔ "Šafranas KOTANYI".
+    if (!sharesRequiredAnchor(norm, result.entry.normName)) return null;
+    return result.entry;
 }
 
 // ── StoreProduct index (per-chain) ───────────────────────────────────────────

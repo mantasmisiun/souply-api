@@ -22,6 +22,7 @@
 
 import { levenshtein } from './addressMatcher.js';
 import { extractPackSize } from '../../../shared/parsers/rimiParser.js';
+import { sharesRequiredAnchor } from './nameMatchGate.js';
 
 /**
  * Strip OCR prefixes that hold no product signal but often leak through
@@ -213,6 +214,17 @@ export function findBestProductMatches(
         const normalizedCand = normalizeProductName(cand.storeProductName);
         const candTokens = tokenize(normalizedCand);
         if (candTokens.length === 0) continue;
+
+        // Anchor-token gate: a query with a single significant word may only
+        // match a candidate that contains that word EXACTLY. The exception is
+        // when the two strings are near-identical character-wise — that's the
+        // OCR split-word case (e.g. "gėr imas" → "gėrimas") which the charScore
+        // lane below is meant to rescue. Without this, "Airanas" fuzzy-matched
+        // "Šafranas KOTANYI" at 0.75 and got clustered into the saffron Product.
+        if (!sharesRequiredAnchor(normalizedQuery, normalizedCand)
+            && charSimilarity(normalizedQuery, normalizedCand) < 0.85) {
+            continue;
+        }
 
         const tokenScore = scoreTokens(queryTokens, candTokens);
         // Always compute char-similarity — cheap early-bail inside

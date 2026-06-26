@@ -138,3 +138,28 @@ describe('findBestProductMatches', () => {
         expect(results[0].storeProductId).toBe(1);
     });
 });
+
+describe('findBestProductMatches — anchor-token gate (Airanas/Šafranas regression)', () => {
+    const SAFRANAS = makeCandidate({ id: 50, productId: 5125, storeProductName: 'Šafranas KOTANYI', amount: 0.01, unit: 'g' });
+    const AIRANAS = makeCandidate({ id: 51, productId: 600, storeProductName: 'Airanas DVARO' });
+
+    it('does NOT cluster "Airanas" into "Šafranas KOTANYI" (the €230 incident)', () => {
+        // single-token "airanas" is only 0.75 char-similar to "safranas" —
+        // exactly the short-name, similar-ending false positive the gate kills.
+        const matches = findBestProductMatches('Airanas', null, 'vnt', [SAFRANAS]);
+        expect(matches).toHaveLength(0);
+    });
+
+    it('still matches "Airanas" to a real airanas product (exact token present)', () => {
+        const matches = findBestProductMatches('Airanas', null, 'vnt', [SAFRANAS, AIRANAS]);
+        expect(matches.map(m => m.storeProductId)).toEqual([51]); // saffron excluded
+    });
+
+    it('preserves the OCR split-word rescue (near-identical chars bypass the gate)', () => {
+        // "sok oladas" → "sokoladas": different tokens but identical characters.
+        const SOK = makeCandidate({ id: 60, productId: 700, storeProductName: 'Šokoladas' });
+        const matches = findBestProductMatches('Sok oladas', null, null, [SOK]);
+        expect(matches.length).toBeGreaterThan(0);
+        expect(matches[0].storeProductId).toBe(60);
+    });
+});

@@ -1,6 +1,7 @@
 import pool from '../config/db.js';
 import { getReceiptById } from '../models/receiptModel.js';
 import { getStoreById, getClosestStorePerChainToStore, ClosestChainStore } from '../models/storeModel.js';
+import { unitFamily } from './canonicalUnit.js';
 
 interface ParsedReceiptItem {
     storeProductId: number | null;
@@ -174,7 +175,26 @@ const calculateItemTotalSync = (
     if (best.isWeighable) {
         return round2(normalizedQty * bestPricePerUnit);
     }
-    const packsNeeded = Math.ceil(normalizedQty / best.normalizedAmount);
+    // Pack rounding `ceil(qty / packSize)` only makes sense when the request
+    // and the SP's pack size are the same kind of unit. When the pack is a
+    // weight/volume (fluid family) but the request is NOT — e.g. a "1 vnt"
+    // receipt line priced against a "0.010 g" Šafranas pack — `packSize` is a
+    // sub-gram weight, and dividing gives ceil(1 / 0.010) = 100 packs = €229,
+    // which detonates the whole comparison. In that case the quantity is a
+    // COUNT of items, so buy `quantity` whole packs instead. (Count-family
+    // packs like a 10-vnt egg tray still divide correctly via the else branch.)
+    const inFam = unitFamily(inputUnit);
+    const packFam = unitFamily(best.unit);
+    const packsNeeded = (packFam === 'fluid' && inFam !== 'fluid')
+        ? Math.max(1, Math.ceil(quantity))
+        : Math.max(1, Math.ceil(normalizedQty / best.normalizedAmount));
+    if (packsNeeded > 50) {
+        console.warn(
+            `[receiptComparison] suspicious packsNeeded=${packsNeeded} ` +
+            `(qty=${quantity} ${inputUnit ?? '?'} vs pack ${best.normalizedAmount} ${best.unit ?? '?'}) ` +
+            `→ €${round2(packsNeeded * best.effectivePrice)}; check for a unit/pack-size data error`,
+        );
+    }
     return round2(packsNeeded * best.effectivePrice);
 };
 

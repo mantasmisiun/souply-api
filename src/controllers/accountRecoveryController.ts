@@ -179,6 +179,16 @@ async function tryMatch(submitted: RecoveryFields[], freshUserId: string): Promi
             }
             return { status: 'failed', reason: 'no-match' };
         }
+        // AMBIGUITY GUARD: now that matching is by date+total (receiptNo can diverge
+        // across re-parses, so it's no longer part of the key), a collision could
+        // surface receipts from DIFFERENT users with the same date+total. Refuse to
+        // pick one arbitrarily — that would let an attacker ride a coincidental
+        // collision. Multiple rows for the SAME user (e.g. a re-upload) are fine.
+        const distinctUsers = new Set(others.map(o => o.userId));
+        if (distinctUsers.size > 1) {
+            console.log(`[recover] no-match on submission[${i}]: AMBIGUOUS — date=${fields.date} total=${fields.total} matched ${distinctUsers.size} different users`);
+            return { status: 'failed', reason: 'no-match' };
+        }
         const c = others[0];
         hits.push({ receiptId: c.receiptId, userId: c.userId!, chainId: c.chainId });
     }

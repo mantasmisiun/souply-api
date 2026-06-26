@@ -315,3 +315,39 @@ describe('guard conditions', () => {
         expect(result.currentChain.total).toBe(0);
     });
 });
+
+describe('item total calculation — unit-family guard (Šafranas 0.010 g blow-up)', () => {
+    it('does not divide a count quantity into sub-gram weight packs', async () => {
+        // Receipt "Airanas": 1 vnt @ €1.19. The alt store carries the (mis-
+        // clustered) product only as a 0.010 g Šafranas pack. Before the guard
+        // this priced ceil(1 / 0.010) = 100 packs × €2.29 = €229. Must be 1 pack.
+        setReceipt([
+            { storeProductId: 10, quantity: 1, price: 1.19, promoPrice: null, matchConfirmed: true, unit: 'vnt' },
+        ]);
+        setStore();
+        setSpLookup([{ id: 10, productId: 5125 }]);
+        setBatchPrices([
+            { productId: 5125, isWeighable: 0, amount: 0.010, unit: 'g', storeId: 2, price: 2.29, promoPrice: null },
+        ]);
+
+        const result = await getReceiptComparison(1);
+        const rimi = result.alternatives.find((a: any) => a.chainId === 2);
+        expect(rimi.total).toBe(2.29); // 1 pack, not 100
+    });
+
+    it('still applies pack division within the same unit family (egg trays)', async () => {
+        // 12 vnt requested, sold as 10-vnt trays → ceil(12 / 10) = 2 trays.
+        setReceipt([
+            { storeProductId: 11, quantity: 12, price: 0.20, promoPrice: null, matchConfirmed: true, unit: 'vnt' },
+        ]);
+        setStore();
+        setSpLookup([{ id: 11, productId: 200 }]);
+        setBatchPrices([
+            { productId: 200, isWeighable: 0, amount: 10, unit: 'vnt', storeId: 2, price: 1.50, promoPrice: null },
+        ]);
+
+        const result = await getReceiptComparison(1);
+        const rimi = result.alternatives.find((a: any) => a.chainId === 2);
+        expect(rimi.total).toBe(3.00); // 2 × 1.50
+    });
+});
