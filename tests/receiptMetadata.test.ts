@@ -1,4 +1,26 @@
-import { normalizeReceiptNo, normalizeReceiptDateForStorage } from '../src/utils/receiptMetadata.js';
+import { normalizeReceiptNo, normalizeReceiptNos, normalizeReceiptDateForStorage } from '../src/utils/receiptMetadata.js';
+
+describe('normalizeReceiptNos', () => {
+    it('normalizes each value, forces the canonical to the front, and dedupes', () => {
+        expect(normalizeReceiptNos(['168/645/104148', '104148', '3157 Kasa 0027'], '168/645/104148'))
+            .toEqual(['168/645/104148', '104148', '3157']);
+    });
+    it('puts a canonical that was NOT in the array first', () => {
+        expect(normalizeReceiptNos(['3157'], '168/645/104148')).toEqual(['168/645/104148', '3157']);
+    });
+    it('falls back to just the canonical when the array is empty/missing', () => {
+        expect(normalizeReceiptNos([], 'ABC-1')).toEqual(['ABC-1']);
+        expect(normalizeReceiptNos(null, 'ABC-1')).toEqual(['ABC-1']);
+    });
+    it('returns [] when there is no canonical and no values', () => {
+        expect(normalizeReceiptNos([], null)).toEqual([]);
+    });
+    it('normalizes the CANONICAL too (defensive backfill over an un-stripped stored receiptNo)', () => {
+        // canonical carries a Kasa suffix → stripped, and then dedupes against the clean array value.
+        expect(normalizeReceiptNos(['9/100/55555', '55555'], '9/100/55555 Kasa 7'))
+            .toEqual(['9/100/55555', '55555']);
+    });
+});
 
 // ---------------------------------------------------------------------------
 // normalizeReceiptNo

@@ -23,6 +23,7 @@ export interface ReceiptMatchCandidate {
     userId: string | null;
     chainId: number | null;
     storedReceiptNo: string;
+    storedReceiptNos: string[];   // every identifier on the stored receipt (for the ambiguity tiebreaker)
     storedDate: string;   // YYYY-MM-DD
     storedTotal: number;
 }
@@ -47,7 +48,8 @@ export async function findRecoveryCandidates(
         `SELECT r.id          AS receiptId,
                 r.userId      AS userId,
                 s.chainId     AS chainId,
-                r.receiptNo   AS storedReceiptNo,
+                r.receiptNoCanonical AS storedReceiptNo,
+                r.receiptNos         AS storedReceiptNos,
                 DATE_FORMAT(r.receiptDate, '%Y-%m-%d') AS storedDate,
                 CAST(JSON_EXTRACT(r.parsedData, '$.footer.total') AS DECIMAL(10,2)) AS storedTotal
            FROM Receipt r
@@ -61,14 +63,29 @@ export async function findRecoveryCandidates(
             ) <= ?`,
         [fields.date, fields.total, TOTAL_MATCH_TOLERANCE_EUR],
     );
-    return (rows as any[]).map(r => ({
-        receiptId: Number(r.receiptId),
-        userId: r.userId ?? null,
-        chainId: r.chainId !== null && r.chainId !== undefined ? Number(r.chainId) : null,
-        storedReceiptNo: String(r.storedReceiptNo),
-        storedDate: String(r.storedDate),
-        storedTotal: Number(r.storedTotal),
-    }));
+    return (rows as any[]).map(r => {
+        // storedReceiptNos: the receiptNos COLUMN — a JSON-text array, or null on rows not yet
+        // backfilled. The driver returns it as a STRING (the column isn't in db.ts JSON_ARRAY_FIELDS),
+        // but decode up to twice to be robust if it's ever registered there (→ already-parsed) or
+        // double-encoded. Fall back to the single canonical receiptNo when absent/garbage.
+        let storedReceiptNos: string[] = [];
+        let v: unknown = r.storedReceiptNos;
+        for (let i = 0; i < 2 && typeof v === 'string'; i++) {
+            try { v = JSON.parse(v); } catch { v = null; break; }
+        }
+        if (Array.isArray(v)) storedReceiptNos = v.filter((x) => typeof x === 'string').map(String);
+        const storedReceiptNo = String(r.storedReceiptNo);
+        if (storedReceiptNos.length === 0 && storedReceiptNo) storedReceiptNos = [storedReceiptNo];
+        return {
+            receiptId: Number(r.receiptId),
+            userId: r.userId ?? null,
+            chainId: r.chainId !== null && r.chainId !== undefined ? Number(r.chainId) : null,
+            storedReceiptNo,
+            storedReceiptNos,
+            storedDate: String(r.storedDate),
+            storedTotal: Number(r.storedTotal),
+        };
+    });
 }
 
 /**

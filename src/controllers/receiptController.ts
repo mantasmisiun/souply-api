@@ -7,6 +7,7 @@ import {
     getVotedPairKeysForUser,
 } from "../models/receiptSwipeCandidateModel.js";
 import { buildSwipeQueue } from "../services/swipeQueueService.js";
+import { normalizeReceiptNo, normalizeReceiptNos } from "../utils/receiptMetadata.js";
 import { getReverificationPairKeysForReceipt } from "../models/userEquivalenceModel.js";
 import {
     unverifyReceiptLinePrice,
@@ -524,13 +525,24 @@ export const updateReceiptRegions = async (req: Request, res: Response, next: Ne
         if (typeof reqSavings === 'number' && Number.isFinite(reqSavings)) {
             parsed.footer.totalSavings = reqSavings;
         }
-        // Identity fields capped at 64 chars to keep an abusive
-        // client from injecting unbounded text. Empty strings reject
-        // so the field doesn't get clobbered when the parser failed.
+        // Identity fields capped at 50 chars — both to stop an abusive client injecting unbounded
+        // text AND to match receiptNoCanonical VARCHAR(50): a longer receiptNos[0] would truncate in
+        // the generated column and break the receiptNos[0] === receiptNoCanonical invariant. Empty
+        // strings reject so a failed-parse field isn't clobbered.
         const isOkString = (s: any): s is string =>
-            typeof s === 'string' && s.length > 0 && s.length <= 64;
+            typeof s === 'string' && s.length > 0 && s.length <= 50;
         if (isOkString(reqReceiptNo)) {
             parsed.footer.receiptNo = reqReceiptNo;
+        }
+        // The re-parse may find MORE identifiers than the original (e.g. an earlier parser revision
+        // captured only "Kvito Nr."; the new one also reads "Kvitas"/"Kvito numeris"). Take the
+        // client's fresh array as authoritative so the receiptNos column converges to the full set
+        // instead of staying stuck on the stale stored value (receipt-143).
+        const reqReceiptNos: string[] = Array.isArray(req.body?.receiptNos)
+            ? req.body.receiptNos.filter((v: unknown): v is string => isOkString(v)).map((v: string) => v.trim())
+            : [];
+        if (reqReceiptNos.length > 0) {
+            parsed.footer.receiptNos = reqReceiptNos;
         }
         if (isOkString(reqDate)) {
             parsed.footer.date = reqDate;
@@ -548,10 +560,40 @@ export const updateReceiptRegions = async (req: Request, res: Response, next: Ne
             parsed.header.regionsVersion = versionRaw;
         }
 
-        await pool.query(
-            'UPDATE Receipt SET parsedData = ? WHERE id = ?',
-            [JSON.stringify(parsed), id],
-        );
+        // Keep the receiptNos column (the functional, recovery-read identifier set) in lockstep with
+        // the corrected footer, so a re-parsed receipt number is still recovery-matchable (recovery
+        // reads the column, not this blob). The canonical id (the generated receiptNoCanonical = the
+        // UNIQUE dedup key, surfaced here as receipt.receiptNo via the model alias) is kept PINNED as
+        // receiptNos[0], so the re-parse folds in the new ids WITHOUT changing identity.
+        const idPool: string[] = [
+            ...(Array.isArray(parsed.footer.receiptNos)
+                ? parsed.footer.receiptNos.filter((v: unknown): v is string => typeof v === 'string')
+                : []),
+            typeof parsed.footer.receiptNo === 'string' ? parsed.footer.receiptNo : '',
+        ].filter(Boolean);
+        const recomputedReceiptNos = normalizeReceiptNos(idPool, normalizeReceiptNo(receipt.receiptNo ?? null));
+        parsed.footer.receiptNos = recomputedReceiptNos;
+
+        try {
+            await pool.query(
+                'UPDATE Receipt SET parsedData = ?, receiptNos = ? WHERE id = ?',
+                [JSON.stringify(parsed), recomputedReceiptNos.length ? JSON.stringify(recomputedReceiptNos) : null, id],
+            );
+        } catch (e: any) {
+            // Writing receiptNos changes the generated canonical (the dedup key). It's pinned to the
+            // existing canonical, so it only moves for a row that had NONE — and a re-parse could then
+            // mint an id that collides with another receipt. A regions edit must never change identity:
+            // keep the stored receiptNos and persist only the corrected bands/parse.
+            if (e?.code === 'ER_DUP_ENTRY' && /unique_receipt/i.test(String(e?.sqlMessage ?? ''))) {
+                let stored: string[] = [];
+                try { const a = JSON.parse(receipt.receiptNos ?? 'null'); if (Array.isArray(a)) stored = a.map(String); } catch { /* leave [] */ }
+                parsed.footer.receiptNos = stored;
+                console.warn(`[regions] receiptNos change for receipt ${id} would collide on unique_receipt — kept existing identity, persisted parsedData only`);
+                await pool.query('UPDATE Receipt SET parsedData = ? WHERE id = ?', [JSON.stringify(parsed), id]);
+            } else {
+                throw e;
+            }
+        }
         res.json({ id, ok: true });
     } catch (error) {
         next(error);

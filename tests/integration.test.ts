@@ -137,7 +137,9 @@ describe('POST /api/receipts — points and savings', () => {
     it('sets processingStatus=completed and stores receiptNo', async () => {
         const [rows]: any = await pool.query(`SELECT * FROM Receipt WHERE id = ?`, [receiptId]);
         expect(rows[0].processingStatus).toBe('completed');
-        expect(rows[0].receiptNo).toBe('INT-001');
+        // canonical id is the generated column derived from receiptNos[0]
+        expect(rows[0].receiptNoCanonical).toBe('INT-001');
+        expect(JSON.parse(rows[0].receiptNos)).toEqual(['INT-001']);
     });
 
     it('awards 1 point per item on the receipt', async () => {

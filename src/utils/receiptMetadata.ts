@@ -58,6 +58,27 @@ export const normalizeReceiptNo = (
 };
 
 /**
+ * Normalize the full set of receipt identifiers (a single physical receipt can print several —
+ * IKI shows "Kvitas", "Kvito Nr." and "Kvito numeris"). Each value is Kasa-stripped/whitespace-
+ * cleaned the same way as the canonical id, the canonical is forced to the FRONT (it stays the
+ * dedup key + the value the UI shows), and duplicates are dropped while order is preserved.
+ * Falls back to just the canonical when no array was parsed (older chains / older stored data).
+ */
+export const normalizeReceiptNos = (
+    values: ReadonlyArray<string | null | undefined> | null | undefined,
+    canonical: string | null
+): string[] => {
+    // Normalize the canonical too (idempotent in the live path where it's already clean) so a
+    // backfill over an un-normalized stored receiptNo can't leak a "Kasa N" suffix into the array.
+    const cleanedCanonical = normalizeReceiptNo(canonical);
+    const cleaned = (values ?? [])
+        .map((v) => normalizeReceiptNo(v))
+        .filter((v): v is string => !!v);
+    const ordered = cleanedCanonical ? [cleanedCanonical, ...cleaned] : cleaned;
+    return [...new Set(ordered)];
+};
+
+/**
  * Build a SQL DATETIME from the parsed-receipt fields.
  *
  * `receiptDate` may be:

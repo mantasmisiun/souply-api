@@ -14,7 +14,7 @@ import { applyPriceRound2Matching, type Round2Result } from './priceRound2Matche
 import { propagateAllFallbackPrices } from './priceService.js';
 import { refillForOrphans } from '../scripts/seedOrphanSwipeCandidates.js';
 import pool from '../config/db.js';
-import { normalizeReceiptDateForStorage, normalizeReceiptNo } from '../utils/receiptMetadata.js';
+import { normalizeReceiptDateForStorage, normalizeReceiptNo, normalizeReceiptNos } from '../utils/receiptMetadata.js';
 import { awardReceiptPoints } from './userPointsService.js';
 import { initMandatorySwipeSession, MANDATORY_SWIPES_PER_RECEIPT } from './swipeSessionService.js';
 import { RECOGNITION } from '../../../shared/recognitionConfig.js';
@@ -121,13 +121,26 @@ export const persistReceiptPrices = async (
         const footerRawText = parsedData?.footer?.rawText ?? null;
         const normalizedReceiptNo = normalizeReceiptNo(input.receiptNo, footerRawText);
         const normalizedReceiptDate = normalizeReceiptDateForStorage(input.date, input.time);
+        // Full identifier set: the parser writes footer.receiptNos for chains that print several
+        // (IKI); fall back to the single canonical for the others / older payloads. Normalized the
+        // same way and kept canonical-first (the canonical remains the dedup key + UI value).
+        const parsedReceiptNos: unknown = parsedData?.footer?.receiptNos;
+        const normalizedReceiptNos = normalizeReceiptNos(
+            Array.isArray(parsedReceiptNos) ? (parsedReceiptNos as string[]) : (input.receiptNo ? [input.receiptNo] : []),
+            normalizedReceiptNo,
+        );
+        // The canonical scalar MUST equal receiptNos[0] (UI shows it, recovery keys off it). They
+        // already agree in the normal path; this fallback guarantees it even on a degraded payload
+        // where the scalar normalized to null but the array still has a value.
+        const canonicalReceiptNo = normalizedReceiptNos[0] ?? normalizedReceiptNo;
 
         if (parsedData && typeof parsedData === 'object') {
             if ('receiptNo' in parsedData) {
-                parsedData.receiptNo = normalizedReceiptNo;
+                parsedData.receiptNo = canonicalReceiptNo;
             }
             if (parsedData.footer && typeof parsedData.footer === 'object') {
-                parsedData.footer.receiptNo = normalizedReceiptNo;
+                parsedData.footer.receiptNo = canonicalReceiptNo;
+                parsedData.footer.receiptNos = normalizedReceiptNos;
                 // Don't overwrite parsedData.footer.date with the combined
                 // SQL datetime — the canonical timestamp lives in the
                 // Receipt.receiptDate column. The mobile renderer joins
@@ -372,7 +385,7 @@ export const persistReceiptPrices = async (
 
         await updateReceiptDetails(
             receiptId,
-            normalizedReceiptNo,
+            normalizedReceiptNos,
             normalizedReceiptDate,
             'completed',
             parsedData,
