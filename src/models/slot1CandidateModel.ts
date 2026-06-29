@@ -2,17 +2,18 @@ import pool from '../config/db.js';
 import { crossChainNameSimilarity } from '../utils/productNameNormalize.js';
 import { swipeLog } from '../utils/swipeLogger.js';
 import type { Locale } from '../middleware/locale.js';
+import { RECOGNITION } from '../../../shared/recognitionConfig.js';
 
 /** Minimum match score for an anchor SP to be used as a Slot 1 source. */
-const SLOT1_ANCHOR_MIN_SCORE = 0.85;
+const SLOT1_ANCHOR_MIN_SCORE = RECOGNITION.match.slot1AnchorMinScore;
 /**
  * Minimum cross-chain name similarity to surface a pair.
  * Lower than Slot 3 (0.75) because chain-specific naming diverges cross-chain
  * even after stripping brand tokens.
  */
-const SLOT1_CROSS_CHAIN_MIN_SCORE = 0.6;
+const SLOT1_CROSS_CHAIN_MIN_SCORE = RECOGNITION.match.slot1CrossChainMinScore;
 /** Candidates fetched per (otherChainId, categoryId) group for JS scoring. */
-const MAX_CANDIDATES_PER_GROUP = 25;
+const MAX_CANDIDATES_PER_GROUP = RECOGNITION.match.maxCandidatesPerGroup;
 
 export interface RawSlot1Row {
     leftSpId: number;

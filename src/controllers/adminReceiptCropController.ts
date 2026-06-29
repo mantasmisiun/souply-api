@@ -169,8 +169,18 @@ export const getFlaggedReceiptCrop = async (req: Request, res: Response, next: N
             return;
         }
 
-        const yTop = Math.max(0, Math.min(imgHeight, Math.floor(region.yTop)));
-        const yBottom = Math.max(0, Math.min(imgHeight, Math.ceil(region.yBottom)));
+        // Crop the band's CENTRE-line height, not its axis-aligned bounding box.
+        // The band is a tilted parallelogram; region.yTop/yBottom (min top corner /
+        // max bottom corner) inflate the rectangle by the full tilt span, so on a
+        // skewed scan the crop is ~2x the band height and bleeds into the products
+        // above/below. The average of the two top corners → the two bottom corners is
+        // the band's true height, and consecutive centre-bands tile with no overlap.
+        const yLT = Number(region.yLeftTop ?? region.yTop);
+        const yRT = Number(region.yRightTop ?? region.yTop);
+        const yLB = Number(region.yLeftBottom ?? region.yBottom);
+        const yRB = Number(region.yRightBottom ?? region.yBottom);
+        const yTop = Math.max(0, Math.min(imgHeight, Math.floor((yLT + yRT) / 2)));
+        const yBottom = Math.max(0, Math.min(imgHeight, Math.ceil((yLB + yRB) / 2)));
         const lineHeight = Math.max(1, yBottom - yTop);
         const pad = Math.floor(lineHeight * VERTICAL_PADDING_PCT);
         const cropTop = Math.max(0, yTop - pad);

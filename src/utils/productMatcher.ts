@@ -23,6 +23,7 @@
 import { levenshtein } from './addressMatcher.js';
 import { extractPackSize } from '../../../shared/parsers/rimiParser.js';
 import { sharesRequiredAnchor } from './nameMatchGate.js';
+import { RECOGNITION } from '../../../shared/recognitionConfig.js';
 
 /**
  * Strip OCR prefixes that hold no product signal but often leak through
@@ -119,6 +120,9 @@ export interface MatchCandidate {
     unit: string | null;
     isWeighable: boolean;
     imageUrl: string | null;
+    /** True = a real scraped catalog SKU (has a receiptId-NULL price); false/undefined
+     *  = a receipt-minted orphan. Used as a near-tie ranking preference. */
+    isCatalog?: boolean;
 }
 
 export interface ProductMatch {
@@ -134,11 +138,51 @@ export interface ProductMatch {
     isWeighable: boolean;
     imageUrl: string | null;
     confidence: number;
+    isCatalog?: boolean;
 }
 
 function sameUnit(a: string | null, b: string | null): boolean {
     if (!a || !b) return false;
     return a.toLowerCase().replace(/\./g, '') === b.toLowerCase().replace(/\./g, '');
+}
+
+const normUnit = (unit: string | null): string | null =>
+    unit ? unit.toLowerCase().replace(/\./g, '').trim() : null;
+
+// A FIXED form = a concrete, sized/counted package a by-weight line must NOT match:
+// a sealed pack (g/ml), a per-ITEM count (vnt/rit), a LIQUID (l — nothing is sold by
+// weight in litres), or a multi-unit weight BAG (kg with amount ≥ 2). The only
+// weight-compatible "packaged" rows are kg @ amount 1/null and unsized (no unit, e.g.
+// pre-packed-by-weight produce like "Fasuoti obuoliai").
+export function hasFixedPackForm(amount: number | null, unit: string | null): boolean {
+    const u = normUnit(unit);
+    if (u === 'kg') return !(amount === null || amount === 1); // kg @2+ is a fixed bag
+    return !!u; // g/ml/l/vnt/rit/etc → fixed; null unit → not fixed
+}
+
+// The weighable self-heal only flips a "1 kg" produce row wrongly flagged
+// isWeighable=false: kg @ amount 1/null ONLY — never a litre (no liquid is weighable),
+// never a per-item count, never a sized bag.
+export function isMislabeledWeighableKg(amount: number | null, unit: string | null): boolean {
+    return normUnit(unit) === 'kg' && (amount === null || amount === 1);
+}
+
+// Distinguishing-noun disagreement penalty. Generic brand/packaging words
+// ("Fasuoti", "IKI", "ŪKIS") match across very different products, so a candidate
+// can clear token coverage on those alone while the DISTINGUISHING noun disagrees
+// ("obuoliai"/apples vs "bulvės"/potatoes → matched potatoes at 0.51). For each
+// SIGNIFICANT (long) query token with no good per-token counterpart among the
+// candidate's long tokens, levy a penalty. Caller applies it to the TOKEN lane
+// only, so the whole-string char-rescue (OCR split-word) lane stays intact.
+function distinguishingPenalty(queryTokens: string[], candidateTokens: string[]): number {
+    const candLong = candidateTokens.filter((t) => t.length > RECOGNITION.match.shortTokenThreshold);
+    if (candLong.length === 0) return 0;
+    let unmatched = 0;
+    for (const qt of queryTokens) {
+        if (qt.length <= RECOGNITION.match.shortTokenThreshold) continue; // only long tokens distinguish
+        if (bestTokenMatch(qt, candLong) < RECOGNITION.match.nounSimFloor) unmatched++;
+    }
+    return Math.min(RECOGNITION.match.nounDisagreementCap, unmatched * RECOGNITION.match.nounDisagreementPenalty);
 }
 
 function scoreTokens(queryTokens: string[], candidateTokens: string[]): number {
@@ -201,8 +245,14 @@ export function findBestProductMatches(
     ocrAmount: number | null,
     ocrUnit: string | null,
     candidates: MatchCandidate[],
-    minConfidence: number = 0.4,
-    topN: number = 3
+    minConfidence: number = RECOGNITION.match.minConfidence,
+    topN: number = RECOGNITION.match.topN,
+    // When set (not null), a HARD weighable gate: a by-WEIGHT receipt line
+    // (sold per kg, no fixed pack) may only match weighable SPs, and a PACKAGED
+    // line only fixed-pack SPs. Prevents a loose paprikos (0,47 kg) collapsing
+    // onto a packaged "Raudonosios paprikos BON VIA" (180 g) — different product
+    // forms the name matcher can't tell apart. Null = no gate (legacy callers).
+    ocrIsWeighable: boolean | null = null,
 ): ProductMatch[] {
     const normalizedQuery = normalizeProductName(ocrName);
     const queryTokens = tokenize(normalizedQuery);
@@ -211,6 +261,34 @@ export function findBestProductMatches(
     const scored: Array<{ cand: MatchCandidate; confidence: number }> = [];
 
     for (const cand of candidates) {
+        // Effective pack size: catalog columns, else a size parsed from the NAME
+        // (many SPs carry size in the name but null amount/unit columns). Computed
+        // up here so the weighable gate below can use it too.
+        let candAmount = cand.amount;
+        let candUnit = cand.unit;
+        if ((candAmount === null || !candUnit) && cand.storeProductName) {
+            const extracted = extractPackSize(cand.storeProductName);
+            if (extracted.amount !== null && extracted.unit) {
+                candAmount = candAmount ?? extracted.amount;
+                candUnit = candUnit ?? extracted.unit;
+            }
+        }
+
+        // Weighable (cross-form) gate. A by-weight line and a "packaged" SP are
+        // normally different FORMS — EXCEPT when the packaged side has NO FIXED form:
+        // pre-packed-by-weight produce ("Fasuoti obuoliai IKI ŪKIS", isWeighable=0 but
+        // sold per kg, no size) and bulk-weight (kg/l) rows ARE weight-compatible and
+        // must match. A real FIXED form stays excluded — a sealed package ("180 g") OR
+        // a PER-ITEM count ("1 vnt", e.g. Raudonosios paprikos BON VIA sold per item) —
+        // so loose 0,47 kg paprikos never collapses onto a per-item or 180 g pack.
+        if (ocrIsWeighable !== null && cand.isWeighable !== ocrIsWeighable) {
+            const packagedHasFixedForm =
+                cand.isWeighable === false
+                    ? hasFixedPackForm(candAmount, candUnit)
+                    : hasFixedPackForm(ocrAmount, ocrUnit);
+            if (packagedHasFixedForm) continue;
+        }
+
         const normalizedCand = normalizeProductName(cand.storeProductName);
         const candTokens = tokenize(normalizedCand);
         if (candTokens.length === 0) continue;
@@ -226,7 +304,11 @@ export function findBestProductMatches(
             continue;
         }
 
-        const tokenScore = scoreTokens(queryTokens, candTokens);
+        let tokenScore = scoreTokens(queryTokens, candTokens);
+        // Dock the TOKEN score when a distinguishing query noun has no counterpart
+        // (apples vs potatoes share only "Fasuoti/IKI/ŪKIS"). Token lane only — the
+        // char lane below still rescues genuine OCR split-word variants.
+        if (tokenScore > 0) tokenScore = Math.max(0, tokenScore - distinguishingPenalty(queryTokens, candTokens));
         // Always compute char-similarity — cheap early-bail inside
         // handles the 99% of candidates that aren't close in length.
         const charScore = charSimilarity(normalizedQuery, normalizedCand);
@@ -239,29 +321,14 @@ export function findBestProductMatches(
         const charContribution = charScore >= 0.6 ? charScore * 0.95 : 0;
         let confidence = Math.max(tokenScore, charContribution);
 
-        // Symmetric size extraction: many catalog SPs have size info in
-        // the name but null `amount` / `unit` columns (data-quality
-        // legacy). Without this fallback, ZEWA-class cases — where the
-        // candidate names are "ZEWA EVERYDAY, 12 rit." / "8 rit." /
-        // "4 rit." but all stored amount=null — never trigger the
-        // size-mismatch penalty, so name-similarity alone returns the
-        // wrong pack at confidence 1.0. Falling back to name-extraction
-        // closes the loop until the catalog data is backfilled.
-        let candAmount = cand.amount;
-        let candUnit = cand.unit;
-        if ((candAmount === null || !candUnit) && cand.storeProductName) {
-            const extracted = extractPackSize(cand.storeProductName);
-            if (extracted.amount !== null && extracted.unit) {
-                candAmount = candAmount ?? extracted.amount;
-                candUnit = candUnit ?? extracted.unit;
-            }
-        }
-
+        // candAmount/candUnit were computed above (before the weighable gate) — the
+        // name-extraction fallback covers ZEWA-class SPs whose size lives only in the
+        // name (amount=null columns) so the size-mismatch penalty still fires.
         if (ocrAmount !== null && ocrUnit && candAmount !== null && candUnit) {
-            const amountMatches = Math.abs(ocrAmount - candAmount) < 0.01;
+            const amountMatches = Math.abs(ocrAmount - candAmount) < RECOGNITION.match.amountTolerance;
             const unitMatches = sameUnit(ocrUnit, candUnit);
             if (amountMatches && unitMatches) {
-                confidence = Math.min(1, confidence + 0.15);
+                confidence = Math.min(1, confidence + RECOGNITION.match.amountBonus);
             } else if (unitMatches && !amountMatches) {
                 // Same unit, different pack size — strong negative signal.
                 // Multiple same-named pack variants (e.g. ZEWA EVERYDAY
@@ -271,11 +338,11 @@ export function findBestProductMatches(
                 // Scale by relative size error so a near-match (32 vs 30)
                 // hurts less than a wild miss (32 vs 12).
                 const relErr = Math.abs(ocrAmount - candAmount) / Math.max(ocrAmount, candAmount, 1);
-                const penalty = Math.min(0.45, 0.20 + 0.30 * relErr);
+                const penalty = Math.min(RECOGNITION.match.sizePenaltyCap, RECOGNITION.match.sizePenaltyBase + RECOGNITION.match.sizePenaltyScale * relErr);
                 confidence = Math.max(0, confidence - penalty);
             } else if (!unitMatches) {
                 // Different unit family — usually a different product.
-                confidence = Math.max(0, confidence - 0.2);
+                confidence = Math.max(0, confidence - RECOGNITION.match.unitFamilyPenalty);
             }
         }
 
@@ -284,7 +351,19 @@ export function findBestProductMatches(
         }
     }
 
-    scored.sort((a, b) => b.confidence - a.confidence);
+    // CATALOG-FIRST tiebreak: when a real scraped catalog SKU and a receipt-minted
+    // ORPHAN score within `catalogPreferenceMargin` of each other, prefer the catalog
+    // one — even if the orphan scored marginally higher (its garbled OCR name lexically
+    // hugs the equally-garbled query). Outside the margin, pure confidence wins. (User:
+    // "match catalog first." Today only the exact-name dedup preferred catalog.)
+    const margin = RECOGNITION.match.catalogPreferenceMargin;
+    scored.sort((a, b) => {
+        const dc = b.confidence - a.confidence;
+        if (Math.abs(dc) <= margin && !!a.cand.isCatalog !== !!b.cand.isCatalog) {
+            return a.cand.isCatalog ? -1 : 1; // catalog first
+        }
+        return dc;
+    });
 
     return scored.slice(0, topN).map(({ cand, confidence }) => ({
         storeProductId: cand.id,
@@ -299,5 +378,6 @@ export function findBestProductMatches(
         isWeighable: cand.isWeighable,
         imageUrl: cand.imageUrl,
         confidence: Math.round(confidence * 100) / 100,
+        isCatalog: cand.isCatalog,
     }));
 }

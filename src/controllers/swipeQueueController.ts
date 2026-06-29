@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import pool from '../config/db.js';
 import { swipeLog, resetSwipeLog } from '../utils/swipeLogger.js';
+import { getReceiptRelatednessScope, isCardRelated } from '../services/receiptRelatednessService.js';
 import { fetchVotedPairKeys } from '../models/votedPairsModel.js';
 import { fetchSlot1Rows, type RawSlot1Row } from '../models/slot1CandidateModel.js';
 import { fetchAllSlot2Rows } from '../models/slot2CandidateModel.js';
@@ -243,7 +244,38 @@ export const getSwipeQueue = async (
             right: { spId: item.spIdB, ...item.right },
         }));
 
-        const items: SwipeQueueCard[] = [...slot2Cards, ...slot1Items, ...slot3Cards];
+        let items: SwipeQueueCard[] = [...slot2Cards, ...slot1Items, ...slot3Cards];
+
+        // Relatedness gate (Decision 3): drop any card whose product isn't related to the
+        // receipt (category bought from OR an uncategorised real product), and name-similar to
+        // a receipt line — so we never ask about product types they didn't buy. EITHER side
+        // may relate. A receipt-SCOPED fetch (receiptId present) gates to ITS OWN receipt even
+        // when the client didn't pass `relatedTo` explicitly — older swipe-queue builds send
+        // only receiptId, and an UNgated receipt fetch would leak 456 cross-category dedup pairs
+        // (toothpaste in a grocery run). Only the global pool (receiptId=none) stays ungated.
+        const relatedToParam = typeof req.query.relatedTo === 'string' && req.query.relatedTo.length > 0
+            ? Number(req.query.relatedTo)
+            : undefined;
+        const relatedTo = relatedToParam ?? receiptIdParam;
+        if (relatedTo !== undefined && Number.isFinite(relatedTo)) {
+            const scope = await getReceiptRelatednessScope(relatedTo, pool);
+            const before = items.length;
+            // RELATED-ONLY (user decision): keep a card only when a side is name-related AND
+            // either same-category OR an uncategorised real product (has a photo). No category-
+            // only or ungated backfill — fewer than 3 cards is acceptable when there's no related
+            // work. The uncategorised-with-photo arm surfaces scraped IKI items that didn't match
+            // a category (Nepriskirta/688) so they get community categorisation.
+            items = items.filter((c) =>
+                isCardRelated({ categoryId: c.left.categoryId, name: c.left.name, imageUrl: c.left.imageUrl }, scope) ||
+                isCardRelated({ categoryId: c.right.categoryId, name: c.right.name, imageUrl: c.right.imageUrl }, scope),
+            );
+            swipeLog(
+                `[Relatedness] relatedTo=${relatedTo} scope: ${scope.categoryIds.size} cats, ` +
+                `${scope.lineNames.length} line-names → kept ${items.length}/${before}`,
+            );
+        } else {
+            swipeLog(`[Relatedness] relatedTo NOT supplied — global cards UNGATED (receiptId=${receiptIdParam ?? 'none'})`);
+        }
 
         swipeLog(`[SwipeQueue] userId=${userId} receiptId=${receiptIdParam ?? 'none'} → slot1=${slot1Items.length} slot2=${slot2Items.length} slot3=${slot3Items.length} total=${items.length}`);
         for (const card of items) {
@@ -281,7 +313,7 @@ export const submitDirectVote = async (
             return;
         }
 
-        const { spIdA, spIdB, vote, dwellMs } = req.body ?? {};
+        const { spIdA, spIdB, vote, dwellMs, receiptId } = req.body ?? {};
 
         if (!VALID_VOTES.includes(vote)) {
             res.status(400).json({ error: 'vote must be identical, similar, or different' });
@@ -298,6 +330,9 @@ export const submitDirectVote = async (
             spIdB: Number(spIdB),
             vote,
             dwellMs: Number.isFinite(dwellMs) ? Number(dwellMs) : 0,
+            // Optional — present when the card came from a receipt's swipe queue;
+            // lets a 'different' vote demote the rejected line back to OCR.
+            receiptId: Number.isFinite(receiptId) ? Number(receiptId) : null,
         });
 
         const { level } = await getUserPointsProfile(userId);

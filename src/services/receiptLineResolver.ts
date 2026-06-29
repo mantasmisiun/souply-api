@@ -3,7 +3,10 @@ import { createProduct } from '../models/productModel.js';
 import {
     createStoreProduct,
     findExactMatchingStoreProduct,
+    markStoreProductWeighable,
 } from '../models/storeProductModel.js';
+import { hasFixedPackForm } from '../utils/productMatcher.js';
+import { RECOGNITION } from '../../../shared/recognitionConfig.js';
 
 type Connection = typeof pool | any;
 
@@ -23,8 +26,8 @@ type Connection = typeof pool | any;
 //     and the cross-chain SP have amount+unit populated. When either
 //     side is null we skip the check — receipt parsers (especially
 //     Lidl thermal) often fail to extract size from the line text.
-const CROSS_CHAIN_PRICE_LOWER_RATIO = 0.6;   // -40% floor
-const CROSS_CHAIN_PRICE_UPPER_RATIO = 1.2;   // +20% ceiling
+const CROSS_CHAIN_PRICE_LOWER_RATIO = RECOGNITION.resolve.crossChainPriceLowerRatio;   // -40% floor
+const CROSS_CHAIN_PRICE_UPPER_RATIO = RECOGNITION.resolve.crossChainPriceUpperRatio;   // +20% ceiling
 
 /** Cached id of the hidden Nepriskirta category used as a catch-all when a new
  * Product is created for a line with no confident category signal. Looked up
@@ -63,15 +66,33 @@ export interface ReceiptLineInput {
      * the match is correct.
      */
     altMatchProductId: number | null;
+    /**
+     * Confidence of that top alt-match (line.altMatches[0].confidence). Gates
+     * whether we also CLUSTER the new SP under the alt-match's Product: only at
+     * or above `resolve.autoBaseProductThreshold`. Below it (or null/legacy) we
+     * borrow the categoryId only and mint a FRESH Product — so a weak match
+     * (apples @0.51 onto a potatoes Product) doesn't file apples under potatoes.
+     */
+    altMatchConfidence?: number | null;
+    /**
+     * Confidence of the chosen storeProductId match (line.matchConfidence). Gates
+     * the weighable self-heal: only a STRONG by-weight match flips a mislabeled
+     * packaged SP to weighable.
+     */
+    matchConfidence?: number | null;
 }
 
 export interface ResolveResult {
-    storeProductId: number;
+    /** null when source is 'skipped_unpriced' — no SP was created (see below). */
+    storeProductId: number | null;
     /** 'reused' = dedup found an existing SP. 'created' = we wrote a new
      *  Product + StoreProduct (caller should still write Price).
      *  'bootstrapped' = cross-chain match accepted; we wrote a new SP in
-     *  the receipt's chain pointing at the matched Product. */
-    source: 'reused' | 'created' | 'bootstrapped';
+     *  the receipt's chain pointing at the matched Product.
+     *  'skipped_unpriced' = the line has no usable price (≤0), so the OCR is
+     *  treated as too garbled to trust — we REUSE an existing SP if one matches
+     *  but never CREATE a fresh one, so a bad parse can't mint catalog junk. */
+    source: 'reused' | 'created' | 'bootstrapped' | 'skipped_unpriced';
     /** When 'bootstrapped' or 'reused' following a cross-chain redirect,
      *  this flags that the resolver intentionally did NOT use the SP the
      *  caller passed in (it belonged to a different chain) — useful for
@@ -181,7 +202,7 @@ const checkCrossChainBootstrapGates = async (
 
     // Amount gate (lenient) — only enforced when BOTH sides have values.
     if (line.amount !== null && altSp.amount !== null) {
-        const amountEq = Math.abs(line.amount - altSp.amount) < 1e-6;
+        const amountEq = Math.abs(line.amount - altSp.amount) < RECOGNITION.resolve.amountEpsilonAbs;
         const unitEq = (line.unit ?? null) === (altSp.unit ?? null);
         if (!amountEq || !unitEq) return 'amount_mismatch';
     }
@@ -200,9 +221,18 @@ const checkCrossChainBootstrapGates = async (
 export const resolveReceiptLineStoreProduct = async (
     chainId: number,
     line: ReceiptLineInput,
-    conn?: Connection
+    conn?: Connection,
+    // When false, the resolver may REUSE an existing SP but must NOT CREATE a new
+    // one. The caller passes false for a line with no usable price (≤0): a
+    // price-less line means the parse couldn't even establish a €/kg or total, so
+    // the OCR is too garbled to trust — minting a fresh SP from it just pollutes
+    // the catalog (e.g. a weight-calc fragment becomes a product name). See
+    // [[project_weighed_item_price_poisoning_guard]] — show it, never write price,
+    // and now never create an SP either.
+    allowCreate = true,
 ): Promise<ResolveResult> => {
     const db = conn || pool;
+    const skipped: ResolveResult = { storeProductId: null, source: 'skipped_unpriced' };
 
     // If the caller supplied an SP id (mobile matcher's choice, or a
     // prior resolver run), check whether it belongs to the receipt's
@@ -219,11 +249,35 @@ export const resolveReceiptLineStoreProduct = async (
             const amountMismatch =
                 sp.amount !== null &&
                 line.amount !== null &&
-                Math.abs(sp.amount - line.amount) / Math.max(sp.amount, line.amount) > 0.3;
-            if (!amountMismatch) {
+                Math.abs(sp.amount - line.amount) / Math.max(sp.amount, line.amount) > RECOGNITION.resolve.sameChainAmountMismatch;
+            // A by-WEIGHT line must not reuse a PACKAGED SP (or vice-versa) — they're
+            // different product forms the name matcher can't tell apart (a loose
+            // 0,47 kg paprika vs a 180 g "BON VIA" pack). Reject and fall through so
+            // a correctly-formed SP is found or created. (Server safety net; the
+            // match endpoint's weighable gate prevents most of these upstream.)
+            const weighableMismatch = sp.isWeighable !== line.isWeighable;
+            // SELF-HEAL: a by-WEIGHT line that STRONGLY matched a BULK-WEIGHT (kg/l) SP
+            // flagged isWeighable=0 is real-world evidence the catalog flag is wrong (a
+            // produce row sold by weight). Correct the catalog — flip it weighable and
+            // reuse it — instead of minting a garbled orphan. Gated to a WEIGHT-COMPATIBLE
+            // SP (NO fixed pack form — the SAME `!hasFixedPackForm` rule the matcher gate
+            // uses) so it covers a unit-less catalog SP (e.g. "Raudonosios paprikos BON
+            // VIA", sold per kg but with no kg in the name → scraper left unit null) AND a
+            // "1 kg" produce row, while a PER-ITEM ("vnt") SP or a fixed package (g/ml/
+            // multi-kg bag) is NEVER flipped, even on a strong match.
+            if (
+                weighableMismatch && !amountMismatch &&
+                line.isWeighable === true && sp.isWeighable === false &&
+                !hasFixedPackForm(sp.amount, sp.unit) &&
+                (line.matchConfidence ?? 0) >= RECOGNITION.resolve.weighableSelfHealMinConfidence
+            ) {
+                await markStoreProductWeighable(sp.id, db);
                 return { storeProductId: line.storeProductId, source: 'reused' };
             }
-            // Amount mismatch — fall through to dedup/create for correct size.
+            if (!amountMismatch && !weighableMismatch) {
+                return { storeProductId: line.storeProductId, source: 'reused' };
+            }
+            // Amount or (uncorrected) weighable mismatch — fall through to dedup/create.
         } else if (sp) {
             // Cross-chain SP — evaluate bootstrap gates. On pass, mint
             // a new SP in the receipt's chain (or reuse if one already
@@ -244,6 +298,7 @@ export const resolveReceiptLineStoreProduct = async (
                         crossChainBootstrap: true,
                     };
                 }
+                if (!allowCreate) return skipped; // price-less line → don't mint
                 // Mint new SP. Receipt supplies the user-visible fields
                 // (name, amount, unit); cross-chain altSp contributes
                 // catalog enrichment (brandName, isWeighable, imageUrl).
@@ -270,6 +325,7 @@ export const resolveReceiptLineStoreProduct = async (
             // doesn't quietly link the new SP to the rejected cross-
             // chain Product via `line.altMatchProductId` — that would
             // defeat the gate decision at the Product level.
+            if (!allowCreate) return skipped; // price-less line → don't create
             if (!line.name || !line.name.trim()) {
                 throw new Error('Cannot resolve receipt line without a name');
             }
@@ -298,6 +354,7 @@ export const resolveReceiptLineStoreProduct = async (
         return { storeProductId: existing, source: 'reused' };
     }
 
+    if (!allowCreate) return skipped; // price-less line → don't create catalog junk
     return await createFreshProductAndSp(chainId, line, db);
 };
 
@@ -328,8 +385,17 @@ const createFreshProductAndSp = async (
             [line.altMatchProductId]
         );
         if (rows.length > 0) {
-            productId = rows[0].id;
+            // Borrow the candidate's CATEGORY always (a wrong-but-related match still
+            // yields a sane category), but only CLUSTER the new SP under its Product
+            // when the match is confident enough. A weak match (apples @0.51 onto a
+            // potatoes Product) borrows the category but spawns a FRESH Product, so
+            // apples never file under potatoes. null confidence (legacy callers / no
+            // altMatches threaded) preserves the prior reuse-always behaviour.
             categoryId = rows[0].categoryId;
+            const conf = line.altMatchConfidence;
+            if (conf == null || conf >= RECOGNITION.resolve.autoBaseProductThreshold) {
+                productId = rows[0].id;
+            }
         }
     }
     if (categoryId === null) {

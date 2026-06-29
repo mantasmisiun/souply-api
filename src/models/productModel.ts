@@ -5,12 +5,13 @@ import {
     loadCanonicalsForProducts,
     attachCanonicalFields,
 } from '../services/productCanonical.js';
+import { RECOGNITION } from '../../../shared/recognitionConfig.js';
 
 type Connection = typeof pool | any;
 
 /** Similarity cutoff for auto-assigning baseProductId. Matches the cutoff used
  * by the one-shot seeding script (src/scripts/seedBaseProducts.ts). */
-const AUTO_BASE_PRODUCT_THRESHOLD = 0.80;
+const AUTO_BASE_PRODUCT_THRESHOLD = RECOGNITION.resolve.autoBaseProductThreshold;
 
 /**
  * Find the baseProductId a brand-new Product with this name should inherit

@@ -22,16 +22,41 @@ export const findExactMatchingStoreProduct = async (
     conn?: Connection
 ): Promise<number | null> => {
     const db = conn || pool;
+    // Catalog-first: when several same-chain SPs share this exact name, prefer a
+    // CATALOG row (has an imageUrl — scraped products carry one) over a garbled
+    // RECEIPT-MINTED ORPHAN (imageUrl NULL). Without this, a prior receipt's OCR
+    // orphan ("LIETUVISKI POMTDORA") could capture future receipts by exact-name
+    // dedup even though a clean catalog SP exists. (User: match catalog first,
+    // fall back to orphan only if that fails.)
     const [rows]: any = await db.query(
         `SELECT id FROM StoreProduct
           WHERE chainId = ?
             AND LOWER(storeProductName) = LOWER(?)
             AND (amount IS NULL OR ? IS NULL OR amount = ?)
             AND (unit   IS NULL OR ? IS NULL OR unit   = ?)
+          ORDER BY (imageUrl IS NOT NULL) DESC, id ASC
           LIMIT 1`,
         [chainId, name, amount, amount, unit, unit]
     );
     return rows[0]?.id ?? null;
+};
+
+/**
+ * Minimal display fields (name + image) for one StoreProduct. Used by receipt
+ * save to re-sync a line's shown name/image to whatever SP the resolver actually
+ * linked, so display can never diverge from the link (e.g. after a dedup swap).
+ */
+export const getStoreProductDisplayById = async (
+    spId: number,
+    conn?: Connection,
+): Promise<{ name: string | null; imageUrl: string | null } | null> => {
+    const db = conn || pool;
+    const [rows]: any = await db.query(
+        'SELECT storeProductName, imageUrl FROM StoreProduct WHERE id = ? LIMIT 1',
+        [spId],
+    );
+    if (!rows[0]) return null;
+    return { name: rows[0].storeProductName ?? null, imageUrl: rows[0].imageUrl ?? null };
 };
 
 export const createStoreProduct = async (
@@ -183,6 +208,21 @@ export const updateStoreProductName = async (id: number, storeProductName: strin
     );
 };
 
+/**
+ * Catalog self-heal: flip a mislabeled SP to weighable. Idempotent — the
+ * `AND isWeighable = 0` guard makes a repeat call a no-op and ensures we only
+ * ever correct packaged→weighable, never the reverse. A null amount becomes 1 so
+ * a weighable kg row carries the standard "1 kg" reference. Returns true if it flipped.
+ */
+export const markStoreProductWeighable = async (id: number, conn?: Connection): Promise<boolean> => {
+    const db = conn || pool;
+    const [result]: any = await db.query(
+        'UPDATE StoreProduct SET isWeighable = 1, amount = COALESCE(amount, 1) WHERE id = ? AND isWeighable = 0',
+        [id]
+    );
+    return result.affectedRows > 0;
+};
+
 //For verifying price's storeProduct and store belong to the same chain
 export const getChainIdByStoreProductId = async (storeProductId: number) => {
     const [rows]: any = await pool.query(
@@ -211,7 +251,13 @@ export const getStoreProductsByChainWithProductData = async (chainId: number, lo
                   WHEN c2.parentCategoryId IS NULL THEN COALESCE(ct.name, c.name)
                   ELSE COALESCE(ct2.name, c2.name)
                 END AS categoryL2Name,
-                sp.chainId
+                sp.chainId,
+                -- isCatalog: a REAL scraped SKU has at least one scraped price
+                -- (Price.receiptId IS NULL). A receipt-minted ORPHAN has only
+                -- receipt-derived prices. Used as a matcher tiebreak so a garbled
+                -- orphan can't out-rank the clean catalog on a near-tie. Indexed
+                -- by idx_price_receipt_sp (receiptId, storeProductId).
+                EXISTS(SELECT 1 FROM Price pr WHERE pr.storeProductId = sp.id AND pr.receiptId IS NULL) AS isCatalog
          FROM StoreProduct sp
          JOIN Product p ON sp.productId = p.id
          LEFT JOIN Category c  ON p.categoryId = c.id
@@ -224,6 +270,7 @@ export const getStoreProductsByChainWithProductData = async (chainId: number, lo
     return rows.map((r: any) => ({
         ...r,
         isWeighable: !!r.isWeighable,
+        isCatalog: !!r.isCatalog,
         amount: r.amount !== null ? parseFloat(r.amount) : null,
     }));
 };

@@ -15,6 +15,10 @@ import {
 } from "../models/receiptLineIssueModel.js";
 import { getPresignedUrl } from "../services/storageService.js";
 import { persistReceiptPrices } from '../services/receiptSaveService.js';
+import { demoteReceiptLineDirect } from '../services/receiptLineDemotionService.js';
+import { buildReceiptResolveCards, markServedResolveLinesAsked } from '../services/receiptResolveQueueService.js';
+import { castReceiptLineVote } from '../services/receiptLineVoteService.js';
+import { markLineResolved } from '../models/receiptLineResolutionModel.js';
 import { deleteReceiptWithData } from '../services/receiptDeletionService.js';
 import { getReceiptComparison } from '../services/receiptComparisonService.js';
 import { hydrateReceiptCategoriesIfNeeded } from '../services/receiptHydrationService.js';
@@ -31,6 +35,28 @@ export const markSwipesDone = async (req: Request, res: Response, next: NextFunc
         const id = Number(req.params.id);
         if (!Number.isFinite(id)) { res.status(400).json({ error: 'Invalid id' }); return; }
         await completeMandatorySwipes(id);
+        // Terminal ask-once: the resolve-queue Card-B lines offered this session that
+        // the user did NOT resolve (a vote marks them resolved_user at the /vote path)
+        // are recorded 'asked' now, so future sessions don't re-nag them. This is the
+        // ledger write that USED to live on the resolve-queue GET — moved here (a real
+        // completion event) so serving the queue stays idempotent and re-fetches never
+        // delete the user's cards mid-session. Fail-soft: a ledger hiccup must not fail
+        // the completion the client already acted on.
+        try {
+            const conn = await (pool as any).getConnection();
+            try {
+                await conn.beginTransaction();
+                await markServedResolveLinesAsked(id, conn);
+                await conn.commit();
+            } catch (e) {
+                await conn.rollback();
+                throw e;
+            } finally {
+                conn.release();
+            }
+        } catch (ledgerErr) {
+            console.warn(`[markSwipesDone] ask-once ledger write failed for receipt ${id}:`, ledgerErr);
+        }
         res.json({ ok: true });
     } catch (error) {
         next(error);
@@ -260,7 +286,7 @@ export const updateReceiptFromOcr = async (req: Request, res: Response, next: Ne
                     quantity: p.quantity,
                     unit: p.unit,
                 })),
-            });
+            }, false, false); // awardPoints=false, isInitialSave=false (autosave/edit — no dup summary)
             res.json({ id, ...result });
         } catch (err: any) {
             // Duplicate-receipt safety net for the update path. This
@@ -695,6 +721,112 @@ export const reportReceiptLineIssue = async (req: Request, res: Response, next: 
         }
 
         res.json({ ok: true, flaggedCount });
+    } catch (error) {
+        next(error);
+    }
+};
+
+/**
+ * POST /api/receipts/:id/lines/:idx/reject-match
+ *
+ * Direct "this isn't the right product" rejection of a line's own match (the
+ * self-pair gesture from the Items tab menu). Demotes the line — re-points it to
+ * a same-chain runner-up altMatch (≥ auto-apply) or clears it to the OCR name with
+ * a userRejected confidence veto — and returns the mutated line so the app can
+ * update that row in place. Idempotent-ish: a line with no resolved SP returns
+ * `demoted:false`.
+ */
+export const rejectReceiptLineMatch = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const receiptId = Number(req.params.id);
+        const lineIdx = Number(req.params.idx);
+        if (isNaN(receiptId) || isNaN(lineIdx) || lineIdx < 0) {
+            res.status(400).json({ error: 'Invalid receipt id or line index' });
+            return;
+        }
+        const conn = await (pool as any).getConnection();
+        try {
+            await conn.beginTransaction();
+            const line = await demoteReceiptLineDirect(receiptId, lineIdx, conn);
+            await conn.commit();
+            res.json({ ok: true, demoted: !!line, line: line ?? null });
+        } catch (e) {
+            await conn.rollback();
+            throw e;
+        } finally {
+            conn.release();
+        }
+    } catch (error) {
+        next(error);
+    }
+};
+
+/**
+ * POST /api/receipts/:id/lines/:idx/vote   body: { vote: 'identical'|'similar'|'different' }
+ *
+ * A Card-B swipe on a receipt line: identical → confirm + price-verify; similar →
+ * keep product, flag variant, price unverified; different → demote. Records the
+ * line resolved in the ledger (one shot) and returns the mutated line so the app
+ * patches the row in place.
+ */
+export const submitReceiptLineVote = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const receiptId = Number(req.params.id);
+        const lineIdx = Number(req.params.idx);
+        const vote = req.body?.vote;
+        if (isNaN(receiptId) || isNaN(lineIdx) || lineIdx < 0) {
+            res.status(400).json({ error: 'Invalid receipt id or line index' });
+            return;
+        }
+        if (vote !== 'identical' && vote !== 'similar' && vote !== 'different') {
+            res.status(400).json({ error: 'vote must be identical, similar, or different' });
+            return;
+        }
+        const conn = await (pool as any).getConnection();
+        try {
+            await conn.beginTransaction();
+            const line = await castReceiptLineVote(receiptId, lineIdx, vote, conn);
+            await markLineResolved(receiptId, lineIdx, 'user', vote, conn);
+            await conn.commit();
+            res.json({ ok: true, line: line ?? null });
+        } catch (e) {
+            await conn.rollback();
+            throw e;
+        } finally {
+            conn.release();
+        }
+    } catch (error) {
+        next(error);
+    }
+};
+
+/**
+ * GET /api/receipts/:id/resolve-queue
+ *
+ * The MANDATORY post-scan "fix your receipt" cards (Card B) — the few highest
+ * needs-human uncertain lines that aren't already asked/resolved.
+ *
+ * PURE READ (idempotent). Serving must NOT mutate the ledger: the client's
+ * loadQueue re-runs on [sessionNum, receiptIdx], on remount, and twice under
+ * React StrictMode — if the GET marked lines 'asked', the SECOND fetch would
+ * find them already asked and return ZERO cards, so the user's own cards would
+ * silently vanish mid-session ("cards not showing up"). The terminal ask-once
+ * write now lives in POST /complete-swipes (markSwipesDone) and the per-line
+ * vote (markLineResolved), i.e. on a real user action, not on a read.
+ * See shared/SWIPE_QUEUE_REDESIGN.md.
+ */
+export const getReceiptResolveQueue = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const receiptId = Number(req.params.id);
+        if (isNaN(receiptId)) {
+            res.status(400).json({ error: 'Invalid receipt id' });
+            return;
+        }
+        // Voluntary "Help identify products" requests more cards via ?max=N.
+        const maxRaw = Number(req.query.max);
+        const limit = Number.isFinite(maxRaw) && maxRaw > 0 ? Math.min(maxRaw, 20) : undefined;
+        const { cards, image } = await buildReceiptResolveCards(receiptId, pool, limit);
+        res.json({ receiptId, cards, image });
     } catch (error) {
         next(error);
     }

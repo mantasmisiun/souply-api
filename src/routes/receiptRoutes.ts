@@ -14,9 +14,13 @@ import {
     fetchReceiptSwipeQueue,
     convertPdfToImage,
     reportReceiptLineIssue,
+    rejectReceiptLineMatch,
+    submitReceiptLineVote,
+    getReceiptResolveQueue,
     logAnalizeFailure,
     markSwipesDone,
 } from '../controllers/receiptController.js';
+import { getFlaggedReceiptCrop } from '../controllers/adminReceiptCropController.js';
 import {
     logBatchReceipt,
     finalizeBatchReport,
@@ -60,6 +64,12 @@ router.get('/receipts/:id/comparison', fetchReceiptComparison);
 router.get('/receipts/:id/swipe-queue', fetchReceiptSwipeQueue);
 router.post('/receipts/:id/complete-swipes', markSwipesDone);
 router.post('/receipts/:id/lines/:idx/report-issue', reportReceiptLineIssue);
+router.post('/receipts/:id/lines/:idx/reject-match', rejectReceiptLineMatch);
+router.post('/receipts/:id/lines/:idx/vote', submitReceiptLineVote);
+// Mandatory post-scan resolve cards (Card B) + the band-crop they render (a
+// non-admin reuse of the flagged-crop controller, which keys on receiptId/lineIdx).
+router.get('/receipts/:id/resolve-queue', getReceiptResolveQueue);
+router.get('/receipts/:receiptId/lines/:lineIdx/crop', getFlaggedReceiptCrop);
 
 // DEV-ONLY hard delete: receipt + its prices + orphan SPs/Products + MinIO
 // image. The controller refuses when NODE_ENV==='production' (prod/staging).

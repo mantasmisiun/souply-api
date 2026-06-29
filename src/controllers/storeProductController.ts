@@ -13,6 +13,7 @@ import {
     getStoreProductsCrossChainWithProductData,
 } from '../models/storeProductModel.js';
 import { findBestProductMatches } from '../utils/productMatcher.js';
+import { RECOGNITION } from '../../../shared/recognitionConfig.js';
 
 export const addStoreProduct = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -188,6 +189,13 @@ export const matchStoreProductByName = async (req: Request, res: Response, next:
         const name = req.query.name as string;
         const amountRaw = req.query.amount as string | undefined;
         const unit = (req.query.unit as string) || null;
+        // Optional weighable gate: '1'/'true' = by-weight line, '0'/'false' =
+        // packaged. Absent → null (no gate, legacy clients unaffected).
+        const weighableRaw = req.query.weighable as string | undefined;
+        const ocrIsWeighable =
+            weighableRaw === undefined || weighableRaw === ''
+                ? null
+                : weighableRaw === '1' || weighableRaw.toLowerCase() === 'true';
 
         if (isNaN(chainId) || !name) {
             res.status(400).json({ error: 'chainId and name query params are required' });
@@ -199,10 +207,10 @@ export const matchStoreProductByName = async (req: Request, res: Response, next:
         const candidates = await getStoreProductsByChainWithProductData(chainId, req.locale);
 
         console.log('=== MATCH REQUEST ===');
-        console.log(`chainId=${chainId}, name="${name}", amount=${amount}, unit=${unit}`);
+        console.log(`chainId=${chainId}, name="${name}", amount=${amount}, unit=${unit}, weighable=${ocrIsWeighable}`);
         console.log(`Candidates fetched: ${candidates.length}`);
 
-        let matches = findBestProductMatches(name, amount, unit, candidates);
+        let matches = findBestProductMatches(name, amount, unit, candidates, undefined, undefined, ocrIsWeighable);
         let crossChain = false;
         console.log(`Same-chain matches above threshold: ${matches.length}`);
 
@@ -218,7 +226,10 @@ export const matchStoreProductByName = async (req: Request, res: Response, next:
         if (matches.length === 0) {
             const crossCandidates = await getStoreProductsCrossChainWithProductData(chainId, req.locale);
             console.log(`Cross-chain candidates fetched: ${crossCandidates.length}`);
-            matches = findBestProductMatches(name, amount, unit, crossCandidates);
+            // Cross-chain uses its OWN floor (config). Currently == same-chain
+            // minConfidence; bump RECOGNITION.match.minConfidenceCrossChain to
+            // tighten weak cross-chain hits (e.g. the slyvos/paprikos shared word).
+            matches = findBestProductMatches(name, amount, unit, crossCandidates, RECOGNITION.match.minConfidenceCrossChain, undefined, ocrIsWeighable);
             crossChain = matches.length > 0;
             console.log(
                 `Cross-chain matches above threshold: ${matches.length}${crossChain ? ' (cross-chain fallback)' : ''}`

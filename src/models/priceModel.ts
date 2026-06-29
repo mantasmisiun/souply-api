@@ -281,3 +281,61 @@ export const batchGetLatestPricesForReceiptItems = async (
     }
     return result;
 };
+
+/**
+ * Round-2 price-confirmation lookup. For a set of CANDIDATE storeProductIds,
+ * returns the single most-relevant price observation AS OF `asOfDate`,
+ * CHAIN-WIDE (storeProductId is already chain-specific; the `sp.chainId = ?`
+ * join drops cross-chain candidates — those have no comparable price for this
+ * receipt). Prefers a scraped row (isFallback=0) over a receipt-fallback row,
+ * then the latest date on/before asOfDate. Excludes THIS receipt's own rows so
+ * a receipt can never price-confirm against itself (no self-confirmation).
+ *
+ * NB: prices are WEEKLY scrape snapshots, so `date <= asOfDate` is accurate to
+ * ~a week — this powers a CONFIRMER/tiebreaker, never a gate (caller fail-opens).
+ *
+ * Returns a Map storeProductId → { price, promoPrice, promoEnd } (numbers; the
+ * DECIMAL columns come back as strings from mysql2 and are parsed here).
+ */
+export const getAsOfDatePricesForCandidates = async (
+    storeProductIds: number[],
+    chainId: number,
+    asOfDate: Date,
+    excludeReceiptId: number,
+    conn?: Connection
+): Promise<Map<number, { price: number; promoPrice: number | null; promoEnd: Date | null }>> => {
+    const db = conn || pool;
+    const result = new Map<number, { price: number; promoPrice: number | null; promoEnd: Date | null }>();
+    if (storeProductIds.length === 0) return result;
+
+    // ORDER BY isFallback ASC, date DESC → a scraped row wins over any fallback
+    // row; within scraped (or within fallback when no scrape exists) the latest
+    // date on/before asOfDate wins. One row per candidate (rn = 1).
+    const [rows]: any = await db.query(
+        `SELECT storeProductId, price, promoPrice, promoEnd
+           FROM (
+               SELECT p.storeProductId, p.price, p.promoPrice, p.promoEnd,
+                      ROW_NUMBER() OVER (
+                          PARTITION BY p.storeProductId
+                          ORDER BY p.isFallback ASC, p.date DESC
+                      ) AS rn
+                 FROM Price p
+                 JOIN StoreProduct sp ON sp.id = p.storeProductId
+                WHERE p.storeProductId IN (?)
+                  AND sp.chainId = ?
+                  AND (p.receiptId IS NULL OR p.receiptId <> ?)
+                  AND p.date <= ?
+           ) ranked
+          WHERE rn = 1`,
+        [storeProductIds, chainId, excludeReceiptId, asOfDate]
+    );
+
+    for (const row of rows) {
+        result.set(Number(row.storeProductId), {
+            price: parseFloat(row.price),
+            promoPrice: row.promoPrice === null || row.promoPrice === undefined ? null : parseFloat(row.promoPrice),
+            promoEnd: row.promoEnd ? new Date(row.promoEnd) : null,
+        });
+    }
+    return result;
+};

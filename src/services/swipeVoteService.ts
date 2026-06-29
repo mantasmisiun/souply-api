@@ -11,6 +11,7 @@ import {
     type MatchVote,
 } from '../models/storeProductMatchModel.js';
 import {
+    categoriseUncategorisedOnMerge,
     demoteMergeByProductIds,
     getEffectiveBaseProductIdForStoreProduct,
     getProductIdForStoreProduct,
@@ -440,7 +441,15 @@ export async function reevaluateMerge(
         // of whether the merge was driven by a receipt vote or an orphan
         // vote — hook is inside reevaluateMerge so both paths converge.
         await markResolvedForProductPair(resolvedProductIdA, resolvedProductIdB, 'promoted', conn);
-        return promoteMergeByProductIds(resolvedProductIdA, resolvedProductIdB, conn);
+        const decision = await promoteMergeByProductIds(resolvedProductIdA, resolvedProductIdB, conn);
+        // If exactly one side was an uncategorised (688) scraped item, this confirmed match
+        // categorises it — fail-open so a categorisation hiccup never rolls back a valid vote.
+        try {
+            await categoriseUncategorisedOnMerge(decision, conn);
+        } catch (e) {
+            console.warn('[reevaluateMerge] uncategorised categorisation rescue failed', e);
+        }
+        return decision;
     }
 
     // Demote: confidence dropped below the demote band → unmerge.

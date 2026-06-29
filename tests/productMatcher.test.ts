@@ -100,6 +100,16 @@ describe('findBestProductMatches', () => {
         expect(results.length).toBeLessThanOrEqual(2);
     });
 
+    it('catalog-first tiebreak: a scraped catalog SKU outranks a same-name receipt-minted orphan', () => {
+        // Both score identically on name; the orphan (isCatalog false) must NOT out-rank
+        // the real catalog SKU (isCatalog true) — a re-scanned garbled orphan can score
+        // marginally higher in the wild, so within the margin the catalog wins.
+        const orphan  = makeCandidate({ id: 97654, storeProductName: 'Atlantines lasisos', isCatalog: false });
+        const catalog = makeCandidate({ id: 58876, storeProductName: 'Atlantines lasisos', isCatalog: true });
+        const results = findBestProductMatches('Atlantines lasisos', null, null, [orphan, catalog]);
+        expect(results[0].storeProductId).toBe(58876);
+    });
+
     it('boosts confidence when amount and unit match', () => {
         // Query has token "Extra" which fuzzy-matches "Ekstra" below the
         // exact-match threshold, so the base confidence is below 1.0 and
@@ -161,5 +171,33 @@ describe('findBestProductMatches — anchor-token gate (Airanas/Šafranas regres
         const matches = findBestProductMatches('Sok oladas', null, null, [SOK]);
         expect(matches.length).toBeGreaterThan(0);
         expect(matches[0].storeProductId).toBe(60);
+    });
+});
+
+describe('findBestProductMatches — weighable gate', () => {
+    const LOOSE = makeCandidate({ id: 70, storeProductName: 'Raudonosios paprikos', isWeighable: true });
+    // A genuine FIXED package (concrete 180 g) — stays excluded from a by-weight line.
+    const PACKED = makeCandidate({ id: 71, storeProductName: 'Raudonosios paprikos BON VIA, 180 g', isWeighable: false });
+    // Pre-packed-BY-WEIGHT produce: flagged isWeighable=0 but NO fixed pack size.
+    const PREPACK = makeCandidate({ id: 72, storeProductName: 'Fasuoti obuoliai IKI ŪKIS', isWeighable: false });
+
+    it('by-WEIGHT query drops a FIXED-PACKAGE candidate (180 g)', () => {
+        const m = findBestProductMatches('Raudonosios paprikos', null, null, [PACKED, LOOSE], undefined, undefined, true);
+        expect(m.map((x) => x.storeProductId)).toEqual([70]); // only the weighable one
+    });
+
+    it('by-WEIGHT query KEEPS a packaged-but-NO-fixed-size candidate (fasuoti produce sold per kg)', () => {
+        const m = findBestProductMatches('Fasuoti obuoliai IKI ŪKIS', null, null, [PREPACK], undefined, undefined, true);
+        expect(m.map((x) => x.storeProductId)).toEqual([72]); // matches despite isWeighable=0
+    });
+
+    it('PACKAGED (fixed-size) query drops by-WEIGHT candidates', () => {
+        const m = findBestProductMatches('Raudonosios paprikos', 180, 'g', [PACKED, LOOSE], undefined, undefined, false);
+        expect(m.map((x) => x.storeProductId)).toEqual([71]);
+    });
+
+    it('null gate (legacy) keeps both', () => {
+        const m = findBestProductMatches('Raudonosios paprikos', null, null, [PACKED, LOOSE]);
+        expect(m.length).toBe(2);
     });
 });

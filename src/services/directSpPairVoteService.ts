@@ -29,6 +29,7 @@ import {
 import { getProductIdForStoreProduct } from './storeProductMergeService.js';
 import { awardSwipePoint } from './userPointsService.js';
 import { upsertEquivalence } from '../models/userEquivalenceModel.js';
+import { demoteRejectedReceiptLine } from './receiptLineDemotionService.js';
 
 export interface CastDirectSpPairVoteInput {
     userId: string;
@@ -36,6 +37,12 @@ export interface CastDirectSpPairVoteInput {
     spIdB: number;
     vote: SwipeVote;
     dwellMs: number;
+    /**
+     * When the card came from a receipt's swipe queue, the receipt it belongs to.
+     * A 'different' vote that rejects a line's primary match identity then demotes
+     * that line (drops the wrong SP → OCR). Absent for standalone/orphan cards.
+     */
+    receiptId?: number | null;
 }
 
 export const castDirectSpPairVote = async (
@@ -102,6 +109,17 @@ export const castDirectSpPairVote = async (
 
             const agg = await getMatchAggregate(pair.spIdA, pair.spIdB, connection);
             const merge = await reevaluateMerge(pair.spIdA, pair.spIdB, agg, connection, productIdA, productIdB);
+
+            // Receipt-line demotion: a 'different' vote that rejects a line's primary
+            // match identity drops the wrong SP so the Items tab shows OCR again.
+            // Fail-open — a parse/IO hiccup here must never fail the vote.
+            if (input.vote === 'different' && input.receiptId != null) {
+                try {
+                    await demoteRejectedReceiptLine(Number(input.receiptId), pair.spIdA, pair.spIdB, connection);
+                } catch (e) {
+                    console.warn(`[directSpPairVoteService] line demotion failed for receipt ${input.receiptId}:`, e);
+                }
+            }
 
             await connection.commit();
             awardSwipePoint(input.userId).catch((e) =>

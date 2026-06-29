@@ -55,3 +55,20 @@ export const unverifyReceiptLinePrice = async (
         [receiptId, storeProductId]
     );
 };
+
+/**
+ * Set a receipt line's Price.priceVerified (conn-aware so it can join a vote
+ * transaction). identical-swipe confirm → 1; similar/different → 0.
+ */
+export const setReceiptLinePriceVerified = async (
+    receiptId: number,
+    storeProductId: number,
+    verified: boolean,
+    db: typeof pool | any = pool
+): Promise<void> => {
+    await db.query(
+        `UPDATE Price SET priceVerified = ?
+          WHERE receiptId = ? AND storeProductId = ? AND isFallback = 0`,
+        [verified ? 1 : 0, receiptId, storeProductId]
+    );
+};

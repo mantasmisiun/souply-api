@@ -36,6 +36,9 @@ jest.unstable_mockModule('../src/models/priceModel.js', () => ({
     getBaselinePriceAverage: jest.fn(),
     getPriceHistoryForStoreProductAllStores: jest.fn(),
     getLatestPriceForReceiptItem: jest.fn(),
+    // Round-2 price matcher lookup — default to no price history so Round 2 is a
+    // no-op in these save-flow tests (it has its own dedicated suite).
+    getAsOfDatePricesForCandidates: jest.fn<any>(async () => new Map()),
 }));
 
 // ---------------------------------------------------------------------------
@@ -315,6 +318,45 @@ describe('persistReceiptPrices — duplicate guard', () => {
 
         expect(result.skippedDuplicate).toBe(0);
         expect(result.saved).toBe(1);
+    });
+
+    it('mixed-deal duplicate: same SP twice, ONE discounted one not → writes REGULAR price only (no promo), once', async () => {
+        // Two "CLEVER … DUO" loaves resolved to the same SP; only one is 50% off. The
+        // discount is a per-unit deal, not the product's price → drop the promo, write once.
+        const input = makeInput({ products: [
+            { storeProductId: 100, price: 0.45, promoPrice: 0.23 }, // 50%-off loaf
+            { storeProductId: 100, price: 0.45, promoPrice: null }, // full-price loaf
+        ] });
+        const parsedData = makeParsedData([
+            { name: 'CLEVER SVIESI RAIKYTA DUO', storeProductId: 100 },
+            { name: 'CLEVER SVIESI RAIKYTA DUO', storeProductId: 100 },
+        ]);
+
+        const result = await persistReceiptPrices(1, 'u1', parsedData, input);
+
+        expect(result.saved).toBe(1);
+        expect(result.skippedDuplicate).toBe(1);
+        expect(mockCreatePrice).toHaveBeenCalledTimes(1);
+        expect(mockCreatePrice.mock.calls[0][2]).toBeCloseTo(0.45, 2); // regular price
+        expect(mockCreatePrice.mock.calls[0][3]).toBeNull();            // promo dropped
+    });
+
+    it('non-mixed duplicate: same SP twice BOTH discounted → keeps the promo (not a per-unit deal)', async () => {
+        const input = makeInput({ products: [
+            { storeProductId: 100, price: 0.45, promoPrice: 0.23 },
+            { storeProductId: 100, price: 0.45, promoPrice: 0.23 },
+        ] });
+        const parsedData = makeParsedData([
+            { name: 'CLEVER', storeProductId: 100 },
+            { name: 'CLEVER', storeProductId: 100 },
+        ]);
+
+        const result = await persistReceiptPrices(1, 'u1', parsedData, input);
+
+        expect(result.saved).toBe(1);
+        expect(result.skippedDuplicate).toBe(1);
+        expect(mockCreatePrice).toHaveBeenCalledTimes(1);
+        expect(mockCreatePrice.mock.calls[0][3]).toBeCloseTo(0.23, 2); // promo preserved
     });
 });
 
