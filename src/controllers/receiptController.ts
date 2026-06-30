@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from "express";
+import sharp from "sharp";
 import pool from "../config/db.js";
 import { createReceipt, getReceiptsByUserId, getReceiptById, deleteReceipt, getReceiptItemsWithDetails, updateReceiptFilePath, getReceiptByReceiptNoAndUser, completeMandatorySwipes } from "../models/receiptModel.js";
 import {
@@ -134,7 +135,41 @@ export const fetchReceiptImage = async (req: Request, res: Response, next: NextF
             res.status(404).json({ error: 'Receipt not found' });
             return;
         }
+
+        // Optional downscaled variant: GET /receipts/:id/image?maxw=N streams a
+        // sharp-resized JPEG (bytes, ONE request) so bandwidth-sensitive callers
+        // (web, slow/cellular reopen) pull tens of KB instead of fetching the full
+        // object via a second MinIO round-trip. No param → unchanged presigned-URL
+        // JSON, so the mobile crop path keeps full resolution + the stable contract.
+        // Degrades to the presigned URL on any transform failure.
+        const maxwRaw = Number(req.query.maxw);
+        const maxw = Number.isFinite(maxwRaw) ? Math.floor(maxwRaw) : 0;
+        if (maxw >= 64 && maxw <= 4096) {
+            try {
+                const signed = await getPresignedUrl(receipt.filePath);
+                const imgRes = await fetch(signed);
+                if (!imgRes.ok) throw new Error(`minio fetch HTTP ${imgRes.status}`);
+                const buf = Buffer.from(await imgRes.arrayBuffer());
+                const out = await sharp(buf)
+                    .resize({ width: maxw, withoutEnlargement: true })
+                    .jpeg({ quality: 82 })
+                    .toBuffer();
+                res.set('Content-Type', 'image/jpeg');
+                res.set('Cache-Control', 'private, max-age=120');
+                res.send(out);
+                return;
+            } catch (e: any) {
+                console.warn('[fetchReceiptImage] downscale failed, serving presigned URL', {
+                    id, err: e?.message ?? String(e),
+                });
+                // fall through to the presigned-URL JSON
+            }
+        }
+
         const url = await getPresignedUrl(receipt.filePath);
+        // Presign TTL is 1h, so a short client cache window is safe and spares
+        // repeat presigns when a screen re-mounts.
+        res.set('Cache-Control', 'private, max-age=120');
         res.json({ url });
     } catch (error: any) {
         if (error?.statusCode === 404) {
