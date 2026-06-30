@@ -127,6 +127,13 @@ async function applyDemotion(
             line.storeProductImageUrl = runnerUp.imageUrl ?? null;
             line.matchConfidence = Number(runnerUp.confidence);
             line.matchConfirmed = true;
+            // Line-level category follows the NEW pick so the receipt summary's
+            // breakdown stops showing the rejected match's category (the runner-up
+            // re-point keeps matchConfirmed=true, so the breakdown still reads the
+            // line — it must read the line's OWN category, not the stale altMatches[0]).
+            line.categoryId = runnerUp.categoryId ?? null;
+            line.categoryName = runnerUp.categoryName ?? null;
+            line.categoryL2Name = runnerUp.categoryL2Name ?? null;
             line.priceVerified = false; // Round-2 hasn't confirmed the new pick's price
             line.itemConfidence = computeItemConfidence({
                 nameConf: Number(runnerUp.confidence),
@@ -176,6 +183,11 @@ async function applyDemotion(
             line.matchConfidence = null;
             line.matchConfirmed = false;
             line.priceVerified = false;
+            // Fresh quarantined orphan = uncategorised; clear any prior line category
+            // so the summary buckets it as Neatpažinta.
+            line.categoryId = null;
+            line.categoryName = null;
+            line.categoryL2Name = null;
             line.itemConfidence = computeItemConfidence({
                 nameConf: null,
                 nameText: ocrName,
@@ -197,6 +209,9 @@ async function applyDemotion(
     line.storeProductImageUrl = null;
     line.matchConfirmed = false;
     line.priceVerified = false;
+    line.categoryId = null;
+    line.categoryName = null;
+    line.categoryL2Name = null;
     line.itemConfidence = computeItemConfidence({
         nameConf: null,
         nameText: typeof line.name === 'string' ? line.name : '',
