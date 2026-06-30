@@ -18,6 +18,7 @@ import {
     submitReceiptLineVote,
     getReceiptResolveQueue,
     logAnalizeFailure,
+    logReocrTelemetry,
     markSwipesDone,
 } from '../controllers/receiptController.js';
 import { getFlaggedReceiptCrop } from '../controllers/adminReceiptCropController.js';
@@ -43,6 +44,10 @@ router.post('/receipts', createReceiptFromOcr);
 // (OCR produced nothing, chain not detected, or store lookup failed).
 // No Receipt row created; this is pure audit logging.
 router.post('/receipts/log-fail', logAnalizeFailure);
+
+// On-device product re-OCR (Phase 1/2) outcome telemetry — fire-and-forget,
+// no DB write, just a structured server log line for aggregate regression watch.
+router.post('/receipts/reocr-telemetry', logReocrTelemetry);
 
 // Update an existing receipt after user edits (debounced auto-save)
 router.put('/receipts/:id', updateReceiptFromOcr);

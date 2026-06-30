@@ -997,3 +997,26 @@ export const logAnalizeFailure = async (
         next(error);
     }
 };
+
+/**
+ * POST /api/receipts/reocr-telemetry
+ *
+ * Lightweight, fire-and-forget endpoint for the on-device product re-OCR pass
+ * (souply-app utils/productReocr*). The mobile client reports each pass's
+ * accept/reject decision plus the garbage/reconciliation deltas so we can watch,
+ * in aggregate, whether on-device re-OCR is helping or regressing once the
+ * `PRODUCT_REOCR_ENABLED` flag is flipped. Deliberately NO DB write — just a
+ * single structured server log line (grep-able / aggregatable). Always 204.
+ */
+export const logReocrTelemetry = async (req: Request, res: Response) => {
+    const { receiptNo, accepted, detail } = req.body ?? {};
+    console.log(
+        '[reocr-telemetry]',
+        JSON.stringify({
+            receiptNo: typeof receiptNo === 'string' ? receiptNo.slice(0, 64) : null,
+            accepted: !!accepted,
+            detail: typeof detail === 'string' ? detail.slice(0, 200) : null,
+        }),
+    );
+    res.status(204).end();
+};
