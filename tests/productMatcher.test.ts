@@ -67,6 +67,78 @@ const CHEESE = makeCandidate({ id: 2, storeProductName: 'Sūris Džiugas 200g' }
 const JUICE = makeCandidate({ id: 3, storeProductName: 'Sultys Aronija 1L' });
 const MILK_1KG = makeCandidate({ id: 4, storeProductName: 'Pienas Žemaitijos 2.5% 1L', amount: 1, unit: 'l' });
 
+// ---------------------------------------------------------------------------
+// OCR space-split heal + token-set subset + anchored abbreviation.
+// Receipt-203 canary: ML Kit split "KIAULIENA" → "KIAUL IENA" and the trailing
+// "R" abbreviates "riebumas". The real catalog SKU #60946 must win over the
+// minted orphan and the wrong-variant price-twins #60808/#60816. Mirrors the
+// off-DB `receipts:matchaudit --assert` check as a fast unit regression guard.
+// ---------------------------------------------------------------------------
+describe('findBestProductMatches — OCR split-word heal + subset + abbrev (receipt-203)', () => {
+    const OCR = 'IKI SMULKINTA KIAUL IENA R';
+    const GOOD = makeCandidate({ id: 60946, storeProductName: 'Smulkinta kiauliena riebumas ne did./kaip 20% dujose, IKI', isCatalog: true });
+    const ORPHAN = makeCandidate({ id: 97818, storeProductName: 'IKI SMULKINTA KIAUL IENA R', isCatalog: false });
+    const VAR_BEEF = makeCandidate({ id: 60808, storeProductName: 'Smulkinta maišyta kiauliena ir/jautiena dujose, IKI', isCatalog: true });
+    const VAR_35 = makeCandidate({ id: 60816, storeProductName: 'Smulkinta kiauliena riebumas ne didesnis kaip 35%', isCatalog: true });
+    const UNREL = makeCandidate({ id: 53076, storeProductName: 'Šaldyti žuvų piršteliai VIČI', isCatalog: true });
+
+    it('heals the OCR split and surfaces the real catalog SKU at auto-apply grade', () => {
+        const r = findBestProductMatches(OCR, null, 'vnt', [ORPHAN, VAR_BEEF, VAR_35, GOOD, UNREL]);
+        const good = r.find(m => m.storeProductId === 60946);
+        expect(good).toBeDefined();                          // scored 0 (absent) before the fix
+        expect(good!.confidence).toBeGreaterThanOrEqual(0.85); // full content-word coverage → auto-apply
+    });
+
+    it('ranks the catalog SKU first — orphan loses the catalog tiebreak, brand+abbrev beat the price-twins', () => {
+        const r = findBestProductMatches(OCR, null, 'vnt', [ORPHAN, VAR_BEEF, VAR_35, GOOD, UNREL]);
+        expect(r[0].storeProductId).toBe(60946);
+    });
+
+    it('does not heal/subset-match an unrelated catalog product (no shared significant token)', () => {
+        expect(findBestProductMatches(OCR, null, 'vnt', [UNREL])).toEqual([]);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Learned receipt-name aliases (Issue H vocabulary): a CANONICAL alias is scored
+// as an additional match target, so a garbled OCR line matches the way the chain
+// prints the SP even when the catalog name alone wouldn't.
+// ---------------------------------------------------------------------------
+describe('findBestProductMatches — canonical receipt-name aliases (Issue H)', () => {
+    const OTHER = makeCandidate({ id: 701, storeProductName: 'Pienas Dvaras 2.5% 1L', isCatalog: true });
+
+    it('matches via a canonical alias when the catalog name alone does not', () => {
+        // Catalog name is unrelated to the query; only the learned alias (how the chain
+        // prints it on receipts) matches. Aliases are stored already-normalized.
+        const aliased = makeCandidate({
+            id: 700,
+            storeProductName: 'Nesusijęs katalogo pavadinimas XYZ',
+            isCatalog: true,
+            aliases: ['troskinta kiauliena dujose'],
+        });
+        const r = findBestProductMatches('TROSKINTA KIAULIENA DUJOSE', null, 'vnt', [aliased, OTHER]);
+        expect(r[0]?.storeProductId).toBe(700);
+        expect(r[0]!.confidence).toBeGreaterThanOrEqual(0.85);
+    });
+
+    it('an empty / absent alias list behaves exactly like before', () => {
+        const a = findBestProductMatches('Pienas Dvaras', null, null, [OTHER]);
+        const b = findBestProductMatches('Pienas Dvaras', null, null, [{ ...OTHER, aliases: [] }]);
+        expect(b[0]?.storeProductId).toBe(a[0]?.storeProductId);
+    });
+
+    it('does not match via an alias that shares no significant token with the query', () => {
+        const aliased = makeCandidate({
+            id: 702,
+            storeProductName: 'Nesusijęs XYZ',
+            isCatalog: true,
+            aliases: ['pienas dvaras'],
+        });
+        // Query unrelated to both the catalog name and the alias → no match.
+        expect(findBestProductMatches('Bananai Chiquita', null, null, [aliased])).toEqual([]);
+    });
+});
+
 describe('findBestProductMatches', () => {
     it('returns empty array for empty candidates', () => {
         expect(findBestProductMatches('Pienas', null, null, [])).toEqual([]);

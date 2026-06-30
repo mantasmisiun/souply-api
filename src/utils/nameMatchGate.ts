@@ -65,3 +65,21 @@ export function sharesRequiredAnchor(nameA: string, nameB: string): boolean {
     const longSet = new Set(long);
     return short.some(t => longSet.has(t));
 }
+
+/**
+ * True when the two names share at least one EXACT significant (≥4-char) token.
+ *
+ * Stronger than sharesRequiredAnchor (which only *blocks* single-token names and
+ * defers for multi-token ones): this is a positive "the two names already overlap
+ * on a real content word" check. It gates the OCR space-heal, abbreviation and
+ * token-set subset lanes so those signals can only ever ADD coverage between names
+ * that already share a content word — an abbreviation like "r" can never originate
+ * a match to "riebumas" across two otherwise-unrelated products.
+ */
+export function sharedSignificantToken(nameA: string, nameB: string): boolean {
+    const a = significantTokens(nameA);
+    const b = significantTokens(nameB);
+    if (!a.length || !b.length) return false;
+    const setB = new Set(b);
+    return a.some(t => setB.has(t));
+}

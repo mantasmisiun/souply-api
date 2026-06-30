@@ -22,7 +22,7 @@
 
 import { levenshtein } from './addressMatcher.js';
 import { extractPackSize } from '../../../shared/parsers/rimiParser.js';
-import { sharesRequiredAnchor } from './nameMatchGate.js';
+import { sharesRequiredAnchor, sharedSignificantToken } from './nameMatchGate.js';
 import { RECOGNITION } from '../../../shared/recognitionConfig.js';
 
 /**
@@ -123,6 +123,10 @@ export interface MatchCandidate {
     /** True = a real scraped catalog SKU (has a receiptId-NULL price); false/undefined
      *  = a receipt-minted orphan. Used as a near-tie ranking preference. */
     isCatalog?: boolean;
+    /** CANONICAL receipt-name aliases learned for this SP (Issue H vocabulary) —
+     *  already normalized (normalizeProductName). Scored as additional match targets
+     *  so a garbled OCR line matches the way the chain actually prints the product. */
+    aliases?: string[];
 }
 
 export interface ProductMatch {
@@ -240,6 +244,114 @@ function scoreTokens(queryTokens: string[], candidateTokens: string[]): number {
     return weightSum > 0 ? weightedScoreSum / weightSum : 0;
 }
 
+/**
+ * OCR space-heal. ML Kit frequently splits one word across a space ("KIAULIENA" →
+ * "KIAUL IENA"), which turns one matchable long token into two sub-threshold
+ * fragments and silently zeroes the token lane. When a query token matches no
+ * candidate token on its own, glue it with the NEXT query token; if the glued form
+ * matches a candidate token at glueRescueThreshold, emit the glued word in place of
+ * the pair so the token lane sees the real word. Adjacent-pair only, and only when
+ * the single token already failed — so it can never fabricate coverage from
+ * unrelated words. Returns the (possibly shorter) healed query token list.
+ */
+function healQueryTokens(queryTokens: string[], candTokens: string[]): string[] {
+    const out: string[] = [];
+    for (let i = 0; i < queryTokens.length; i++) {
+        const qt = queryTokens[i];
+        if (bestTokenMatch(qt, candTokens) >= RECOGNITION.match.tokenMatchThreshold) { out.push(qt); continue; }
+        if (i + 1 < queryTokens.length) {
+            const glued = qt + queryTokens[i + 1];
+            if (bestTokenMatch(glued, candTokens) >= RECOGNITION.match.glueRescueThreshold) {
+                out.push(glued);
+                i++; // consume the partner fragment
+                continue;
+            }
+        }
+        out.push(qt);
+    }
+    return out;
+}
+
+/**
+ * Order-independent fraction of the (healed) query's LONG tokens that have a
+ * counterpart among the candidate tokens — an exact/fuzzy token match (≥
+ * tokenMatchThreshold) or, when `allowAbbrev`, a candidate-side PREFIX of a long
+ * query token. Drives the subset lane: a receipt name that is a clean subset of a
+ * longer catalog name scores high even though whole-string Levenshtein over the
+ * superset is hopeless. Caller gates this behind a shared significant token.
+ */
+function subsetCoverage(healedQuery: string[], candTokens: string[], allowAbbrev: boolean): number {
+    const SHORT = RECOGNITION.match.shortTokenThreshold;
+    const longQ = healedQuery.filter(t => t.length > SHORT);
+    if (longQ.length === 0) return 0;
+    const candLong = candTokens.filter(t => t.length > SHORT);
+    let covered = 0;
+    for (const qt of longQ) {
+        if (bestTokenMatch(qt, candTokens) >= RECOGNITION.match.tokenMatchThreshold) { covered++; continue; }
+        if (allowAbbrev && candLong.some(ct => ct.startsWith(qt))) covered++;
+    }
+    return covered / longQ.length;
+}
+
+/**
+ * Name-match confidence of one candidate NAME (a catalog storeProductName OR a
+ * learned alias) against the query, combining all lanes: the anchor gate, the token
+ * lane with OCR space-heal + distinguishing penalty, the whole-string char rescue,
+ * and (behind a shared significant token) the token-set subset lane + abbreviation
+ * bonus. Returns 0 when the anchor gate blocks it. `normalizedName`/`nameTokens` are
+ * already normalized + tokenized. Pure name signal — amount/unit bonuses are applied
+ * by the caller.
+ */
+function scoreNameConfidence(
+    normalizedQuery: string,
+    queryTokens: string[],
+    normalizedName: string,
+    nameTokens: string[],
+): number {
+    // Anchor-token gate: a single-significant-word query may only match a name that
+    // contains it EXACTLY, unless the two strings are near-identical char-wise (the
+    // OCR split-word case the char lane rescues). Stops "Airanas" → "Šafranas KOTANYI".
+    if (!sharesRequiredAnchor(normalizedQuery, normalizedName)
+        && charSimilarity(normalizedQuery, normalizedName) < RECOGNITION.match.anchorCharSimRescue) {
+        return 0;
+    }
+
+    // OCR space-heal the query against THIS name so a split word ("KIAUL IENA") is
+    // glued back ("kiauliena") before the token lane scores it.
+    const sharedAnchor = sharedSignificantToken(normalizedQuery, normalizedName);
+    const healedQuery = healQueryTokens(queryTokens, nameTokens);
+
+    let tokenScore = scoreTokens(healedQuery, nameTokens);
+    // Dock the token score when a distinguishing query noun has no counterpart
+    // (apples vs potatoes share only "Fasuoti/IKI/ŪKIS"). Token lane only.
+    if (tokenScore > 0) tokenScore = Math.max(0, tokenScore - distinguishingPenalty(healedQuery, nameTokens));
+    // Whole-string char rescue for OCR-split tokens; floored so incidental substring
+    // overlap between unrelated words can't false-match.
+    const charScore = charSimilarity(normalizedQuery, normalizedName);
+    const charContribution = charScore >= RECOGNITION.match.charScoreFloor ? charScore * RECOGNITION.match.charScoreDiscount : 0;
+    let confidence = Math.max(tokenScore, charContribution);
+
+    // Token-set SUBSET lane + anchored abbreviation bonus — gated behind a shared
+    // significant token so neither can ORIGINATE a match, only add coverage / nudge
+    // ranking between names that already overlap on a content word.
+    if (sharedAnchor) {
+        const cov = subsetCoverage(healedQuery, nameTokens, true);
+        if (cov >= RECOGNITION.match.subsetMinCoverage) {
+            confidence = Math.max(confidence, cov * RECOGNITION.match.subsetFullWeight);
+        }
+        const SHORT = RECOGNITION.match.shortTokenThreshold;
+        const candLong = nameTokens.filter(t => t.length > SHORT);
+        let abbrevHits = 0;
+        for (const qt of healedQuery) {
+            if (!qt || qt.length > SHORT || !/[a-z]/.test(qt)) continue; // short alphabetic tokens only
+            if (nameTokens.includes(qt)) continue;                        // already an exact token match
+            if (candLong.some(ct => ct.startsWith(qt))) abbrevHits++;
+        }
+        if (abbrevHits > 0) confidence = Math.min(1, confidence + Math.min(RECOGNITION.match.abbrevBonusCap, abbrevHits * RECOGNITION.match.abbrevBonus));
+    }
+    return confidence;
+}
+
 export function findBestProductMatches(
     ocrName: string,
     ocrAmount: number | null,
@@ -291,35 +403,24 @@ export function findBestProductMatches(
 
         const normalizedCand = normalizeProductName(cand.storeProductName);
         const candTokens = tokenize(normalizedCand);
-        if (candTokens.length === 0) continue;
+        if (candTokens.length === 0 && !(cand.aliases && cand.aliases.length > 0)) continue;
 
-        // Anchor-token gate: a query with a single significant word may only
-        // match a candidate that contains that word EXACTLY. The exception is
-        // when the two strings are near-identical character-wise — that's the
-        // OCR split-word case (e.g. "gėr imas" → "gėrimas") which the charScore
-        // lane below is meant to rescue. Without this, "Airanas" fuzzy-matched
-        // "Šafranas KOTANYI" at 0.75 and got clustered into the saffron Product.
-        if (!sharesRequiredAnchor(normalizedQuery, normalizedCand)
-            && charSimilarity(normalizedQuery, normalizedCand) < 0.85) {
-            continue;
+        // Name confidence = the BEST over the catalog name AND any CANONICAL receipt-
+        // name aliases (Issue H vocabulary). A learned alias is how THIS chain prints
+        // the SP on its receipts, so it matches a garbled OCR line directly even when
+        // the catalog name doesn't. Aliases are stored already-normalized (same
+        // normalizeProductName as the query). scoreNameConfidence applies the anchor
+        // gate + all lanes per name and returns 0 when gated.
+        let confidence = candTokens.length > 0
+            ? scoreNameConfidence(normalizedQuery, queryTokens, normalizedCand, candTokens)
+            : 0;
+        for (const alias of cand.aliases ?? []) {
+            const aliasTokens = tokenize(alias);
+            if (aliasTokens.length === 0) continue;
+            const aliasConf = scoreNameConfidence(normalizedQuery, queryTokens, alias, aliasTokens);
+            if (aliasConf > confidence) confidence = aliasConf;
         }
-
-        let tokenScore = scoreTokens(queryTokens, candTokens);
-        // Dock the TOKEN score when a distinguishing query noun has no counterpart
-        // (apples vs potatoes share only "Fasuoti/IKI/ŪKIS"). Token lane only — the
-        // char lane below still rescues genuine OCR split-word variants.
-        if (tokenScore > 0) tokenScore = Math.max(0, tokenScore - distinguishingPenalty(queryTokens, candTokens));
-        // Always compute char-similarity — cheap early-bail inside
-        // handles the 99% of candidates that aren't close in length.
-        const charScore = charSimilarity(normalizedQuery, normalizedCand);
-        // charScore is a rescue for OCR-split tokens (e.g. "ger imas" →
-        // "gerimas"). Only apply it when charScore ≥ 0.6 so incidental
-        // substring overlap between unrelated Lithuanian words (e.g.
-        // "bananai"/"mandarinai" share "-anai", charScore≈0.5) doesn't
-        // produce false positives. The 0.6 floor corresponds to Levenshtein
-        // distance ≤ 40% of the longer string — genuinely similar texts.
-        const charContribution = charScore >= 0.6 ? charScore * 0.95 : 0;
-        let confidence = Math.max(tokenScore, charContribution);
+        if (confidence <= 0) continue;
 
         // candAmount/candUnit were computed above (before the weighable gate) — the
         // name-extraction fallback covers ZEWA-class SPs whose size lives only in the

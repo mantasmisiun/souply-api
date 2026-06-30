@@ -9,6 +9,7 @@
     "start": "node dist/souply-api/src/index.js",
     "receipts:batch": "tsx src/scripts/receiptBatch/importReceiptBatch.ts",
     "receipts:reparse": "tsx src/scripts/receiptBatch/reparseMetrics.ts",
+    "receipts:matchaudit": "tsx src/scripts/receiptBatch/matchAudit.ts",
     "receipts:stage": "tsx src/scripts/receiptBatch/stageReceiptsOnDevice.ts",
     "receipts:cleanup": "tsx src/scripts/receiptBatch/cleanupTestReceipts.ts",
     "truths:bootstrap": "tsx src/scripts/bootstrapTruthsFromLogs.ts",
