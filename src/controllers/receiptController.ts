@@ -851,6 +851,9 @@ export const submitReceiptLineVote = async (req: Request, res: Response, next: N
         const receiptId = Number(req.params.id);
         const lineIdx = Number(req.params.idx);
         const vote = req.body?.vote;
+        // Optional — used by the vocabulary capture (Issue H) to attribute the
+        // alias confirmation to a distinct user (the K-user auto-promote).
+        const userId = typeof req.body?.userId === 'string' && req.body.userId ? req.body.userId : undefined;
         if (isNaN(receiptId) || isNaN(lineIdx) || lineIdx < 0) {
             res.status(400).json({ error: 'Invalid receipt id or line index' });
             return;
@@ -862,7 +865,7 @@ export const submitReceiptLineVote = async (req: Request, res: Response, next: N
         const conn = await (pool as any).getConnection();
         try {
             await conn.beginTransaction();
-            const line = await castReceiptLineVote(receiptId, lineIdx, vote, conn);
+            const line = await castReceiptLineVote(receiptId, lineIdx, vote, conn, userId);
             await markLineResolved(receiptId, lineIdx, 'user', vote, conn);
             await conn.commit();
             res.json({ ok: true, line: line ?? null });

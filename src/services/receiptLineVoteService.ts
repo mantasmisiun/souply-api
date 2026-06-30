@@ -2,6 +2,8 @@ import type { Connection } from 'mysql2/promise';
 import { computeItemConfidence } from './itemConfidence.js';
 import { demoteReceiptLineDirect } from './receiptLineDemotionService.js';
 import { setReceiptLinePriceVerified } from '../models/receiptLineIssueModel.js';
+import { recordAliasVote } from '../models/storeProductAliasModel.js';
+import { RECOGNITION } from '../../../shared/recognitionConfig.js';
 
 /**
  * Apply a Card-B swipe to a receipt line (see shared/SWIPE_QUEUE_REDESIGN.md):
@@ -20,6 +22,7 @@ export async function castReceiptLineVote(
     lineIdx: number,
     vote: ReceiptLineVote,
     conn: Connection,
+    userId?: string,
 ): Promise<any | null> {
     if (vote === 'different') {
         return demoteReceiptLineDirect(receiptId, lineIdx, conn);
@@ -56,5 +59,26 @@ export async function castReceiptLineVote(
 
     await conn.query('UPDATE Receipt SET parsedData = ? WHERE id = ?', [JSON.stringify(parsed), receiptId]);
     await setReceiptLinePriceVerified(receiptId, sp, priceVerified, conn);
+
+    // VOCABULARY capture (Issue H): on an 'identical' confirm where the matcher
+    // STRUGGLED (name confidence < auto-apply, so the catalog name alone didn't get
+    // there), learn this receipt's OCR string as a chain-scoped alias for the SP — so
+    // a future receipt with the same garbled print matches it directly. Only the
+    // valuable hard cases; fail-open (a learning miss must never fail the vote).
+    if (vote === 'identical' && userId) {
+        const matchConf = Number(line.matchConfidence);
+        const struggled = !Number.isFinite(matchConf) || matchConf < RECOGNITION.match.autoApplyThreshold;
+        const chainId = Number(parsed?.header?.chainId);
+        if (struggled && Number.isFinite(chainId) && typeof line.name === 'string' && line.name.trim()) {
+            try {
+                await recordAliasVote(
+                    { chainId, storeProductId: sp, rawName: line.name, userId, vote: 'identical', receiptId },
+                    conn,
+                );
+            } catch (e) {
+                console.warn('[vocab] alias capture failed (non-fatal):', (e as Error)?.message ?? e);
+            }
+        }
+    }
     return line;
 }
