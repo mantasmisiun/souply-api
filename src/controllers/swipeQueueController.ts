@@ -13,6 +13,10 @@ import { castDirectSpPairVote } from '../services/directSpPairVoteService.js';
 import type { SwipeVote } from '../services/swipeVoteService.js';
 import { getUserPointsProfile } from '../services/userPointsService.js';
 import { refillUserOrphansIfMissing } from '../services/orphanRefillService.js';
+import type { Locale } from '../middleware/locale.js';
+import { capVoluntaryQueue } from '../../../shared/swipeQueueCap.js';
+import { buildReceiptResolveCards } from '../services/receiptResolveQueueService.js';
+import { RECOGNITION } from '../../../shared/recognitionConfig.js';
 
 const VALID_VOTES: SwipeVote[] = ['identical', 'similar', 'different'];
 
@@ -156,6 +160,60 @@ async function logReceiptPipeline(receiptId: number): Promise<void> {
 // ── Controllers ────────────────────────────────────────────────────────────
 
 /**
+ * Assemble the prioritised swipe cards (slot 2 → 1 → 3) for a user, applying the
+ * relatedness gate when `relatedTo` is set. Extracted so BOTH GET /swipe-queue and
+ * the voluntary-count endpoint build the queue through ONE code path — the count
+ * and the served queue can never drift. Returns the cards + pre-gate slot counts.
+ */
+async function buildSwipeQueueItems(
+    userId: string,
+    receiptIdParam: number | undefined,
+    relatedTo: number | undefined,
+    locale: Locale,
+): Promise<{ items: SwipeQueueCard[]; slotCounts: { slot1: number; slot2: number; slot3: number } }> {
+    const [votedPairKeys, slot1Rows, slot2Rows, slot3Rows] = await Promise.all([
+        fetchVotedPairKeys(userId),
+        fetchSlot1Rows(userId, receiptIdParam, locale),
+        fetchAllSlot2Rows(userId, receiptIdParam, locale),
+        fetchSlot3Rows(userId, receiptIdParam, locale),
+    ]);
+
+    const slot2Items = buildSlot2Queue(slot2Rows, votedPairKeys);
+    const slot1Items = buildSlot1Queue(slot1Rows, votedPairKeys);
+    const slot3Items = buildSlot3Queue(slot3Rows, votedPairKeys);
+
+    const slot2Cards: SwipeQueueCard[] = slot2Items.map(item => ({
+        cardId: item.cardId,
+        slot: 2 as const,
+        score: item.score,
+        left:  { spId: item.orphanSpId,    ...item.orphan },
+        right: { spId: item.candidateSpId, ...item.candidate },
+        slot2Meta: { sameChain: item.sameChain, conflictDetected: item.conflictDetected },
+    }));
+    const slot3Cards: SwipeQueueCard[] = slot3Items.map(item => ({
+        cardId: item.cardId,
+        slot: 3 as const,
+        score: item.score,
+        left:  { spId: item.spIdA, ...item.left },
+        right: { spId: item.spIdB, ...item.right },
+    }));
+
+    let items: SwipeQueueCard[] = [...slot2Cards, ...slot1Items, ...slot3Cards];
+
+    if (relatedTo !== undefined && Number.isFinite(relatedTo)) {
+        const scope = await getReceiptRelatednessScope(relatedTo, pool);
+        const before = items.length;
+        items = items.filter((c) =>
+            isCardRelated({ categoryId: c.left.categoryId, name: c.left.name, imageUrl: c.left.imageUrl }, scope) ||
+            isCardRelated({ categoryId: c.right.categoryId, name: c.right.name, imageUrl: c.right.imageUrl }, scope),
+        );
+        swipeLog(`[Relatedness] relatedTo=${relatedTo} scope: ${scope.categoryIds.size} cats, ${scope.lineNames.length} line-names → kept ${items.length}/${before}`);
+    }
+
+    return { items, slotCounts: { slot1: slot1Items.length, slot2: slot2Items.length, slot3: slot3Items.length } };
+}
+
+/**
  * GET /api/users/:userId/swipe-queue
  *
  * Returns a prioritised list of swipe cards for the user:
@@ -213,83 +271,81 @@ export const getSwipeQueue = async (
                 .catch(e => swipeLog(`[Voluntary] background refill failed: ${(e as Error).message}`));
         }
 
-        const [votedPairKeys, slot1Rows, slot2Rows, slot3Rows] = await Promise.all([
-            fetchVotedPairKeys(userId),
-            fetchSlot1Rows(userId, receiptIdParam, req.locale),
-            fetchAllSlot2Rows(userId, receiptIdParam, req.locale),
-            fetchSlot3Rows(userId, receiptIdParam, req.locale),
-        ]);
-
-        const slot2Items = buildSlot2Queue(slot2Rows, votedPairKeys);
-        const slot1Items = buildSlot1Queue(slot1Rows, votedPairKeys);
-        const slot3Items = buildSlot3Queue(slot3Rows, votedPairKeys);
-
-        const slot2Cards: SwipeQueueCard[] = slot2Items.map(item => ({
-            cardId: item.cardId,
-            slot: 2 as const,
-            score: item.score,
-            left:  { spId: item.orphanSpId,    ...item.orphan },
-            right: { spId: item.candidateSpId, ...item.candidate },
-            slot2Meta: {
-                sameChain:         item.sameChain,
-                conflictDetected:  item.conflictDetected,
-            },
-        }));
-
-        const slot3Cards: SwipeQueueCard[] = slot3Items.map(item => ({
-            cardId: item.cardId,
-            slot: 3 as const,
-            score: item.score,
-            left:  { spId: item.spIdA, ...item.left },
-            right: { spId: item.spIdB, ...item.right },
-        }));
-
-        let items: SwipeQueueCard[] = [...slot2Cards, ...slot1Items, ...slot3Cards];
-
-        // Relatedness gate (Decision 3): drop any card whose product isn't related to the
-        // receipt (category bought from OR an uncategorised real product), and name-similar to
-        // a receipt line — so we never ask about product types they didn't buy. EITHER side
-        // may relate. A receipt-SCOPED fetch (receiptId present) gates to ITS OWN receipt even
-        // when the client didn't pass `relatedTo` explicitly — older swipe-queue builds send
-        // only receiptId, and an UNgated receipt fetch would leak 456 cross-category dedup pairs
-        // (toothpaste in a grocery run). Only the global pool (receiptId=none) stays ungated.
+        // Relatedness gate: a receipt-SCOPED fetch (receiptId present) gates to ITS OWN
+        // receipt even when the client didn't pass `relatedTo`; only the global pool
+        // (receiptId=none) stays ungated. Item assembly + the gate live in
+        // buildSwipeQueueItems so the voluntary-count endpoint uses the same path.
         const relatedToParam = typeof req.query.relatedTo === 'string' && req.query.relatedTo.length > 0
             ? Number(req.query.relatedTo)
             : undefined;
         const relatedTo = relatedToParam ?? receiptIdParam;
-        if (relatedTo !== undefined && Number.isFinite(relatedTo)) {
-            const scope = await getReceiptRelatednessScope(relatedTo, pool);
-            const before = items.length;
-            // RELATED-ONLY (user decision): keep a card only when a side is name-related AND
-            // either same-category OR an uncategorised real product (has a photo). No category-
-            // only or ungated backfill — fewer than 3 cards is acceptable when there's no related
-            // work. The uncategorised-with-photo arm surfaces scraped IKI items that didn't match
-            // a category (Nepriskirta/688) so they get community categorisation.
-            items = items.filter((c) =>
-                isCardRelated({ categoryId: c.left.categoryId, name: c.left.name, imageUrl: c.left.imageUrl }, scope) ||
-                isCardRelated({ categoryId: c.right.categoryId, name: c.right.name, imageUrl: c.right.imageUrl }, scope),
-            );
-            swipeLog(
-                `[Relatedness] relatedTo=${relatedTo} scope: ${scope.categoryIds.size} cats, ` +
-                `${scope.lineNames.length} line-names → kept ${items.length}/${before}`,
-            );
-        } else {
+        if (relatedTo === undefined || !Number.isFinite(relatedTo)) {
             swipeLog(`[Relatedness] relatedTo NOT supplied — global cards UNGATED (receiptId=${receiptIdParam ?? 'none'})`);
         }
 
-        swipeLog(`[SwipeQueue] userId=${userId} receiptId=${receiptIdParam ?? 'none'} → slot1=${slot1Items.length} slot2=${slot2Items.length} slot3=${slot3Items.length} total=${items.length}`);
+        const { items, slotCounts } = await buildSwipeQueueItems(userId, receiptIdParam, relatedTo, req.locale);
+
+        swipeLog(`[SwipeQueue] userId=${userId} receiptId=${receiptIdParam ?? 'none'} → slot1=${slotCounts.slot1} slot2=${slotCounts.slot2} slot3=${slotCounts.slot3} total=${items.length}`);
         for (const card of items) {
             swipeLog(`[SwipeQueue]   [slot${card.slot}] "${card.left.name}" (${card.left.chainName}) vs "${card.right.name}" (${card.right.chainName}) score=${card.score.toFixed(3)}`);
         }
 
-        res.json({
-            items,
-            slotCounts: {
-                slot1: slot1Items.length,
-                slot2: slot2Items.length,
-                slot3: slot3Items.length,
-            },
-        });
+        res.json({ items, slotCounts });
+    } catch (error) {
+        next(error);
+    }
+};
+
+/**
+ * GET /api/users/:userId/voluntary-queue-count?receiptId=…
+ *
+ * SINGLE SOURCE OF TRUTH for the "Improve price comparison" button's badge. Runs the
+ * EXACT voluntary served-queue assembly server-side — the relatedTo-gated receipt +
+ * global pools through capVoluntaryQueue, plus up to 5 prepended Card-B resolve cards
+ * — and returns the final count. The button hides at 0 and shows a number that equals
+ * what actually opens (kills the "advertises 10 → opens empty" divergence, which came
+ * from the old count omitting the relatedTo gate AND the resolve-queue cards).
+ */
+export const getVoluntaryQueueCount = async (
+    req: Request,
+    res: Response,
+    next: NextFunction,
+) => {
+    try {
+        const userId = typeof req.params.userId === 'string' ? req.params.userId.trim() : '';
+        if (!userId) { res.status(400).json({ error: 'userId is required' }); return; }
+        const receiptId = typeof req.query.receiptId === 'string' && req.query.receiptId.length > 0
+            ? Number(req.query.receiptId)
+            : undefined;
+        if (receiptId === undefined || !Number.isFinite(receiptId)) {
+            res.status(400).json({ error: 'receiptId is required' });
+            return;
+        }
+
+        // Mirror SwipeQueue.loadQueue's voluntary branch exactly:
+        //   receiptItems = swipe-queue(receiptId, relatedTo=receiptId)
+        //   globalItems  = swipe-queue(relatedTo=receiptId)   (no receiptId)
+        //   capVoluntaryQueue({receiptItems, globalItems}); then prepend ≤5 Card-B, cap 10.
+        const [receiptPool, globalPool] = await Promise.all([
+            buildSwipeQueueItems(userId, receiptId, receiptId, req.locale),
+            buildSwipeQueueItems(userId, undefined, receiptId, req.locale),
+        ]);
+        const capped = capVoluntaryQueue({ receiptItems: receiptPool.items, globalItems: globalPool.items }).items;
+
+        const max = RECOGNITION.queue.voluntaryReceiptHalf;
+        const conn = await (pool as any).getConnection();
+        let cardBCount = 0;
+        try {
+            const { cards } = await buildReceiptResolveCards(receiptId, conn, max);
+            cardBCount = cards.length;
+        } finally {
+            conn.release();
+        }
+
+        const count = cardBCount > 0
+            ? Math.min(10, Math.min(max, cardBCount) + capped.length)
+            : capped.length;
+        res.json({ count });
     } catch (error) {
         next(error);
     }
