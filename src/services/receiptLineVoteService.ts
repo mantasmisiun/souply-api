@@ -8,12 +8,17 @@ import { RECOGNITION } from '../../../shared/recognitionConfig.js';
 /**
  * Apply a Card-B swipe to a receipt line (see shared/SWIPE_QUEUE_REDESIGN.md):
  *   identical → confirm the product + trust the price (price-verified, S1).
- *   similar   → confirm the product but NOT the price (variant uncertain, S1, price unverified).
+ *   similar   → SUBSTITUTE: a same-category but DIFFERENT product, so demote the line
+ *               (it isn't this exact SP) — the same-category link is learned as a
+ *               'similarity' alias for L2-scoped re-matching, not kept on the line.
  *   different → demote (re-point to a same-chain runner-up ≥ auto-apply, else OCR).
  *
- * identical/similar mark the line user-confirmed (itemConfidence → S1, the strongest
- * signal) and sync the Price row. Returns the mutated line (or null if nothing to act on).
- * Reads + writes parsedData FOR UPDATE inside the caller's transaction.
+ * Every vote is ALSO recorded as a chain-scoped VOCABULARY alias vote (Issue H):
+ *   identical → learn the alias when the matcher STRUGGLED (the valuable hard cases);
+ *   similar/different → always (they correct/contest the match, feeding the alias
+ *   state machine's similarity link + balanced veto + the no-repeat-combo blacklist).
+ * Returns the mutated line (or null when there's nothing to act on). Reads + writes
+ * parsedData FOR UPDATE inside the caller's transaction.
  */
 export type ReceiptLineVote = 'identical' | 'similar' | 'different';
 
@@ -24,32 +29,52 @@ export async function castReceiptLineVote(
     conn: Connection,
     userId?: string,
 ): Promise<any | null> {
-    if (vote === 'different') {
+    // Read the line + the SP the user is judging BEFORE any demotion, so the alias
+    // vote is recorded against the right SP even when we then demote the line.
+    const [rows]: any = await conn.query('SELECT parsedData FROM Receipt WHERE id = ? FOR UPDATE', [receiptId]);
+    const raw = rows?.[0]?.parsedData;
+    let parsed: any = null;
+    if (raw) {
+        try { parsed = typeof raw === 'string' ? JSON.parse(raw) : raw; } catch { parsed = null; }
+    }
+    const line = parsed?.products?.[lineIdx] ?? null;
+    const sp = line ? Number(line.storeProductId) : NaN;
+    const chainId = Number(parsed?.header?.chainId);
+    const ocrName = line && typeof line.name === 'string' ? line.name : '';
+
+    // ── VOCABULARY (Issue H): record the user's verdict as a chain-scoped alias vote.
+    if (userId && Number.isFinite(chainId) && Number.isFinite(sp) && sp > 0 && ocrName.trim()) {
+        const matchConf = Number(line.matchConfidence);
+        const struggled = !Number.isFinite(matchConf) || matchConf < RECOGNITION.match.autoApplyThreshold;
+        // identical only when the matcher struggled (skip redundant aliases the catalog
+        // name already matches); similar/different always (corrections are always useful).
+        if (vote !== 'identical' || struggled) {
+            try {
+                await recordAliasVote({ chainId, storeProductId: sp, rawName: ocrName, userId, vote, receiptId }, conn);
+            } catch (e) {
+                console.warn('[vocab] alias capture failed (non-fatal):', (e as Error)?.message ?? e);
+            }
+        }
+    }
+
+    // ── Apply the vote's effect to the receipt line.
+    if (vote === 'different' || vote === 'similar') {
+        // 'different' = wrong product; 'similar' = a same-category SUBSTITUTE (a
+        // DIFFERENT product). Neither is THIS exact SP, so demote to a runner-up /
+        // fresh orphan / OCR. The same-category link for 'similar' lives in the alias
+        // (similarity status) and drives L2-scoped re-matching, not the line.
         return demoteReceiptLineDirect(receiptId, lineIdx, conn);
     }
 
-    const [rows]: any = await conn.query('SELECT parsedData FROM Receipt WHERE id = ? FOR UPDATE', [receiptId]);
-    const raw = rows?.[0]?.parsedData;
-    if (!raw) return null;
-    let parsed: any;
-    try {
-        parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
-    } catch {
-        return null;
-    }
-    const line = parsed?.products?.[lineIdx];
-    if (!line) return null;
-    const sp = Number(line.storeProductId);
-    if (!Number.isFinite(sp) || sp <= 0) return null; // no match to confirm
-
-    const priceVerified = vote === 'identical'; // similar keeps the product but not the price
+    // 'identical' → confirm the product + trust the price (user-confirmed → S1).
+    if (!line || !Number.isFinite(sp) || sp <= 0) return null; // no match to confirm
     line.matchConfirmed = true;
-    line.priceVerified = priceVerified;
-    line.variantUncertain = vote === 'similar'; // "right product, maybe wrong size/variant"
+    line.priceVerified = true;
+    line.variantUncertain = false;
     line.itemConfidence = computeItemConfidence({
         nameConf: Number.isFinite(line.matchConfidence) ? Number(line.matchConfidence) : null,
-        nameText: typeof line.name === 'string' ? line.name : '',
-        priceVerified,
+        nameText: ocrName,
+        priceVerified: true,
         viaPromo: false,
         gapToRunnerUp: 0,
         source: 'reused',
@@ -58,27 +83,6 @@ export async function castReceiptLineVote(
     });
 
     await conn.query('UPDATE Receipt SET parsedData = ? WHERE id = ?', [JSON.stringify(parsed), receiptId]);
-    await setReceiptLinePriceVerified(receiptId, sp, priceVerified, conn);
-
-    // VOCABULARY capture (Issue H): on an 'identical' confirm where the matcher
-    // STRUGGLED (name confidence < auto-apply, so the catalog name alone didn't get
-    // there), learn this receipt's OCR string as a chain-scoped alias for the SP — so
-    // a future receipt with the same garbled print matches it directly. Only the
-    // valuable hard cases; fail-open (a learning miss must never fail the vote).
-    if (vote === 'identical' && userId) {
-        const matchConf = Number(line.matchConfidence);
-        const struggled = !Number.isFinite(matchConf) || matchConf < RECOGNITION.match.autoApplyThreshold;
-        const chainId = Number(parsed?.header?.chainId);
-        if (struggled && Number.isFinite(chainId) && typeof line.name === 'string' && line.name.trim()) {
-            try {
-                await recordAliasVote(
-                    { chainId, storeProductId: sp, rawName: line.name, userId, vote: 'identical', receiptId },
-                    conn,
-                );
-            } catch (e) {
-                console.warn('[vocab] alias capture failed (non-fatal):', (e as Error)?.message ?? e);
-            }
-        }
-    }
+    await setReceiptLinePriceVerified(receiptId, sp, true, conn);
     return line;
 }

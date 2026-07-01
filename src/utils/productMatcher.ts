@@ -127,6 +127,12 @@ export interface MatchCandidate {
      *  already normalized (normalizeProductName). Scored as additional match targets
      *  so a garbled OCR line matches the way the chain actually prints the product. */
     aliases?: string[];
+    /** REJECTED aliases (a 'different'-vetoed OCR↔SP combo) — when the query exactly
+     *  matches one, this SP is SUPPRESSED (don't re-suggest a known-wrong match). */
+    rejectedAliases?: string[];
+    /** SIMILARITY aliases (a same-category-substitute link) — when the query matches
+     *  one, matching is scoped to this SP's L2 + its L3 is boosted. */
+    similarityAliases?: string[];
 }
 
 export interface ProductMatch {
@@ -370,9 +376,30 @@ export function findBestProductMatches(
     const queryTokens = tokenize(normalizedQuery);
     if (queryTokens.length === 0) return [];
 
+    // Vocabulary L2-scope (Issue H): if the query EXACTLY matches a learned 'similarity'
+    // alias (a same-category-substitute link), restrict matching to that SP's L2 family
+    // and boost its L3 leaf — the user told us this OCR belongs to that category. No-op
+    // until 'similar' votes accumulate (no similarity aliases → scopeL2 stays null).
+    let scopeL2: string | null = null;
+    let boostL3: string | null = null;
+    for (const cand of candidates) {
+        if (cand.similarityAliases && cand.similarityAliases.includes(normalizedQuery)) {
+            scopeL2 = cand.categoryL2Name ?? null;
+            boostL3 = cand.categoryName ?? null;
+            break;
+        }
+    }
+
     const scored: Array<{ cand: MatchCandidate; confidence: number }> = [];
 
     for (const cand of candidates) {
+        // Vocabulary L2 hard-scope: once a similarity alias set the scope, only
+        // candidates in that L2 family are eligible.
+        if (scopeL2 && (cand.categoryL2Name ?? null) !== scopeL2) continue;
+        // Rejected-alias suppression (no-repeat): the query was voted NOT this SP — never
+        // re-suggest a known-wrong match for this exact OCR.
+        if (cand.rejectedAliases && cand.rejectedAliases.includes(normalizedQuery)) continue;
+
         // Effective pack size: catalog columns, else a size parsed from the NAME
         // (many SPs carry size in the name but null amount/unit columns). Computed
         // up here so the weighable gate below can use it too.
@@ -421,6 +448,12 @@ export function findBestProductMatches(
             if (aliasConf > confidence) confidence = aliasConf;
         }
         if (confidence <= 0) continue;
+
+        // Vocabulary L3 boost: nudge a candidate in the L3 leaf the similarity alias
+        // scoped to (precision within the L2 family).
+        if (boostL3 && (cand.categoryName ?? null) === boostL3) {
+            confidence = Math.min(1, confidence + RECOGNITION.vocab.categoryScopeBoost);
+        }
 
         // candAmount/candUnit were computed above (before the weighable gate) — the
         // name-extraction fallback covers ZEWA-class SPs whose size lives only in the

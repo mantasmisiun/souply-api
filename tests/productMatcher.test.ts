@@ -139,6 +139,35 @@ describe('findBestProductMatches — canonical receipt-name aliases (Issue H)', 
     });
 });
 
+// ---------------------------------------------------------------------------
+// H3 vocabulary signals: a REJECTED alias suppresses a known-wrong match, and a
+// SIMILARITY alias hard-scopes matching to that SP's L2 family.
+// ---------------------------------------------------------------------------
+describe('findBestProductMatches — H3 vocabulary signals (rejected-suppress + L2-scope)', () => {
+    it('suppresses a candidate whose REJECTED alias matches the query', () => {
+        const sp = makeCandidate({ id: 800, storeProductName: 'Pienas Dvaras', isCatalog: true, rejectedAliases: ['pienas dvaras'] });
+        // The catalog name matches perfectly, but the (OCR, SP) combo was voted 'different'.
+        expect(findBestProductMatches('Pienas Dvaras', null, null, [sp])).toEqual([]);
+    });
+
+    it("scopes matching to the similarity-aliased SP's L2 (excludes other L2 families)", () => {
+        const scoper  = makeCandidate({ id: 810, storeProductName: 'garbled mince xx', isCatalog: true, categoryL2Name: 'Meat',  categoryName: 'Mince',    similarityAliases: ['garbled mince xx'] });
+        const sibling = makeCandidate({ id: 811, storeProductName: 'garbled mince xx', isCatalog: true, categoryL2Name: 'Meat',  categoryName: 'Sausages' });
+        const otherL2 = makeCandidate({ id: 812, storeProductName: 'garbled mince xx', isCatalog: true, categoryL2Name: 'Dairy', categoryName: 'Milk' });
+        const ids = findBestProductMatches('garbled mince xx', null, null, [scoper, sibling, otherL2]).map(m => m.storeProductId);
+        expect(ids).toContain(811);      // same L2 as the similarity scoper → eligible
+        expect(ids).not.toContain(812);  // different L2 → scoped out
+    });
+
+    it('no similarity alias → no scoping (all L2 families eligible — the no-op default)', () => {
+        const a = makeCandidate({ id: 820, storeProductName: 'garbled mince xx', isCatalog: true, categoryL2Name: 'Meat' });
+        const b = makeCandidate({ id: 821, storeProductName: 'garbled mince xx', isCatalog: true, categoryL2Name: 'Dairy' });
+        const ids = findBestProductMatches('garbled mince xx', null, null, [a, b]).map(m => m.storeProductId);
+        expect(ids).toContain(820);
+        expect(ids).toContain(821);      // no scope → Dairy NOT excluded
+    });
+});
+
 describe('findBestProductMatches', () => {
     it('returns empty array for empty candidates', () => {
         expect(findBestProductMatches('Pienas', null, null, [])).toEqual([]);

@@ -3,6 +3,27 @@ import { crossChainNameSimilarity } from '../utils/productNameNormalize.js';
 import { swipeLog } from '../utils/swipeLogger.js';
 import type { Locale } from '../middleware/locale.js';
 import { RECOGNITION } from '../../../shared/recognitionConfig.js';
+import { fetchCanonicalAliasesForSps } from './storeProductAliasModel.js';
+
+/**
+ * Best cross-chain name similarity over a product's catalog name AND its canonical
+ * receipt-name aliases on BOTH sides (Issue H vocab-driven queue). When the chains'
+ * catalog names diverge but they PRINT the product similarly, a learned alias bridges
+ * the pair — surfacing identity candidates a pure name comparison would miss. Reduces
+ * to plain name×name similarity when neither side has aliases. See RECEIPT_VOCABULARY.md.
+ */
+export function bestCrossChainSimilarity(aName: string, aAliases: string[], bName: string, bAliases: string[]): number {
+    const aTexts = [aName, ...aAliases];
+    const bTexts = [bName, ...bAliases];
+    let best = 0;
+    for (const a of aTexts) {
+        for (const b of bTexts) {
+            const s = crossChainNameSimilarity(a, b);
+            if (s > best) best = s;
+        }
+    }
+    return best;
+}
 
 /** Minimum match score for an anchor SP to be used as a Slot 1 source. */
 const SLOT1_ANCHOR_MIN_SCORE = RECOGNITION.match.slot1AnchorMinScore;
@@ -156,6 +177,14 @@ export async function fetchSlot1Rows(userId: string, priorityReceiptId?: number,
 
     const candidateChainIds = [...new Set((candidateRows as any[]).map((r: any) => Number(r.chainId)))];
 
+    // Vocabulary bridge (Issue H): attach canonical receipt-name aliases to anchors +
+    // candidates so scoring can match the way each chain PRINTS a product, not just its
+    // catalog name. Targeted fetch (only the SPs in play); no-op until aliases exist.
+    const aliasBySp = await fetchCanonicalAliasesForSps([
+        ...(anchorRows as any[]).map((a: any) => Number(a.anchorSpId)),
+        ...(candidateRows as any[]).map((c: any) => Number(c.spId)),
+    ]);
+
     // ── Step 3: score anchors vs candidates, keep best per canonical pair ─────
     const best = new Map<string, { score: number; row: RawSlot1Row }>();
 
@@ -169,9 +198,11 @@ export async function fetchSlot1Rows(userId: string, priorityReceiptId?: number,
             let bestCand: any = null;
 
             for (const cand of candidates) {
-                const score = crossChainNameSimilarity(
+                const score = bestCrossChainSimilarity(
                     String(anchor.anchorProductName),
+                    aliasBySp.get(Number(anchor.anchorSpId)) ?? [],
                     String(cand.productName),
+                    aliasBySp.get(Number(cand.spId)) ?? [],
                 );
                 if (score > bestScore) {
                     bestScore = score;

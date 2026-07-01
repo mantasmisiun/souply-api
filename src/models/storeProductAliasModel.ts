@@ -63,17 +63,31 @@ export async function recordAliasVote(
     );
     const alias = aRows?.[0];
     if (!alias) return;
-    const aliasId = Number(alias.id);
+    await applyAliasVote(Number(alias.id), userId, vote, receiptId ?? null, alias.adminVerdict ?? null, conn);
+}
 
-    // 2. Upsert the user's single vote (latest wins).
+/**
+ * Upsert a user's single vote on an EXISTING alias, then recompute its distinct-user
+ * tallies + status (the balanced-veto state machine). Shared by recordAliasVote (the
+ * receipt-line Card-B path) and recordAliasVoteById (a pending-alias swipe card).
+ *
+ * Balanced veto: a 'different' vote rejects only when dissenters TIE OR EXCEED the
+ * identical confirmers, so one bad vote can't overturn an alias two users confirmed.
+ */
+async function applyAliasVote(
+    aliasId: number,
+    userId: string,
+    vote: AliasVote,
+    receiptId: number | null,
+    adminVerdict: 'confirmed' | 'rejected' | null,
+    conn: Connection,
+): Promise<void> {
     await conn.query(
         `INSERT INTO StoreProductReceiptAliasVote (aliasId, userId, vote, receiptId)
          VALUES (?, ?, ?, ?)
          ON DUPLICATE KEY UPDATE vote = VALUES(vote), receiptId = VALUES(receiptId)`,
         [aliasId, userId, vote, receiptId],
     );
-
-    // 3. Recompute distinct-user tallies from the vote table.
     const [tRows]: any = await conn.query(
         `SELECT vote, COUNT(DISTINCT userId) AS n FROM StoreProductReceiptAliasVote WHERE aliasId = ? GROUP BY vote`,
         [aliasId],
@@ -84,21 +98,38 @@ export async function recordAliasVote(
         else if (r.vote === 'similar') similarUsers = Number(r.n);
         else if (r.vote === 'different') differentUsers = Number(r.n);
     }
-
-    // 4. State machine.
     const K = RECOGNITION.vocab.canonicalDistinctUsers;
     let status: 'pending' | 'canonical' | 'similarity' | 'rejected';
-    if (alias.adminVerdict === 'rejected') status = 'rejected';
-    else if (alias.adminVerdict === 'confirmed') status = 'canonical';
-    else if (differentUsers > 0) status = 'rejected';        // 'different' = strong veto
+    if (adminVerdict === 'rejected') status = 'rejected';
+    else if (adminVerdict === 'confirmed') status = 'canonical';
+    else if (differentUsers > 0 && differentUsers >= identicalUsers) status = 'rejected';
     else if (identicalUsers >= K) status = 'canonical';
     else if (similarUsers > 0) status = 'similarity';
     else status = 'pending';
-
     await conn.query(
         `UPDATE StoreProductReceiptAlias SET identicalUsers = ?, similarUsers = ?, differentUsers = ?, status = ? WHERE id = ?`,
         [identicalUsers, similarUsers, differentUsers, status, aliasId],
     );
+}
+
+/**
+ * Record a vote on a pending-alias SWIPE CARD by its alias id (H3 pending-card
+ * surfacing): the user votes on a learned alias directly, not via a receipt line.
+ * Returns the alias's new status (or null if it's gone). Runs in the caller's txn.
+ */
+export async function recordAliasVoteById(
+    aliasId: number,
+    userId: string,
+    vote: AliasVote,
+    conn: Connection,
+): Promise<string | null> {
+    if (!Number.isFinite(aliasId) || !userId) return null;
+    const [rows]: any = await conn.query('SELECT id, adminVerdict FROM StoreProductReceiptAlias WHERE id = ?', [aliasId]);
+    const alias = rows?.[0];
+    if (!alias) return null;
+    await applyAliasVote(aliasId, userId, vote, null, alias.adminVerdict ?? null, conn);
+    const [after]: any = await conn.query('SELECT status FROM StoreProductReceiptAlias WHERE id = ?', [aliasId]);
+    return after?.[0]?.status ?? null;
 }
 
 /**
@@ -107,18 +138,116 @@ export async function recordAliasVote(
  * pending/similarity/rejected aliases never influence name matching.
  */
 export async function fetchCanonicalAliasesByChain(chainId: number): Promise<Map<number, string[]>> {
-    const map = new Map<number, string[]>();
-    if (!Number.isFinite(chainId)) return map;
+    return (await fetchAliasesByChainGrouped(chainId)).canonical;
+}
+
+export interface GroupedAliases {
+    /** Used as ADDITIONAL exact match targets (how the chain prints the SP). */
+    canonical: Map<number, string[]>;
+    /** A 'different'-vetoed (OCR, SP) combo — SUPPRESS re-suggesting that SP for the
+     *  OCR (the no-repeat rule, as a matcher signal). */
+    rejected: Map<number, string[]>;
+    /** A 'similar' = same-category-substitute link — when the query matches one, scope
+     *  matching to that SP's L2 + boost its L3 (the orphan re-matching). */
+    similarity: Map<number, string[]>;
+}
+
+/**
+ * All resolved (non-pending) aliases for a chain, grouped by status, keyed by
+ * storeProductId. One query. Attached to candidates by the chain catalog fetch so the
+ * matcher can use canonical aliases as match targets, rejected ones to suppress, and
+ * similarity ones to category-scope.
+ */
+export async function fetchAliasesByChainGrouped(chainId: number): Promise<GroupedAliases> {
+    const out: GroupedAliases = { canonical: new Map(), rejected: new Map(), similarity: new Map() };
+    if (!Number.isFinite(chainId)) return out;
     const [rows]: any = await pool.query(
-        `SELECT storeProductId, normalizedAlias FROM StoreProductReceiptAlias WHERE chainId = ? AND status = 'canonical'`,
+        `SELECT storeProductId, normalizedAlias, status FROM StoreProductReceiptAlias
+         WHERE chainId = ? AND status IN ('canonical', 'rejected', 'similarity')`,
         [chainId],
     );
     for (const r of rows) {
         const sp = Number(r.storeProductId);
         if (!Number.isFinite(sp)) continue;
+        const m = r.status === 'canonical' ? out.canonical : r.status === 'rejected' ? out.rejected : out.similarity;
+        const list = m.get(sp);
+        if (list) list.push(r.normalizedAlias);
+        else m.set(sp, [r.normalizedAlias]);
+    }
+    return out;
+}
+
+/**
+ * Canonical aliases for a SPECIFIC set of SP ids (not a whole chain). Targeted lookup
+ * used by the vocab-driven queue (H3) to bridge cross-chain identity pairs: how each
+ * chain PRINTS a product often agrees even when the catalog names diverge. Returns
+ * Map<spId, normalizedAlias[]>; empty map for an empty input.
+ */
+export async function fetchCanonicalAliasesForSps(spIds: number[]): Promise<Map<number, string[]>> {
+    const map = new Map<number, string[]>();
+    const ids = [...new Set(spIds.filter((n) => Number.isFinite(n) && n > 0))];
+    if (ids.length === 0) return map;
+    const [rows]: any = await pool.query(
+        `SELECT storeProductId, normalizedAlias FROM StoreProductReceiptAlias
+         WHERE status = 'canonical' AND storeProductId IN (?)`,
+        [ids],
+    );
+    for (const r of rows) {
+        const sp = Number(r.storeProductId);
         const list = map.get(sp);
         if (list) list.push(r.normalizedAlias);
         else map.set(sp, [r.normalizedAlias]);
     }
     return map;
+}
+
+/** A pending-alias swipe card: "is this receipt text the same product as this SP?" */
+export interface PendingAliasCard {
+    aliasId: number;
+    chainId: number;
+    rawSample: string | null;       // the receipt OCR text as printed
+    normalizedAlias: string;
+    occurrences: number;            // how many receipts printed it (surfacing priority)
+    storeProductId: number;
+    storeProductName: string;
+    imageUrl: string | null;
+}
+
+/**
+ * Pending-alias cards for a user to vote on (H3 pending-card surfacing): aliases still
+ * gathering consensus (status='pending') that the user HASN'T voted on yet (the
+ * no-repeat-combo rule), with the SP they point at, most-seen first. `chainId` null =
+ * across all chains. Pure read.
+ */
+export async function fetchPendingAliasCards(
+    userId: string,
+    chainId: number | null,
+    limit: number,
+): Promise<PendingAliasCard[]> {
+    if (!userId) return [];
+    const lim = Math.max(1, Math.min(50, Math.floor(limit) || 10));
+    const chainClause = chainId != null && Number.isFinite(chainId) ? 'AND a.chainId = ?' : '';
+    // Placeholder order: [chainId?], userId (NOT EXISTS), lim (LIMIT).
+    const params = chainClause ? [chainId, userId, lim] : [userId, lim];
+    const [rows]: any = await pool.query(
+        `SELECT a.id AS aliasId, a.chainId, a.rawSample, a.normalizedAlias, a.occurrences,
+                a.storeProductId, sp.storeProductName, sp.imageUrl
+         FROM StoreProductReceiptAlias a
+         JOIN StoreProduct sp ON sp.id = a.storeProductId
+         WHERE a.status = 'pending' ${chainClause}
+           AND NOT EXISTS (SELECT 1 FROM StoreProductReceiptAliasVote v WHERE v.aliasId = a.id AND v.userId = ?)
+         ORDER BY a.occurrences DESC, a.lastSeenAt DESC
+         LIMIT ?`,
+        params,
+    );
+    return rows.map((r: any) => ({
+        aliasId: Number(r.aliasId),
+        chainId: Number(r.chainId),
+        rawSample: r.rawSample ?? null,
+        normalizedAlias: r.normalizedAlias,
+        occurrences: Number(r.occurrences),
+        storeProductId: Number(r.storeProductId),
+        storeProductName: r.storeProductName,
+        imageUrl: r.imageUrl ?? null,
+    }));
 }

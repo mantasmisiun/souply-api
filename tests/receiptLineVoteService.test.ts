@@ -35,14 +35,12 @@ describe('castReceiptLineVote', () => {
         expect(priceUpdate(conn).params[0]).toBe(1); // Price verified
     });
 
-    it('similar → product confirmed (S1) but price NOT verified + variant flagged', async () => {
-        const conn = makeConn({ products: [lineFix()] });
+    it('similar → demotes the line (a same-category substitute is a DIFFERENT product)', async () => {
+        const conn = makeConn({ header: { chainId: 3 }, products: [lineFix({ altMatches: [{ storeProductId: 50, confidence: 0.7 }] })] });
         const line = await castReceiptLineVote(108, 0, 'similar', conn);
-        expect(line.matchConfirmed).toBe(true);
-        expect(line.priceVerified).toBe(false);
-        expect(line.variantUncertain).toBe(true);
-        expect(line.itemConfidence.band).toBe('S1');
-        expect(priceUpdate(conn).params[0]).toBe(0); // Price NOT verified
+        expect(line.storeProductId).toBeNull();
+        expect(line.matchConfirmed).toBe(false);
+        expect(line.itemConfidence.vetoes.some((v: any) => v.reason === 'userRejected')).toBe(true);
     });
 
     it('different → demotes the line (no runner-up → cleared to OCR)', async () => {

@@ -2,7 +2,7 @@ import pool from '../config/db.js';
 import { resolveEffectiveProductId } from '../services/storeProductMergeService.js';
 import { getPersonalComponentForProduct } from './userEquivalenceModel.js';
 import { buildFuzzyNameClause } from '../utils/fuzzyNameClause.js';
-import { fetchCanonicalAliasesByChain } from './storeProductAliasModel.js';
+import { fetchAliasesByChainGrouped } from './storeProductAliasModel.js';
 import type { Locale } from '../middleware/locale.js';
 
 type Connection = typeof pool | any;
@@ -268,16 +268,19 @@ export const getStoreProductsByChainWithProductData = async (chainId: number, lo
          WHERE sp.chainId = ?`,
         [locale, locale, chainId]
     );
-    // Attach CANONICAL receipt-name aliases (Issue H vocabulary) so the matcher can
-    // match the way THIS chain prints each SP, not just its catalog name. Same-chain
+    // Attach learned receipt-name aliases (Issue H vocabulary): canonical (extra match
+    // targets — match the way THIS chain prints each SP), rejected (suppress a known-
+    // wrong combo), similarity (same-category link → L2-scope + L3-boost). Same-chain
     // only — aliases are chain-scoped, so the cross-chain fetcher intentionally omits them.
-    const aliasMap = await fetchCanonicalAliasesByChain(chainId);
+    const grouped = await fetchAliasesByChainGrouped(chainId);
     return rows.map((r: any) => ({
         ...r,
         isWeighable: !!r.isWeighable,
         isCatalog: !!r.isCatalog,
         amount: r.amount !== null ? parseFloat(r.amount) : null,
-        aliases: aliasMap.get(Number(r.id)),
+        aliases: grouped.canonical.get(Number(r.id)),
+        rejectedAliases: grouped.rejected.get(Number(r.id)),
+        similarityAliases: grouped.similarity.get(Number(r.id)),
     }));
 };
 
