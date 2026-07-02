@@ -51,8 +51,10 @@ export const unverifyReceiptLinePrice = async (
 ): Promise<void> => {
     await pool.query(
         `UPDATE Price SET priceVerified = 0
-          WHERE receiptId = ? AND storeProductId = ? AND isFallback = 0`,
-        [receiptId, storeProductId]
+          WHERE isFallback = 0
+            AND (receiptItemId IN (SELECT id FROM ReceiptItem WHERE receiptId = ? AND matchedSpId = ?)
+                 OR (receiptItemId IS NULL AND receiptId = ? AND storeProductId = ?))`,
+        [receiptId, storeProductId, receiptId, storeProductId]
     );
 };
 
@@ -68,7 +70,9 @@ export const setReceiptLinePriceVerified = async (
 ): Promise<void> => {
     await db.query(
         `UPDATE Price SET priceVerified = ?
-          WHERE receiptId = ? AND storeProductId = ? AND isFallback = 0`,
-        [verified ? 1 : 0, receiptId, storeProductId]
+          WHERE isFallback = 0
+            AND (receiptItemId IN (SELECT id FROM ReceiptItem WHERE receiptId = ? AND matchedSpId = ?)
+                 OR (receiptItemId IS NULL AND receiptId = ? AND storeProductId = ?))`,
+        [verified ? 1 : 0, receiptId, storeProductId, receiptId, storeProductId]
     );
 };

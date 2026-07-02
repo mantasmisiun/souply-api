@@ -197,8 +197,11 @@ interface PurchaseEvent {
  * recency-weighted score, median amount and availability per product.
  */
 async function buildSignalsFromReceipts(userId: string, now: number): Promise<PurchaseSignal[]> {
-    // Purchase events live in each receipt's parsedData (Price has no
-    // quantity column). receiptDate gives the purchase recency.
+    // Purchase events live in the ReceiptItem rows since the ReceiptItem cutover —
+    // the stored blob keeps products: [], so a blob-only read would contribute ZERO
+    // events for every post-cutover receipt (the same silent-exclusion class the
+    // getUserStats migration fixed). The blob remains ONLY as the legacy fallback
+    // for receipts that predate the migration (no rows).
     const [receiptRows]: any = await pool.query(
         `SELECT id, receiptDate, parsedData
            FROM Receipt
@@ -208,26 +211,44 @@ async function buildSignalsFromReceipts(userId: string, now: number): Promise<Pu
 
     const events: PurchaseEvent[] = [];
     const spIds = new Set<number>();
-    for (const row of receiptRows as any[]) {
-        let parsed: any;
-        try {
-            parsed = typeof row.parsedData === 'string' ? JSON.parse(row.parsedData) : row.parsedData;
-        } catch {
-            continue;
+    if ((receiptRows as any[]).length > 0) {
+        const [itemRows]: any = await pool.query(
+            `SELECT receiptId, matchedSpId AS storeProductId, quantity
+               FROM ReceiptItem
+              WHERE receiptId IN (?)`,
+            [(receiptRows as any[]).map((r: any) => Number(r.id))],
+        );
+        const itemsByReceipt = new Map<number, any[]>();
+        for (const it of itemRows as any[]) {
+            const list = itemsByReceipt.get(Number(it.receiptId)) ?? [];
+            list.push(it);
+            itemsByReceipt.set(Number(it.receiptId), list);
         }
-        const products = Array.isArray(parsed?.products) ? parsed.products : [];
-        const receiptMs = row.receiptDate ? new Date(row.receiptDate).getTime() : now;
-        for (const line of products) {
-            const spId = Number(line?.storeProductId);
-            if (!Number.isFinite(spId) || spId <= 0) continue;
-            const q = Number(line?.quantity);
-            events.push({
-                spId,
-                receiptId: Number(row.id),
-                receiptMs: Number.isFinite(receiptMs) ? receiptMs : now,
-                quantity: Number.isFinite(q) && q > 0 ? q : 1,
-            });
-            spIds.add(spId);
+
+        for (const row of receiptRows as any[]) {
+            let products: any[] = itemsByReceipt.get(Number(row.id)) ?? [];
+            if (products.length === 0) {
+                // Legacy fallback: pre-migration receipt with no rows.
+                try {
+                    const parsed = typeof row.parsedData === 'string' ? JSON.parse(row.parsedData) : row.parsedData;
+                    products = Array.isArray(parsed?.products) ? parsed.products : [];
+                } catch {
+                    continue;
+                }
+            }
+            const receiptMs = row.receiptDate ? new Date(row.receiptDate).getTime() : now;
+            for (const line of products) {
+                const spId = Number(line?.storeProductId);
+                if (!Number.isFinite(spId) || spId <= 0) continue;
+                const q = Number(line?.quantity);
+                events.push({
+                    spId,
+                    receiptId: Number(row.id),
+                    receiptMs: Number.isFinite(receiptMs) ? receiptMs : now,
+                    quantity: Number.isFinite(q) && q > 0 ? q : 1,
+                });
+                spIds.add(spId);
+            }
         }
     }
     if (spIds.size === 0) return [];

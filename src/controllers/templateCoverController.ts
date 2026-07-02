@@ -32,11 +32,13 @@ const JPEG_QUALITY  = 88;
 
 export const postTemplateCover = async (req: Request, res: Response, next: NextFunction) => {
     try {
-        const { imageBase64, userId: bodyUserId } = req.body ?? {};
-        // TODO: replace with `req.verifiedUser!.id` once OAuth ships.
-        const userId = req.verifiedUser?.id ?? (typeof bodyUserId === 'string' ? bodyUserId.trim() : '');
+        const { imageBase64 } = req.body ?? {};
+        // Identity from the session token (requireUser sets authUserId from a Bearer/cookie,
+        // or the non-prod dev-header shim). The old body userId is ignored — it let anyone
+        // upload into another user's cover namespace.
+        const userId = req.authUserId ?? (req.verifiedUser?.id ? String(req.verifiedUser.id) : '');
         if (!userId) {
-            res.status(400).json({ error: 'userId-required' });
+            res.status(401).json({ error: 'auth-required' });
             return;
         }
         if (typeof imageBase64 !== 'string' || imageBase64.length === 0) {

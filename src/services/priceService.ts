@@ -1,5 +1,6 @@
 import pool from '../config/db.js';
 import { getStoresByChainId } from '../models/storeModel.js';
+import { RECOGNITION } from '../../../shared/recognitionConfig.js';
 
 export interface PropagateItem {
     storeProductId: number;
@@ -30,7 +31,7 @@ export interface PropagateItem {
  */
 export const propagateAllFallbackPrices = async (
     items: PropagateItem[],
-    receiptId: number,
+    receiptId: number | null,
 ): Promise<void> => {
     if (!items.length) return;
 
@@ -56,37 +57,54 @@ export const propagateAllFallbackPrices = async (
     // Query 2: find all existing Price rows for (any of our SPs, any target store).
     // Returns only rows that actually exist — no cross-product explosion.
     const [existingRows]: any = await pool.query(
-        `SELECT id, storeProductId, storeId, isFallback
+        `SELECT id, storeProductId, storeId, isFallback, date
          FROM Price
          WHERE storeProductId IN (?) AND storeId IN (?)`,
         [spIds, targetStoreIds],
     );
 
-    // Index existing rows by "spId:storeId" for O(1) lookup.
-    const existingMap = new Map<string, { id: number; isFallback: number }>();
+    // Index existing rows by "spId:storeId". The UNIQUE key is (sp, store, DATE), so multiple
+    // rows can exist per (sp, store) at different dates. PREFER the row already at receiptDate:
+    // the batch UPDATE below sets date=receiptDate, so choosing an OTHER-dated row would MOVE it
+    // onto receiptDate and collide with the row already there (ER_DUP_ENTRY unique_price — hit
+    // when the same receipt is re-processed at the same date, e.g. the DEV Re-OCR tool). Updating
+    // the at-date row in place is a no-op on the date and can't collide.
+    const receiptDateMs = receiptDate instanceof Date ? receiptDate.getTime() : new Date(receiptDate).getTime();
+    const existingMap = new Map<string, { id: number; isFallback: number; atDate: boolean; dateMs: number }>();
     for (const row of existingRows) {
         const key = `${Number(row.storeProductId)}:${Number(row.storeId)}`;
-        // Keep the first occurrence — there should only be one per (sp, store)
-        // for fallback rows, but UNIQUE is on (sp, store, date) so multiple
-        // can exist with different dates. We update the first fallback found.
-        if (!existingMap.has(key)) {
-            existingMap.set(key, { id: Number(row.id), isFallback: Number(row.isFallback) });
+        const rowMs0 = row.date instanceof Date ? row.date.getTime() : new Date(row.date).getTime();
+        // A missing/unparseable date counts as epoch-old — it must never BLOCK an update.
+        const rowMs = Number.isFinite(rowMs0) ? rowMs0 : -Infinity;
+        const atDate = rowMs === receiptDateMs;
+        const prev = existingMap.get(key);
+        // Take the row at receiptDate when present; otherwise keep the NEWEST row so the
+        // recency guard below compares against the freshest data for this (sp, store).
+        if (!prev || (atDate && !prev.atDate) || (!prev.atDate && rowMs > prev.dateMs)) {
+            existingMap.set(key, { id: Number(row.id), isFallback: Number(row.isFallback), atDate, dateMs: rowMs });
         }
     }
 
+    // Receipt-observed promos expire: promoEnd = receiptDate + validity window (promoEnd
+    // NULL reads as an ETERNAL promo in getActivePromoPrices).
+    const promoEnd = new Date(receiptDateMs + RECOGNITION.price.receiptPromoValidityDays * 24 * 60 * 60 * 1000);
+
     // Classify each planned (spId, storeId) pair.
     const updateRows: { id: number; price: number; promoPrice: number | null }[] = [];
-    const insertRows: [number, number, number, number | null, Date, 1, 0, number][] = [];
+    const insertRows: [number, number, number, number | null, Date | null, Date, 1, 0, number | null][] = [];
 
     for (const spId of spIds) {
         const p = priceBySpId.get(spId)!;
+        const pPromoEnd = p.promoPrice != null ? promoEnd : null;
         for (const storeId of targetStoreIds) {
             const key = `${spId}:${storeId}`;
             const existing = existingMap.get(key);
             if (!existing) {
-                // [storeProductId, storeId, price, promoPrice, date, isFallback, priceVerified, receiptId]
-                insertRows.push([spId, storeId, p.price, p.promoPrice, receiptDate, 1, 0, receiptId]);
-            } else if (existing.isFallback === 1) {
+                // [storeProductId, storeId, price, promoPrice, promoEnd, date, isFallback, priceVerified, receiptId]
+                insertRows.push([spId, storeId, p.price, p.promoPrice, pPromoEnd, receiptDate, 1, 0, receiptId]);
+            } else if (existing.isFallback === 1 && existing.dateMs <= receiptDateMs) {
+                // RECENCY GUARD: an OLDER receipt must never regress a NEWER fallback
+                // observation (nor move its date backwards) — skip stale updates.
                 updateRows.push({ id: existing.id, price: p.price, promoPrice: p.promoPrice });
             }
             // isFallback === 0 → real receipt price, do not overwrite
@@ -103,11 +121,12 @@ export const propagateAllFallbackPrices = async (
             `UPDATE Price
                 SET price      = CASE id ${priceCase} END,
                     promoPrice = CASE id ${promoPriceCase} END,
+                    promoEnd   = CASE WHEN CASE id ${promoPriceCase} END IS NULL THEN NULL ELSE ? END,
                     date       = ?,
                     receiptId  = ?,
                     priceVerified = 0
               WHERE id IN (?)`,
-            [receiptDate, receiptId, ids],
+            [promoEnd, receiptDate, receiptId, ids],
         );
     }
 
@@ -117,11 +136,12 @@ export const propagateAllFallbackPrices = async (
     if (insertRows.length > 0) {
         await pool.query(
             `INSERT INTO Price
-               (storeProductId, storeId, price, promoPrice, date, isFallback, priceVerified, receiptId)
+               (storeProductId, storeId, price, promoPrice, promoEnd, date, isFallback, priceVerified, receiptId)
              VALUES ?
              ON DUPLICATE KEY UPDATE
                price         = VALUES(price),
                promoPrice    = VALUES(promoPrice),
+               promoEnd      = VALUES(promoEnd),
                isFallback    = VALUES(isFallback),
                priceVerified = VALUES(priceVerified),
                receiptId     = VALUES(receiptId)`,
@@ -145,6 +165,8 @@ export const propagateFallbackPrices = async (
 ): Promise<void> => {
     await propagateAllFallbackPrices(
         [{ storeProductId, storeId: sourceStoreId, chainId, price, promoPrice, date }],
-        receiptId ?? 0,
+        // null passes through — coercing to 0 violated the Price→Receipt FK and broke
+        // the manual-price fan-out.
+        receiptId,
     );
 };

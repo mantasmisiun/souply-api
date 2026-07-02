@@ -26,6 +26,8 @@ import {
     getShareTokenByToken,
     markShareTokenClaimed,
 } from '../models/shoppingListShareTokenModel.js';
+import { getBasketOwnerId } from '../models/basketModel.js';
+import { getReceiptOwnerId } from '../models/receiptModel.js';
 
 /**
  * POST /api/shopping-lists
@@ -42,14 +44,29 @@ import {
  */
 export const addShoppingList = async (req: Request, res: Response, next: NextFunction) => {
     try {
-        const { userId, storeId, basketId, items, savingsEur } = req.body ?? {};
-        if (!userId || !storeId) {
-            res.status(400).json({ error: 'User ID and Store ID are required' });
+        const { storeId, basketId, items, savingsEur } = req.body ?? {};
+        const userId = req.authUserId; // token subject; body userId ignored
+        if (!userId) {
+            res.status(401).json({ error: 'auth-required' });
+            return;
+        }
+        if (!storeId) {
+            res.status(400).json({ error: 'Store ID is required' });
             return;
         }
         if (items !== undefined && !Array.isArray(items)) {
             res.status(400).json({ error: 'items must be an array' });
             return;
+        }
+        // When creating a list FROM a basket, the caller must own that basket — otherwise
+        // supplying someone else's basketId flips their basket to 'inProgress' and reads
+        // its template. (The list routes have no basket-owner middleware; check inline.)
+        if (basketId) {
+            const basketOwner = await getBasketOwnerId(Number(basketId));
+            if (basketOwner !== null && basketOwner !== userId) {
+                res.status(403).json({ error: 'forbidden' });
+                return;
+            }
         }
 
         // Duplicate-per-basket guard. The DB also enforces this, but a
@@ -234,6 +251,17 @@ export const linkReceiptToShoppingList = async (req: Request, res: Response, nex
             res.status(404).json({ error: 'Shopping list not found' });
             return;
         }
+        // List membership is already enforced by middleware; ALSO require the caller to own
+        // the receipt they're attaching, so a member can't link someone else's receipt.
+        const receiptOwner = await getReceiptOwnerId(receiptId);
+        if (receiptOwner === null) {
+            res.status(404).json({ error: 'Receipt not found' });
+            return;
+        }
+        if (receiptOwner !== req.authUserId) {
+            res.status(403).json({ error: 'forbidden' });
+            return;
+        }
         await linkReceiptToList(receiptId, id);
         res.json({ success: true });
     } catch (error) {
@@ -279,7 +307,7 @@ export const removeShoppingList = async (req: Request, res: Response, next: Next
 export const createListShareToken = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const listId = Number(req.params.id);
-        const { userId } = req.body ?? {};
+        const userId = req.authUserId; // token subject
         if (isNaN(listId) || !userId) {
             res.status(400).json({ error: 'Invalid list ID or missing userId' });
             return;
@@ -341,7 +369,7 @@ export const getShareTokenStatus = async (req: Request, res: Response, next: Nex
 export const claimShareToken = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const token = String(req.params.token);
-        const { userId } = req.body ?? {};
+        const userId = req.authUserId; // token subject
         if (!userId) {
             res.status(400).json({ error: 'Missing userId' });
             return;
@@ -386,7 +414,7 @@ export const claimShareToken = async (req: Request, res: Response, next: NextFun
 export const duplicateList = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const id = Number(req.params.id);
-        const { userId } = req.body;
+        const userId = req.authUserId; // token subject
         if (isNaN(id) || !userId) {
             res.status(400).json({ error: 'Invalid ID or missing userId' });
             return;

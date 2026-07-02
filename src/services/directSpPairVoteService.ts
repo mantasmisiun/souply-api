@@ -14,7 +14,7 @@
 import pool from '../config/db.js';
 import { MatchThresholds } from '../config/matchThresholds.js';
 import {
-    applyAggregateDelta,
+    applyVoteTransitionDeltas,
     countRecentVotes,
     getMatchAggregate,
     orderPair,
@@ -65,6 +65,28 @@ export const castDirectSpPairVote = async (
         // post-commit call fires on BOTH commit paths below (burst + non-burst)
         // so bursts still earn their point.
 
+        // The vote ROW is written for burst votes too (aggregated=0): without it the
+        // no-repeat rule never sees the card (it loops forever), the per-minute rate
+        // limit never accrues (points farmable by flick-swiping), and the DEV learning
+        // reset can't find the vote. Only the aggregate/equivalence/merge SIGNAL is
+        // burst-gated. The real receiptId is recorded so the reset covers these votes.
+        const { previousVote, previousAggregated } = await upsertMatchVote(
+            input.userId,
+            pair.spIdA,
+            pair.spIdB,
+            input.vote,
+            input.dwellMs,
+            input.receiptId ?? null,
+            !burst,
+            connection,
+        );
+        await applyVoteTransitionDeltas(
+            pair.spIdA, pair.spIdB,
+            previousVote, previousAggregated,
+            burst ? null : input.vote,
+            connection,
+        );
+
         if (!burst) {
             // Personal equivalence so the user's browse + product detail merge
             // immediately — same mapping slot2 uses: identical|similar → 'same'
@@ -75,23 +97,6 @@ export const castDirectSpPairVote = async (
                 input.vote === 'identical' || input.vote === 'similar' ? 'same' : 'different';
             await upsertEquivalence(input.userId, pair.spIdA, pair.spIdB, equivalenceVerdict, connection);
 
-            const { previousVote } = await upsertMatchVote(
-                input.userId,
-                pair.spIdA,
-                pair.spIdB,
-                input.vote,
-                input.dwellMs,
-                null,
-                connection,
-            );
-
-            if (previousVote !== null && previousVote !== input.vote) {
-                await applyAggregateDelta(pair.spIdA, pair.spIdB, previousVote, -1, connection);
-            }
-            if (previousVote !== input.vote) {
-                await applyAggregateDelta(pair.spIdA, pair.spIdB, input.vote, +1, connection);
-            }
-
             const [productIdA, productIdB] = await Promise.all([
                 getProductIdForStoreProduct(pair.spIdA, connection),
                 getProductIdForStoreProduct(pair.spIdB, connection),
@@ -100,7 +105,8 @@ export const castDirectSpPairVote = async (
             await applyBaseProductLinkForVote(
                 pair.spIdA,
                 pair.spIdB,
-                previousVote,
+                // Only an APPLIED previous vote is subtracted from the link tally.
+                previousAggregated ? previousVote : null,
                 input.vote,
                 connection,
                 productIdA,

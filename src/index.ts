@@ -12,6 +12,8 @@ import storeProductRoutes from './routes/storeProductRoutes.js';
 import priceRoutes from './routes/priceRoutes.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { resolveLocale } from './middleware/locale.js';
+import { versionGate } from './middleware/versionGate.js';
+import appRoutes from './routes/appRoutes.js';
 import userRoutes from './routes/userRoutes.js';
 import basketRoutes from './routes/basketRoutes.js';
 import basketItemRoutes from './routes/basketItemRoutes.js';
@@ -33,6 +35,7 @@ import { signupLimiter, publicLimiter } from './middleware/rateLimit.js';
 import swaggerUi from 'swagger-ui-express';
 import swaggerSpec from './config/swagger.js';
 import { refreshDiscountedSummary } from './models/productModel.js';
+import { startVersionTelemetry } from './services/versionTelemetry.js';
 import { Sentry } from './config/sentry.js';
 
 const app = express();
@@ -86,6 +89,12 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));
 app.use(resolveLocale);
 
+// Client version gate — reads X-Client-Platform/Version and 426s a build strictly below the
+// hard floor (or flags a soft nudge via header). FAIL-OPEN + exempts version-check/health,
+// so it can never brick existing installs. Runs before the routers so every /api path is
+// gated uniformly. See middleware/versionGate.ts + roadmap project_roadmap_version_gating.
+app.use(versionGate);
+
 // Per-IP rate limits on the public, unauthenticated endpoints (registered
 // before the routers so they run first). Strict on the beta-signup form,
 // moderate on the geocode proxy and OAuth sign-in.
@@ -93,6 +102,7 @@ app.use('/api/beta-signups', signupLimiter);
 app.use('/api/geocode', publicLimiter);
 app.use('/api/auth/oauth', publicLimiter);
 
+app.use('/api', appRoutes);
 app.use('/api', storeRoutes);
 app.use('/api', categoryRoutes);
 app.use('/api', productRoutes);
@@ -183,6 +193,7 @@ if (process.env.NODE_ENV !== 'test') {
     app.listen(PORT, () => {
         console.log(`Server running on port ${PORT}`);
         refreshDiscountedSummary().catch(e => console.error('[Startup] Discounts summary refresh failed:', e.message));
+        startVersionTelemetry(); // periodic flush of the client-version distribution buffer
     });
 
     // Scheduler (store scrapers, discount-refresh cron, daily Telegram digest)

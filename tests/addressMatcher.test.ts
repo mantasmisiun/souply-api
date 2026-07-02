@@ -1,4 +1,4 @@
-import { normalizeAddress, levenshtein, findBestStoreMatch } from '../src/utils/addressMatcher.js';
+import { normalizeAddress, levenshtein, findBestStoreMatch, extractCity, citySimilarity } from '../src/utils/addressMatcher.js';
 
 // ---------------------------------------------------------------------------
 // normalizeAddress
@@ -146,5 +146,68 @@ describe('findBestStoreMatch', () => {
         const result = findBestStoreMatch('Taikos g. 5, Vilnius', stores);
         expect(result!.confidence).toBeGreaterThanOrEqual(0);
         expect(result!.confidence).toBeLessThanOrEqual(1);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// extractCity / citySimilarity
+// ---------------------------------------------------------------------------
+
+describe('extractCity', () => {
+    it('extracts the city after the last comma, folded to ASCII letters', () => {
+        expect(extractCity('Vilniaus g. 128-2, Šiauliai')).toBe('siauliai');
+        expect(extractCity('Vilniaus g.62, Ukmergė')).toBe('ukmerge');
+    });
+    it('folds an OCR-garbled city the same way', () => {
+        expect(extractCity("Vilniaus g. l 2, Siau'iai")).toBe('siauiai');
+    });
+    it('returns empty string when the address has no city (no comma)', () => {
+        expect(extractCity('LYROS G. 5A')).toBe('');
+        expect(extractCity('')).toBe('');
+    });
+});
+
+describe('citySimilarity', () => {
+    it('scores a garbled-but-correct city high and a different city low', () => {
+        expect(citySimilarity('siauiai', 'siauliai')).toBeGreaterThan(0.8);
+        expect(citySimilarity('siauiai', 'ukmerge')).toBeLessThan(0.4);
+    });
+    it('treats an OCR-truncated city as a full match via the prefix bonus', () => {
+        expect(citySimilarity('siau', 'siauliai')).toBe(1);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// findBestStoreMatch — city gate (receipt-206 regression)
+// ---------------------------------------------------------------------------
+
+describe('findBestStoreMatch city gate', () => {
+    // A chain reuses "Vilniaus g." across towns; a garbled house number leaves the
+    // Šiauliai receipt's street 1 edit from the Ukmergė branch.
+    const ikiStores = [
+        { id: 420, address: 'Vilniaus g.62, Ukmergė' },
+        { id: 438, address: 'Vilniaus g. 128-2, Šiauliai' },
+        { id: 358, address: 'Lyros g. 5A, Šiauliai' },
+    ];
+
+    it('picks the correct-city store even when a wrong-city street scores better', () => {
+        const result = findBestStoreMatch("Vilniaus g. l 2, Siau'iai", ikiStores);
+        expect(result).not.toBeNull();
+        expect(result!.store.id).toBe(438); // Šiauliai, not Ukmergė
+    });
+
+    it('without the gate (cityGate=0) the wrong-city branch wins — documents the bug', () => {
+        const result = findBestStoreMatch("Vilniaus g. l 2, Siau'iai", ikiStores, 0.3, 0);
+        expect(result!.store.id).toBe(420); // Ukmergė — the pre-gate behaviour
+    });
+
+    it('street-only OCR (no city) is unaffected by the gate', () => {
+        const result = findBestStoreMatch('Vilniaus g.62', ikiStores);
+        expect(result!.store.id).toBe(420); // no city to gate on → street match stands
+    });
+
+    it('rejects everything (null) when the OCR city matches no store town', () => {
+        const result = findBestStoreMatch('Vilniaus g. 5, Klaipėda', ikiStores);
+        expect(result).toBeNull();
     });
 });

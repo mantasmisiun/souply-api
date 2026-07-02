@@ -1,9 +1,18 @@
 import type { Connection } from 'mysql2/promise';
 import { computeItemConfidence } from './itemConfidence.js';
 import { RECOGNITION } from '../../../shared/recognitionConfig.js';
-import { createProduct } from '../models/productModel.js';
-import { createStoreProduct } from '../models/storeProductModel.js';
-import { getUnassignedCategoryId } from './receiptLineResolver.js';
+import { syncReceiptItemMatchState, itemToLine } from '../models/receiptItemModel.js';
+
+/** The receipt's chainId from the blob header (still present; products[] no longer are). */
+async function getReceiptChainId(receiptId: number, conn: Connection): Promise<number> {
+    const [rows]: any = await conn.query('SELECT parsedData FROM Receipt WHERE id = ?', [receiptId]);
+    const raw = rows?.[0]?.parsedData;
+    if (!raw) return NaN;
+    try {
+        const p = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        return Number(p?.header?.chainId);
+    } catch { return NaN; }
+}
 
 /**
  * Demote a receipt line whose PRIMARY match identity the user rejected.
@@ -33,23 +42,20 @@ export async function demoteRejectedReceiptLine(
     spB: number,
     conn: Connection,
 ): Promise<boolean> {
-    const [rows]: any = await conn.query('SELECT parsedData FROM Receipt WHERE id = ? FOR UPDATE', [receiptId]);
-    const raw = rows?.[0]?.parsedData;
-    if (!raw) return false;
-    let parsed: any;
-    try {
-        parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
-    } catch {
-        return false;
-    }
-    const products = parsed?.products;
-    if (!Array.isArray(products)) return false;
-    const chainId = Number(parsed?.header?.chainId);
+    // Find the ReceiptItem row(s) whose match is one of the rejected pair (source of truth),
+    // FOR UPDATE. chainId from the receipt header (blob no longer carries products[]). The
+    // demotion is a single-row UPDATE, not a whole-blob rewrite.
+    const [itemRows]: any = await conn.query(
+        'SELECT * FROM ReceiptItem WHERE receiptId = ? AND matchedSpId IN (?, ?) ORDER BY lineIdx ASC FOR UPDATE',
+        [receiptId, spA, spB],
+    );
+    if (!itemRows?.length) return false;
+    const chainId = await getReceiptChainId(receiptId, conn);
 
-    for (const line of products) {
+    for (const row of itemRows) {
+        const line = itemToLine(row);
         const lineSp = Number(line?.storeProductId);
         if (!Number.isFinite(lineSp) || lineSp <= 0) continue;
-        if (lineSp !== spA && lineSp !== spB) continue;
         const other = lineSp === spA ? spB : spA;
         const alts = Array.isArray(line.altMatches) ? line.altMatches : [];
         const top = alts[0];
@@ -60,7 +66,7 @@ export async function demoteRejectedReceiptLine(
         if (!top || Number(top.storeProductId) !== other || lineSp === Number(top.storeProductId)) continue;
 
         await applyDemotion(receiptId, line, /* rejectedSpId */ other, lineSp, alts, chainId, conn);
-        await conn.query('UPDATE Receipt SET parsedData = ? WHERE id = ?', [JSON.stringify(parsed), receiptId]);
+        await syncReceiptItemMatchState(receiptId, Number(row.lineIdx), line, conn);
         return true;
     }
     return false;
@@ -76,23 +82,18 @@ export async function demoteReceiptLineDirect(
     lineIdx: number,
     conn: Connection,
 ): Promise<any | null> {
-    const [rows]: any = await conn.query('SELECT parsedData FROM Receipt WHERE id = ? FOR UPDATE', [receiptId]);
-    const raw = rows?.[0]?.parsedData;
-    if (!raw) return null;
-    let parsed: any;
-    try {
-        parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
-    } catch {
-        return null;
-    }
-    const line = parsed?.products?.[lineIdx];
-    if (!line) return null;
+    // Read the line from its ReceiptItem row (source of truth) FOR UPDATE; chainId from the
+    // receipt header. Single-row UPDATE, no whole-blob rewrite.
+    const [itemRows]: any = await conn.query('SELECT * FROM ReceiptItem WHERE receiptId = ? AND lineIdx = ? FOR UPDATE', [receiptId, lineIdx]);
+    const row = itemRows?.[0];
+    if (!row) return null;
+    const line = itemToLine(row);
     const lineSp = Number(line.storeProductId);
     if (!Number.isFinite(lineSp) || lineSp <= 0) return null; // nothing matched to reject
     const alts = Array.isArray(line.altMatches) ? line.altMatches : [];
 
-    await applyDemotion(receiptId, line, /* rejectedSpId */ lineSp, lineSp, alts, Number(parsed?.header?.chainId), conn);
-    await conn.query('UPDATE Receipt SET parsedData = ? WHERE id = ?', [JSON.stringify(parsed), receiptId]);
+    await applyDemotion(receiptId, line, /* rejectedSpId */ lineSp, lineSp, alts, await getReceiptChainId(receiptId, conn), conn);
+    await syncReceiptItemMatchState(receiptId, lineIdx, line, conn);
     return line; // the mutated line, so the caller can return it for an instant UI update
 }
 
@@ -149,61 +150,21 @@ async function applyDemotion(
         }
     }
 
-    // No same-chain runner-up. Decision 5: rather than discard the data, mint a fresh
-    // QUARANTINED ORPHAN — its own uncategorised Product + SP, KEEPING the price but
-    // excluded from comparison (a lone orphan has no peers) until swipes give it a
-    // category + peers. A garbled / price≤0 line still creates NOTHING (the poisoning
-    // guard) and clears to OCR below.
-    const ocrName = typeof line.name === 'string' && line.name.trim() ? line.name.trim() : '?';
-    const linePrice = Number(line.price);
-    if (Number.isFinite(chainId) && chainId > 0 && Number.isFinite(linePrice) && linePrice > 0) {
-        try {
-            const categoryId = await getUnassignedCategoryId(conn);
-            const productId = await createProduct(categoryId, null, ocrName, conn);
-            const newSpId = await createStoreProduct(
-                productId,
-                chainId,
-                ocrName,
-                null,
-                !!line.isWeighable,
-                Number.isFinite(line.amount) ? Number(line.amount) : null,
-                typeof line.sizeUnit === 'string' ? line.sizeUnit : (typeof line.unit === 'string' ? line.unit : null),
-                null,
-                conn,
-            );
-            // Move the recorded price onto the orphan, UNVERIFIED (a lone orphan can't
-            // be compared, so it can never pollute comparisons — yet the data isn't lost).
-            await conn.query(
-                'UPDATE Price SET storeProductId = ?, priceVerified = 0 WHERE receiptId = ? AND storeProductId = ? AND isFallback = 0',
-                [newSpId, receiptId, lineSp],
-            );
-            line.storeProductId = newSpId;
-            line.matchedName = null;
-            line.storeProductImageUrl = null;
-            line.matchConfidence = null;
-            line.matchConfirmed = false;
-            line.priceVerified = false;
-            // Fresh quarantined orphan = uncategorised; clear any prior line category
-            // so the summary buckets it as Neatpažinta.
-            line.categoryId = null;
-            line.categoryName = null;
-            line.categoryL2Name = null;
-            line.itemConfidence = computeItemConfidence({
-                nameConf: null,
-                nameText: ocrName,
-                priceVerified: false,
-                viaPromo: false,
-                gapToRunnerUp: 0,
-                source: 'created',
-                priceImplausible: false,
-            });
-            return;
-        } catch {
-            // Any mint failure → fall through to the OCR-clear below (fail-safe).
-        }
+    // No same-chain runner-up. NO-MINT (P3): the receipt never creates an SP/Product. Mark
+    // the rejected match's Price UNVERIFIED so a wrong match can't pollute comparison, then
+    // fall through to OCR-only below. (Previously this minted a quarantined orphan SP to carry
+    // the price; under the no-mint policy the observation lives on the ReceiptItem instead.)
+    if (Number.isFinite(chainId) && chainId > 0 && Number.isFinite(Number(line.price)) && Number(line.price) > 0) {
+        await conn.query(
+            `UPDATE Price SET priceVerified = 0
+              WHERE isFallback = 0
+                AND (receiptItemId IN (SELECT id FROM ReceiptItem WHERE receiptId = ? AND matchedSpId = ?)
+                     OR (receiptItemId IS NULL AND receiptId = ? AND storeProductId = ?))`,
+            [receiptId, lineSp, receiptId, lineSp],
+        );
     }
 
-    // Fall back to OCR-only + userRejected veto (garbled price, no chain, or mint failed).
+    // Fall back to OCR-only + userRejected veto (garbled price, no chain, no runner-up).
     line.storeProductId = null;
     line.matchedName = null;
     line.storeProductImageUrl = null;

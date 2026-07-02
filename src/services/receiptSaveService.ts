@@ -22,6 +22,9 @@ import { computeItemConfidence, type ItemConfidenceInput } from './itemConfidenc
 import { computeNeedsHuman } from './queueRanking.js';
 import { isMislabeledWeighableKg } from '../utils/productMatcher.js';
 import { getStoreProductDisplayById } from '../models/storeProductModel.js';
+import { replaceReceiptItems, updateReceiptItem } from '../models/receiptItemModel.js';
+import { stripProductRawText } from '../util/receiptPII.js';
+import { countFailOpen } from './failOpenMetrics.js';
 
 const MAX_CANDIDATES_PER_LINE = RECOGNITION.price.maxCandidatesPerLine;
 
@@ -254,11 +257,23 @@ export const persistReceiptPrices = async (
                         linePrice !== null && linePrice > 0, // allowCreate
                     );
                     if (res.storeProductId == null) {
-                        // skipped_unpriced — leave the line UNMATCHED (it still shows
-                        // on the receipt, but links to nothing and writes no price).
-                        resolveSourceByLine.set(i, 'skipped_unpriced');
+                        // 'unmatched' (no-mint: nothing in the catalog matched) or
+                        // 'skipped_unpriced' (no usable price — OCR too garbled to trust).
+                        // Either way the line links to NOTHING: record the resolver's TRUE
+                        // reason, and NULL the app/round-1 pick — leaving it on the line
+                        // would persist a stale (possibly cross-chain) SP id into
+                        // ReceiptItem.matchedSpId on a line whose source says unmatched.
+                        resolveSourceByLine.set(i, res.source);
+                        line.storeProductId = null;
                         line.matchConfirmed = false;
-                        if (input.products[i]) input.products[i].matchConfirmed = false;
+                        line.matchedName = null;
+                        line.storeProductImageUrl = null;
+                        if (input.products[i]) {
+                            input.products[i].storeProductId = null;
+                            input.products[i].matchConfirmed = false;
+                            input.products[i].matchedName = null;
+                            input.products[i].storeProductImageUrl = null;
+                        }
                         continue;
                     }
                     resolveSourceByLine.set(i, res.source);
@@ -296,7 +311,24 @@ export const persistReceiptPrices = async (
                         );
                     }
                 } catch (e) {
-                    console.warn(`Failed to resolve receipt line ${i}:`, e);
+                    // FAIL TO UNMATCHED, not to client state: a resolver throw must NOT leave the
+                    // client-supplied (possibly cross-chain / stale) storeProductId on the line —
+                    // that would persist into ReceiptItem.matchedSpId and write a Price under the
+                    // wrong SP, violating the never-write-a-wrong-chain-price invariant. Scrub the
+                    // match so the line is recorded as an unmatched observation.
+                    countFailOpen('resolver-line');
+                    console.warn(`Failed to resolve receipt line ${i} — failing to unmatched:`, e);
+                    resolveSourceByLine.set(i, 'unmatched');
+                    line.storeProductId = null;
+                    line.matchConfirmed = false;
+                    line.matchedName = null;
+                    line.storeProductImageUrl = null;
+                    if (input.products[i]) {
+                        input.products[i].storeProductId = null;
+                        input.products[i].matchConfirmed = false;
+                        input.products[i].matchedName = null;
+                        input.products[i].storeProductImageUrl = null;
+                    }
                 }
             }
         }
@@ -353,10 +385,28 @@ export const persistReceiptPrices = async (
             const repicked = r2Result?.repicked ?? new Map();
             const rejected = r2Result?.rejected ?? new Set<number>();
             const rows: string[] = [];
+            // Log 5 — per-receipt band roll-up (derived from the itemConfidence bands +
+            // needsHuman already computed above; no new logic). One glance headline: how
+            // many lines auto-applied, how many will become cards, how many feed vocab.
+            let nS1 = 0, nS2 = 0, nS3 = 0, nOrphan = 0, nNoMatch = 0, nWillCard = 0, nVocab = 0;
             for (let i = 0; i < parsedData.products.length; i++) {
                 const line = parsedData.products[i];
                 const spId = Number.isFinite(line?.storeProductId) ? Number(line.storeProductId) : null;
-                if (spId === null || spId <= 0) continue;
+                // Roll-up tally — counts EVERY line (incl. no-match) before the match-row skip.
+                const mc = Number(line?.matchConfidence);
+                const hasName = typeof line?.matchedName === 'string' && line.matchedName.trim().length > 0;
+                const icBand = (line as any)?.itemConfidence?.band;
+                if (spId !== null && spId > 0 && (!Number.isFinite(mc) || mc < RECOGNITION.match.autoApplyThreshold)) nVocab++;
+                if (spId === null || spId <= 0) { nNoMatch++; continue; }
+                // Partition (each line counted once): no-match | orphan (SP, no catalog
+                // name) | band S1/S2/S3 (matched to a named SP). Orphans always carry a
+                // low band too, so keep them OUT of the band buckets to avoid double count.
+                if (!hasName) {
+                    nOrphan++;
+                } else {
+                    if (icBand === 'S1') nS1++; else if (icBand === 'S2') nS2++; else if (icBand === 'S3') nS3++;
+                    if ((icBand === 'S2' || icBand === 'S3') && (Number(line?.needsHuman) || 0) > 0) nWillCard++;
+                }
                 const alt = Array.isArray(line?.altMatches) ? line.altMatches : [];
                 const chosen = alt.find((am: any) => Number(am?.storeProductId) === spId);
                 const conf = chosen && Number.isFinite(chosen.confidence) ? Number(chosen.confidence).toFixed(2) : '—';
@@ -376,9 +426,15 @@ export const persistReceiptPrices = async (
                     rows.push(`  #${i + 1} match          "${name}" → SP ${spId}  (name ${conf})${band}`);
                 }
             }
+            // Mint count this scan (resolver source 'created' = a NEW SP was minted). Per-SP
+            // detail — uncategorised vs catalog-clustered — is in the [ORPHAN] lines above.
+            let nMinted = 0;
+            for (const s of resolveSourceByLine.values()) if (s === 'created') nMinted++;
             console.log(
                 `=== RECEIPT ${receiptId} MATCH SUMMARY (chain ${input.chainId}): ` +
                 `${perfect.size} perfect / ${repicked.size} repicked / ${rejected.size} price-rejected / ${rows.length} matched ===` +
+                `\n  bands: S1 ${nS1} · S2 ${nS2} · S3 ${nS3} · orphan ${nOrphan} · no-match ${nNoMatch}` +
+                `\n  → will card ${nWillCard} (S2/S3 needing human) · vocabulary-eligible (struggled) ${nVocab} · minted ${nMinted} new SP(s)` +
                 (rows.length ? `\n${rows.join('\n')}` : ''),
             );
         }
@@ -388,12 +444,39 @@ export const persistReceiptPrices = async (
             normalizedReceiptNos,
             normalizedReceiptDate,
             'completed',
-            parsedData,
+            // The blob keeps only STRUCTURED header + footer + geometry: the per-line
+            // products[] now live in ReceiptItem (dual-written just below, from the in-memory
+            // copy), and stripProductRawText drops the header/footer rawText dumps that
+            // duplicated the whole receipt's product text (now in ReceiptItem.rawLines).
+            stripProductRawText({ ...parsedData, products: [] }),
             connection
         );
         if (input.storeId) {
             await updateReceiptStore(receiptId, input.storeId, connection);
         }
+
+        // Dual-write ReceiptItem rows (P1 of the ReceiptItem migration — see
+        // shared/RECEIPT_ITEM_MIGRATION.md). The blob stays the READ source until the hard
+        // cutover; the rows are kept in lock-step via the SAME canonical lineToItem mapping
+        // the backfill uses, so a live save and a backfill produce identical rows. matchSource
+        // is injected from the resolver result WITHOUT polluting the blob. Non-fatal: a row
+        // write must never fail the save while the blob is still authoritative.
+        // ReceiptItem rows are AUTHORITATIVE post-cutover (the blob stores products: []),
+        // so a failed row write must FAIL the save — swallowing it here would commit the
+        // DELETE half of the replace and permanently empty the receipt's items while the
+        // client believes the save succeeded. The whole transaction rolls back instead.
+        let itemIdByLine = new Map<number, number>(); // lineIdx → ReceiptItem id, to stamp Price.receiptItemId
+        const itemLines = (parsedData?.products ?? []).map((line: any, i: number) => {
+            // manualMatch is a CLIENT-ONLY marker (consumed by applyReceiptAutosave's merge);
+            // persisting it would ride lineToItem's `extra` catch-all and echo back to every
+            // reader, leaving the autosave guard dependent on the app dropping it.
+            const { manualMatch: _clientOnly, ...rest } = line ?? {};
+            return {
+                ...rest,
+                matchSource: resolveSourceByLine.get(i) ?? line.matchSource ?? null,
+            };
+        });
+        itemIdByLine = (await replaceReceiptItems(receiptId, itemLines, connection)) ?? itemIdByLine;
 
         // Swipe candidates must be written whether or not a store matched —
         // Phase C's swipe UI still wants to offer validation for unmatched
@@ -506,7 +589,8 @@ export const persistReceiptPrices = async (
             for (const [sp, e] of bySp) if (e.count >= 2 && e.regular && e.discounted) mixedDealSpIds.add(sp);
         }
 
-        for (const item of input.products) {
+        for (let lineIdx = 0; lineIdx < input.products.length; lineIdx++) {
+            const item = input.products[lineIdx];
             if (!item.matchConfirmed || !item.storeProductId) {
                 result.skippedNoMatch++;
                 continue;
@@ -555,13 +639,18 @@ export const persistReceiptPrices = async (
                 input.storeId,
                 item.price,
                 writePromo,
-                null,
+                // A receipt-observed promo expires: promoEnd NULL reads as an ETERNAL
+                // promo in getActivePromoPrices, discounting comparisons forever.
+                writePromo != null
+                    ? new Date(writeDate.getTime() + RECOGNITION.price.receiptPromoValidityDays * 24 * 60 * 60 * 1000)
+                    : null,
                 false,
                 writeDate,
                 item.priceVerified === true,
                 receiptId,
                 false,
-                connection
+                connection,
+                itemIdByLine.get(lineIdx) ?? null, // Price.receiptItemId — links the price to its exact line
             );
             // Update latestMap so within-receipt duplicates of the same SP
             // (e.g. parser bug generating 85 bands for one product, OR a mixed-deal
@@ -594,12 +683,15 @@ export const persistReceiptPrices = async (
         }
 
         // Compute savings: delta between receipt prices and cross-chain market average.
-        // Only counts items that were successfully matched to a StoreProduct.
+        // Only counts items that were successfully matched to a StoreProduct. Uses the
+        // price the user actually PAID (promo when set) — the same convention the
+        // profile's totalSavings (getUserStats) applies, so the receipt header and the
+        // profile can't diverge on discounted items.
         const matchedItems = input.products
             .filter(p => p.matchConfirmed && p.storeProductId && p.price > 0)
             .map(p => ({
                 storeProductId: p.storeProductId!,
-                price: p.price,
+                price: p.promoPrice != null && p.promoPrice > 0 && p.promoPrice < p.price ? p.promoPrice : p.price,
                 quantity: p.quantity || 1,
             }));
         const savedAmount = await computeReceiptSavings(matchedItems, connection);
@@ -667,6 +759,7 @@ export const persistReceiptPrices = async (
                     }
                 }
             } catch (e) {
+                countFailOpen('orphan-refill');
                 console.warn('OrphanSwipeCandidate refill failed:', e);
             }
         })();
@@ -700,10 +793,277 @@ export const persistReceiptPrices = async (
                     await propagateAllFallbackPrices(eligible, receiptId);
                 }
             } catch (e) {
+                countFailOpen('fallback-propagation');
                 console.warn('Fallback propagation failed:', e);
             }
         })();
     }
 
     return result;
+};
+
+/**
+ * NON-DESTRUCTIVE autosave for `PUT /receipts/:id` (the client's debounced edit save).
+ *
+ * The old behavior routed autosaves through the FULL persistReceiptPrices pipeline, which
+ * re-ran Round-2 + the resolver and DELETE+INSERTed every ReceiptItem row — cascading away
+ * the receipt's Price rows (Price.receiptItemId is ON DELETE CASCADE) and overwriting
+ * server-owned vote state (matchConfirmed / priceVerified flips from swipes, Card-B
+ * demotions, reject-match vetoes) with the client's STALE blob copy on every keystroke's
+ * debounce. This function replaces that with an ownership-aware MERGE:
+ *
+ *   CLIENT-OWNED (always merged): header/footer blob, storeId, and per-line content the
+ *     user can edit — name, price, promoPrice, quantity, unit. A price/promo edit also
+ *     updates the line's OWN Price row in place (same row id — no cascade, no re-mint).
+ *   CLIENT-OWNED WHEN EXPLICIT (merged only when the line carries `manualMatch: true`,
+ *     set by the app's manual-rematch flow): matchedSpId + display fields. A stale line
+ *     WITHOUT the marker can never re-adjudicate a match — so the initial-save Round-2
+ *     repicks, swipe votes, and reject-match vetoes all survive autosaves.
+ *   SERVER-OWNED (never touched here): matchConfirmed/priceVerified vote state, bands,
+ *     matchSource, swipe candidates, the mandatory-swipe session, points, propagation.
+ *
+ * Lines are matched by lineIdx; autosave never creates or deletes lines. Receipts with NO
+ * ReceiptItem rows (pre-migration, un-backfilled) fall back to the legacy full save.
+ */
+export const applyReceiptAutosave = async (
+    receiptId: number,
+    userId: string,
+    parsedData: any,
+    input: ParsedReceiptInput,
+): Promise<SaveResult> => {
+    const result: SaveResult = {
+        saved: 0,
+        mandatorySwipesRequired: 0,
+        skippedNoMatch: 0,
+        skippedClearance: 0,
+        skippedDuplicate: 0,
+        skippedImplausible: 0,
+    };
+
+    // Legacy fallback: a receipt that predates the ReceiptItem migration has no rows to
+    // merge into — route it through the original full save so its edits still persist.
+    const [cntRows]: any = await pool.query(
+        'SELECT COUNT(*) AS n FROM ReceiptItem WHERE receiptId = ?',
+        [receiptId],
+    );
+    if (Number(cntRows?.[0]?.n ?? 0) === 0) {
+        return persistReceiptPrices(receiptId, userId, parsedData, input, false, false);
+    }
+
+    const connection = await (pool as any).getConnection();
+    try {
+        await connection.beginTransaction();
+
+        // ── Identity normalization — same rules as the initial save ──
+        const footerRawText = parsedData?.footer?.rawText ?? null;
+        const normalizedReceiptNo = normalizeReceiptNo(input.receiptNo, footerRawText);
+        const normalizedReceiptDate = normalizeReceiptDateForStorage(input.date, input.time);
+        const parsedReceiptNos: unknown = parsedData?.footer?.receiptNos;
+        const normalizedReceiptNos = normalizeReceiptNos(
+            Array.isArray(parsedReceiptNos) ? (parsedReceiptNos as string[]) : (input.receiptNo ? [input.receiptNo] : []),
+            normalizedReceiptNo,
+        );
+        const canonicalReceiptNo = normalizedReceiptNos[0] ?? normalizedReceiptNo;
+        if (parsedData && typeof parsedData === 'object') {
+            if ('receiptNo' in parsedData) parsedData.receiptNo = canonicalReceiptNo;
+            if (parsedData.footer && typeof parsedData.footer === 'object') {
+                parsedData.footer.receiptNo = canonicalReceiptNo;
+                parsedData.footer.receiptNos = normalizedReceiptNos;
+            }
+        }
+
+        // ── Blob: header/footer only (products live in ReceiptItem; rawText stripped) ──
+        await updateReceiptDetails(
+            receiptId,
+            normalizedReceiptNos,
+            normalizedReceiptDate,
+            'completed',
+            stripProductRawText({ ...parsedData, products: [] }),
+            connection,
+        );
+        if (input.storeId) {
+            await updateReceiptStore(receiptId, input.storeId, connection);
+        }
+
+        // ── Per-line merge ──
+        const [rows]: any = await connection.query(
+            `SELECT id, lineIdx, name, price, promoPrice, quantity, unit, matchedSpId
+               FROM ReceiptItem WHERE receiptId = ? FOR UPDATE`,
+            [receiptId],
+        );
+        const rowByIdx = new Map<number, any>(rows.map((r: any) => [Number(r.lineIdx), r]));
+        const clientLines: any[] = Array.isArray(parsedData?.products) ? parsedData.products : [];
+        const num = (v: any): number | null => {
+            if (v == null || v === '') return null;
+            const n = Number(v);
+            return Number.isFinite(n) ? n : null;
+        };
+
+        for (let i = 0; i < clientLines.length; i++) {
+            const line = clientLines[i];
+            const row = rowByIdx.get(i);
+            if (!line || !row) continue; // autosave never creates/deletes lines
+
+            const updates: Record<string, any> = {};
+
+            // User-editable content fields.
+            if (typeof line.name === 'string' && line.name.trim() && line.name !== row.name) {
+                updates.name = line.name;
+            }
+            const newPrice = num(line.price);
+            const rowPrice = num(row.price);
+            if (newPrice != null && newPrice !== rowPrice) updates.price = newPrice;
+            const newPromo = num(line.promoPrice);
+            const rowPromo = num(row.promoPrice);
+            if (newPromo !== rowPromo) updates.promoPrice = newPromo;
+            const newQty = num(line.quantity);
+            if (newQty != null && newQty > 0 && newQty !== num(row.quantity)) updates.quantity = newQty;
+            if (typeof line.unit === 'string' && line.unit && line.unit !== row.unit) updates.unit = line.unit;
+
+            // Explicit manual rematch ONLY (the app marks the line). A differing SP
+            // WITHOUT the marker is stale client state and must not win.
+            const rowSp = row.matchedSpId == null ? null : Number(row.matchedSpId);
+            const clientSpRaw = num(line.storeProductId);
+            const clientSp = clientSpRaw != null && clientSpRaw > 0 ? clientSpRaw : null;
+            let matchChanged = false;
+            if (line.manualMatch === true && clientSp !== rowSp) {
+                // Guard: a manual pick must exist and belong to the receipt's chain.
+                let spOk = clientSp == null;
+                if (clientSp != null) {
+                    const [spRows]: any = await connection.query(
+                        'SELECT chainId FROM StoreProduct WHERE id = ?',
+                        [clientSp],
+                    );
+                    spOk = spRows.length > 0 &&
+                        (!Number.isFinite(input.chainId) || Number(spRows[0].chainId) === Number(input.chainId));
+                }
+                if (spOk) {
+                    matchChanged = true;
+                    updates.matchedSpId = clientSp;
+                    updates.matchedName = line.matchedName ?? null;
+                    updates.storeProductImageUrl = line.storeProductImageUrl ?? null;
+                    updates.matchConfidence = line.matchConfidence ?? null;
+                    updates.matchConfirmed = false;   // a fresh manual pick is not vote-confirmed
+                    updates.priceVerified = false;
+                    if (Array.isArray(line.altMatches)) updates.altMatches = line.altMatches;
+                    // Re-derive the confidence band for the NEW match (same recipe the
+                    // demotion service uses) — leaving the old match's band on the row
+                    // would permanently exclude the fresh unconfirmed pick from Card-B.
+                    const ic = computeItemConfidence({
+                        nameConf: Number.isFinite(Number(line.matchConfidence)) ? Number(line.matchConfidence) : null,
+                        nameText: typeof line.name === 'string' ? line.name : (row.name ?? ''),
+                        priceVerified: false,
+                        viaPromo: false,
+                        gapToRunnerUp: 0,
+                        source: clientSp != null ? 'reused' : 'unmatched',
+                        priceImplausible: false,
+                        userRejected: false,
+                    });
+                    updates.itemConfidence = ic;
+                    updates.band = ic.band;
+                    const nhQty = newQty != null && newQty > 0 ? newQty : (num(row.quantity) ?? 1);
+                    const nhUnit = newPrice != null ? newPrice : (rowPrice ?? 0);
+                    updates.needsHuman = computeNeedsHuman({
+                        band: ic.band,
+                        gapToRunnerUp: 0,
+                        candidateCount: Array.isArray(line.altMatches) ? line.altMatches.length : 0,
+                        hasVeto: Array.isArray(ic.vetoes) && ic.vetoes.length > 0,
+                        source: clientSp != null ? 'reused' : 'unmatched',
+                        lineTotalEur: Math.max(0, nhUnit) * nhQty,
+                    });
+                }
+            }
+
+            if (Object.keys(updates).length === 0) continue;
+            await updateReceiptItem(receiptId, i, updates, connection);
+            result.saved++;
+
+            // ── Keep the line's OWN Price row in step (in place — never delete/re-mint) ──
+            // Effective merged values; a promo only counts when positive and below the price
+            // (the full save's convention). Every write here resets priceVerified — an edited
+            // value / re-pointed SP is no longer the verified observation.
+            const effPrice = updates.price != null ? updates.price : rowPrice;
+            const effPromo0 = 'promoPrice' in updates ? updates.promoPrice : rowPromo;
+            const effPromo = effPromo0 != null && effPrice != null && effPromo0 > 0 && effPromo0 < effPrice ? effPromo0 : null;
+            if (matchChanged) {
+                if (clientSp == null) {
+                    // Un-linked: mirror the demotion convention — keep the observation, unverify it.
+                    await connection.query(
+                        'UPDATE Price SET priceVerified = 0 WHERE receiptItemId = ? AND isFallback = 0',
+                        [row.id],
+                    );
+                } else {
+                    let repointed = 1;
+                    try {
+                        const [pres]: any = await connection.query(
+                            'UPDATE Price SET storeProductId = ?, priceVerified = 0 WHERE receiptItemId = ? AND isFallback = 0',
+                            [clientSp, row.id],
+                        );
+                        repointed = pres?.affectedRows ?? 0;
+                    } catch (e: any) {
+                        // (sp, store, date) unique collision — another row already records this
+                        // SP at that slot. Keep the old row but make sure it can't verify-pollute.
+                        if (e?.code !== 'ER_DUP_ENTRY') throw e;
+                        await connection.query(
+                            'UPDATE Price SET priceVerified = 0 WHERE receiptItemId = ? AND isFallback = 0',
+                            [row.id],
+                        );
+                    }
+                    // Previously-UNMATCHED line: it has NO Price row (unmatched lines never
+                    // write one), so a manual match must INSERT the observation here — no
+                    // later flow will. Guarded to a real positive price + a known store.
+                    if (repointed === 0 && input.storeId && effPrice != null && effPrice > 0) {
+                        const d = normalizedReceiptDate ? new Date(normalizedReceiptDate.replace(' ', 'T')) : new Date();
+                        const priceDate = Number.isNaN(d.getTime()) ? new Date() : d;
+                        await createPrice(
+                            clientSp, input.storeId, effPrice, effPromo,
+                            effPromo != null
+                                ? new Date(priceDate.getTime() + RECOGNITION.price.receiptPromoValidityDays * 24 * 60 * 60 * 1000)
+                                : null,
+                            false, priceDate,
+                            false, receiptId, false, connection, row.id,
+                        );
+                    }
+                }
+            }
+            if (updates.price != null || 'promoPrice' in updates) {
+                // A nonpositive edited price never reaches the reference table (the full
+                // save's `price <= 0` skip) — the ReceiptItem keeps it for display only.
+                if (effPrice != null && effPrice > 0) {
+                    await connection.query(
+                        'UPDATE Price SET price = ?, promoPrice = ?, priceVerified = 0 WHERE receiptItemId = ? AND isFallback = 0',
+                        [effPrice, effPromo, row.id],
+                    );
+                }
+            }
+        }
+
+        // ── savedAmount from the MERGED rows (a price edit changes the savings) ──
+        // Promo-aware, matching the initial save + the profile's totalSavings.
+        const [merged]: any = await connection.query(
+            'SELECT matchedSpId, matchConfirmed, price, promoPrice, quantity FROM ReceiptItem WHERE receiptId = ?',
+            [receiptId],
+        );
+        const matchedItems = (merged as any[])
+            .filter((r) => r.matchConfirmed && r.matchedSpId && Number(r.price) > 0)
+            .map((r) => {
+                const price = Number(r.price);
+                const promo = r.promoPrice != null ? Number(r.promoPrice) : null;
+                return {
+                    storeProductId: Number(r.matchedSpId),
+                    price: promo != null && promo > 0 && promo < price ? promo : price,
+                    quantity: Number(r.quantity) || 1,
+                };
+            });
+        const savedAmount = await computeReceiptSavings(matchedItems, connection);
+        await updateReceiptSavedAmount(receiptId, savedAmount, connection);
+
+        await connection.commit();
+        return result;
+    } catch (error) {
+        await connection.rollback();
+        throw error;
+    } finally {
+        connection.release();
+    }
 };

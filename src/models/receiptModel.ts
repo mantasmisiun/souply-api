@@ -1,7 +1,29 @@
 import pool from '../config/db.js';
 import type { Locale } from '../middleware/locale.js';
+import { getReceiptItemLines } from './receiptItemModel.js';
 
 type Connection = typeof pool | any;
+
+/**
+ * P2 Step B (ReceiptItem migration): the receipt's `products[]` are sourced from the
+ * ReceiptItem rows (the source of truth), reassembled into the exact blob shape via the
+ * lossless mapping. Falls back to the blob's own products for any receipt not yet
+ * backfilled. Preserves `parsedData`'s original type (string stays string, object stays
+ * object) so no caller's parse contract changes. Mutates `receipt` in place.
+ */
+async function attachReceiptItemProducts(receipt: any, id: number): Promise<void> {
+    if (!receipt || receipt.parsedData == null) return;
+    const wasString = typeof receipt.parsedData === 'string';
+    let parsed: any = receipt.parsedData;
+    if (wasString) { try { parsed = JSON.parse(parsed); } catch { return; } }
+    if (!parsed || typeof parsed !== 'object') return;
+    try {
+        const lines = await getReceiptItemLines(id);
+        if (lines.length === 0) return; // not backfilled → keep the blob's products
+        parsed.products = lines;
+    } catch { return; } // any row-read failure → keep the blob's products
+    receipt.parsedData = wasString ? JSON.stringify(parsed) : parsed;
+}
 
 export const createReceipt = async (
     userId: string,
@@ -35,6 +57,13 @@ export const getReceiptsByUserId = async (userId: string) => {
     return rows;
 };
 
+/** The owning userId of a receipt (null if it doesn't exist). Cheap — one indexed
+ *  lookup, no ReceiptItem join — for the ownership middleware on every :id route. */
+export const getReceiptOwnerId = async (id: number): Promise<string | null> => {
+    const [rows]: any = await pool.query('SELECT userId FROM Receipt WHERE id = ? LIMIT 1', [id]);
+    return rows[0] ? String(rows[0].userId) : null;
+};
+
 export const getReceiptById = async (id: number) => {
     const [rows]: any = await pool.query(
         `SELECT r.*, r.receiptNoCanonical AS receiptNo, sc.name as chainName
@@ -44,7 +73,9 @@ export const getReceiptById = async (id: number) => {
          WHERE r.id = ?`,
         [id]
     );
-    return rows[0] || null;
+    const receipt = rows[0] || null;
+    await attachReceiptItemProducts(receipt, id); // products[] from ReceiptItem rows (P2 Step B)
+    return receipt;
 };
 
 export const updateReceiptDetails = async (
@@ -98,27 +129,64 @@ export const getReceiptByReceiptNoAndUser = async (receiptNo: string, userId: st
 };
 
 export const getReceiptItemsWithDetails = async (receiptId: number, locale: Locale = 'lt') => {
+    // Read from ReceiptItem (ReceiptItem migration): EVERY line, matched or not — the old
+    // INNER JOIN Price dropped unmatched lines, which under the no-mint policy is most of the
+    // garbled ones. Catalog details LEFT-JOIN in for matched lines (matchedSpId); the price
+    // links via Price.receiptItemId (the precise per-line link). Unmatched lines fall back to
+    // the OCR name + the receipt-item's own price.
     const [rows]: any = await pool.query(
         `SELECT
-            sp.storeProductName as name,
+            ri.lineIdx,
+            COALESCE(sp.storeProductName, ri.matchedName, ri.name) as name,
+            ri.name as ocrName,
             sp.brandName,
             p.categoryId,
-            COALESCE(ct.name, c.name) as categoryName,
-            pr.price,
-            pr.promoPrice,
+            COALESCE(ct.name, c.name, ri.categoryName) as categoryName,
+            COALESCE(pr.price, ri.price) as price,
+            COALESCE(pr.promoPrice, ri.promoPrice) as promoPrice,
             pr.id as priceId,
-            sp.id as storeProductId
-         FROM Price pr
-         JOIN StoreProduct sp ON pr.storeProductId = sp.id
-         JOIN Product p ON sp.productId = p.id
-         JOIN Category c ON p.categoryId = c.id
+            ri.matchedSpId as storeProductId
+         FROM ReceiptItem ri
+         LEFT JOIN StoreProduct sp ON sp.id = ri.matchedSpId
+         LEFT JOIN Product p ON p.id = sp.productId
+         LEFT JOIN Category c ON c.id = p.categoryId
          LEFT JOIN CategoryTranslation ct ON ct.categoryId = c.id AND ct.locale = ?
-         JOIN Store s ON pr.storeId = s.id
-         JOIN Receipt r ON r.storeId = s.id
-         WHERE r.id = ? AND pr.receiptId = ?`,
-        [locale, receiptId, receiptId]
+         LEFT JOIN Price pr ON pr.receiptItemId = ri.id
+         WHERE ri.receiptId = ?
+         ORDER BY ri.lineIdx ASC`,
+        [locale, receiptId]
     );
-    return rows;
+    if (rows.length > 0) return rows;
+
+    // Legacy fallback (deploy-order safety): a pre-migration receipt with no ReceiptItem
+    // rows still has its lines in the blob. Every sibling reader carries this fallback —
+    // without it an un-backfilled receipt's Items list renders empty until the backfill runs.
+    const [blobRows]: any = await pool.query(
+        'SELECT parsedData FROM Receipt WHERE id = ? LIMIT 1',
+        [receiptId],
+    );
+    if (!blobRows[0]?.parsedData) return rows;
+    let parsed: any;
+    try {
+        parsed = typeof blobRows[0].parsedData === 'string'
+            ? JSON.parse(blobRows[0].parsedData)
+            : blobRows[0].parsedData;
+    } catch {
+        return rows;
+    }
+    const products: any[] = Array.isArray(parsed?.products) ? parsed.products : [];
+    return products.map((p: any, i: number) => ({
+        lineIdx: i,
+        name: p?.matchedName ?? p?.name ?? '',
+        ocrName: p?.name ?? '',
+        brandName: null,
+        categoryId: p?.categoryId ?? null,
+        categoryName: p?.categoryName ?? null,
+        price: p?.price ?? null,
+        promoPrice: p?.promoPrice ?? null,
+        priceId: null,
+        storeProductId: p?.storeProductId ?? null,
+    }));
 };
 
 // NOTE: this rewrites parsedData (product items only) and deliberately does NOT touch the

@@ -10,9 +10,11 @@ import {
 import { getProductsByCategoryWithAmounts, getAllProductsByL2WithAmounts } from '../models/productModel.js';
 import {
     getStoreProductsByChainWithProductData,
+    getCachedChainCandidates,
+    getCachedCrossChainCandidates,
     getStoreProductsCrossChainWithProductData,
 } from '../models/storeProductModel.js';
-import { findBestProductMatches } from '../utils/productMatcher.js';
+import { findBestProductMatches, explainMatch, normalizeProductName, type MatchCandidate } from '../utils/productMatcher.js';
 import { RECOGNITION } from '../../../shared/recognitionConfig.js';
 
 export const addStoreProduct = async (req: Request, res: Response, next: NextFunction) => {
@@ -204,36 +206,61 @@ export const matchStoreProductByName = async (req: Request, res: Response, next:
 
         const amount = amountRaw !== undefined && amountRaw !== '' ? parseFloat(amountRaw) : null;
 
-        const candidates = await getStoreProductsByChainWithProductData(chainId, req.locale);
+        const candidates: MatchCandidate[] = await getCachedChainCandidates(chainId, req.locale);
+        const aliasCount = candidates.reduce((n, c) => n + (c.aliases?.length ?? 0), 0);
 
-        console.log('=== MATCH REQUEST ===');
-        console.log(`chainId=${chainId}, name="${name}", amount=${amount}, unit=${unit}, weighable=${ocrIsWeighable}`);
-        console.log(`Candidates fetched: ${candidates.length}`);
+        // Log 3 — MATCH derivation: the candidates + their scores, and WHY the top one
+        // won (which name — catalog vs a learned alias — and which lane carried it), so
+        // the whole match step (incl. the vocabulary feedback loop) is inspectable.
+        console.log(`=== MATCH ${JSON.stringify(name)} (chain ${chainId}, amount=${amount}, unit=${unit}, weighable=${ocrIsWeighable}) ===`);
+        console.log(`  candidates=${candidates.length}  canonical-aliases-in-chain=${aliasCount}`);
 
         let matches = findBestProductMatches(name, amount, unit, candidates, undefined, undefined, ocrIsWeighable);
         let crossChain = false;
-        console.log(`Same-chain matches above threshold: ${matches.length}`);
 
-        // Cross-chain fallback. When a chain has no scraped catalog yet
-        // (Norfa has no public product-listing endpoint we could scrape
-        // the way we did Barbora / Rimi / IKI), every match against
-        // chainId returns zero. Fall back to one representative
-        // StoreProduct per Product across the OTHER chains — the
-        // matcher scores those. The resolver later reuses the matched
-        // Product id when creating a new chain-specific StoreProduct,
-        // which is how cross-chain product identity bootstraps itself
-        // organically as receipts get processed.
-        if (matches.length === 0) {
-            const crossCandidates = await getStoreProductsCrossChainWithProductData(chainId, req.locale);
-            console.log(`Cross-chain candidates fetched: ${crossCandidates.length}`);
-            // Cross-chain uses its OWN floor (config). Currently == same-chain
-            // minConfidence; bump RECOGNITION.match.minConfidenceCrossChain to
-            // tighten weak cross-chain hits (e.g. the slyvos/paprikos shared word).
+        if (matches.length > 0) {
+            console.log('  top same-chain:');
+            matches.slice(0, 3).forEach((m, i) =>
+                console.log(`    ${i + 1}) SP ${m.storeProductId} ${JSON.stringify(m.name)} conf=${m.confidence.toFixed(2)} catalog=${m.isCatalog ? 'yes' : 'no'}`));
+            const top = matches[0];
+            const topCand = candidates.find((c) => c.id === top.storeProductId);
+            const prov = topCand ? explainMatch(name, topCand) : null;
+            const nq = normalizeProductName(name);
+            const scoped = candidates.find((c) => c.similarityAliases?.includes(nq)); // did a 'similar' alias L2-scope the search?
+            const suppressedNote = topCand?.rejectedAliases?.includes(nq)
+                ? "  [NOTE: this OCR also has a REJECTED alias for this SP]" : '';
+            const via = !prov ? '?'
+                : prov.via === 'learned-alias' ? `LEARNED ALIAS ${JSON.stringify(prov.aliasText)} lane=${prov.lane} [vocab feedback working]`
+                : prov.via === 'catalog-name' ? `catalog-name lane=${prov.lane}`
+                : 'unclear';
+            console.log(
+                `  → picked SP ${top.storeProductId} (conf ${top.confidence.toFixed(2)}) via ${via}` +
+                `${prov?.healed ? ' [OCR space-heal fired]' : ''}` +
+                `${scoped ? `  [L2-scoped by a 'similar' alias → SP ${scoped.id}]` : ''}` +
+                `${suppressedNote}  [cross-chain: no]`,
+            );
+        } else {
+            // Cross-chain fallback. When a chain has no scraped catalog yet
+            // (Norfa has no public product-listing endpoint we could scrape
+            // the way we did Barbora / Rimi / IKI), every same-chain match returns
+            // zero. Fall back to one representative StoreProduct per Product across the
+            // OTHER chains — the matcher scores those. The resolver later reuses the
+            // matched Product id when creating a new chain-specific StoreProduct, which
+            // is how cross-chain product identity bootstraps itself as receipts process.
+            // Cross-chain uses its OWN floor (RECOGNITION.match.minConfidenceCrossChain);
+            // bump it to tighten weak cross-chain hits (e.g. the slyvos/paprikos shared word).
+            const crossCandidates = await getCachedCrossChainCandidates(chainId, req.locale);
             matches = findBestProductMatches(name, amount, unit, crossCandidates, RECOGNITION.match.minConfidenceCrossChain, undefined, ocrIsWeighable);
             crossChain = matches.length > 0;
-            console.log(
-                `Cross-chain matches above threshold: ${matches.length}${crossChain ? ' (cross-chain fallback)' : ''}`
-            );
+            console.log(`  same-chain: 0 above floor → CROSS-CHAIN fallback (${crossCandidates.length} candidates)`);
+            if (matches.length > 0) {
+                console.log('  top cross-chain:');
+                matches.slice(0, 3).forEach((m, i) =>
+                    console.log(`    ${i + 1}) SP ${m.storeProductId} ${JSON.stringify(m.name)} conf=${m.confidence.toFixed(2)}`));
+                console.log(`  → picked SP ${matches[0].storeProductId} (conf ${matches[0].confidence.toFixed(2)}) via cross-chain (weak — client orphans it below auto-apply)`);
+            } else {
+                console.log('  → NO match — line stays UNMATCHED (no-mint: no SP created; recorded as a ReceiptItem observation)');
+            }
         }
 
         res.json({ matches, crossChain });

@@ -10,9 +10,11 @@ import {
 // The parsedData read is `FROM Receipt`; the sibling expansion is `SELECT id FROM Category`.
 const makeConn = (parsedData: any, siblings: number[] = []) => ({
     query: jest.fn(async (sql: string) =>
-        /FROM Category/.test(sql)
-            ? [siblings.map((id) => ({ id }))]
-            : [[{ parsedData: JSON.stringify(parsedData) }]],
+        /FROM ReceiptItem/.test(sql)
+            ? [[]] // no rows → fall back to blob products
+            : /FROM Category/.test(sql)
+                ? [siblings.map((id) => ({ id }))]
+                : [[{ parsedData: JSON.stringify(parsedData) }]],
     ),
 });
 

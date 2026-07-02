@@ -13,7 +13,11 @@ export const createPrice = async (
     priceVerified: boolean,
     receiptId: number | null,
     requiresCoupon: boolean = false,
-    conn?: Connection
+    conn?: Connection,
+    // The exact ReceiptItem this price came from (ReceiptItem migration) — makes a
+    // receipt-derived price trivially removable / re-assignable when a line's match changes.
+    // Null for scraped / fallback prices. Optional + last so existing callers are unaffected.
+    receiptItemId: number | null = null,
 ) => {
     const db = conn || pool;
     // Price has UNIQUE (storeProductId, storeId, date). Collisions happen
@@ -25,20 +29,48 @@ export const createPrice = async (
     // isFallback=1 → 0 when a real receipt supersedes a scrape).
     const [result]: any = await db.query(
         `INSERT INTO Price
-           (storeProductId, storeId, receiptId, price, promoPrice, promoEnd,
+           (storeProductId, storeId, receiptId, receiptItemId, price, promoPrice, promoEnd,
             isFallback, date, priceVerified, requiresCoupon)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON DUPLICATE KEY UPDATE
-           receiptId      = VALUES(receiptId),
+           receiptId      = COALESCE(Price.receiptId, VALUES(receiptId)),
+           receiptItemId  = COALESCE(Price.receiptItemId, VALUES(receiptItemId)),
            price          = VALUES(price),
            promoPrice     = VALUES(promoPrice),
            promoEnd       = VALUES(promoEnd),
            isFallback     = VALUES(isFallback),
            priceVerified  = VALUES(priceVerified),
            requiresCoupon = VALUES(requiresCoupon)`,
-        [storeProductId, storeId, receiptId, price, promoPrice, promoEnd, isFallback, date, priceVerified, requiresCoupon]
+        [storeProductId, storeId, receiptId, receiptItemId, price, promoPrice, promoEnd, isFallback, date, priceVerified, requiresCoupon]
     );
     return result.insertId;
+};
+
+/**
+ * Locate a receipt LINE's own primary Price row. Prefers the precise
+ * `receiptItemId` link (ReceiptItem migration); falls back to the legacy
+ * (receiptId, storeProductId) key ONLY for rows written before the column
+ * existed (receiptItemId IS NULL — e.g. backfilled receipts). Keying by the
+ * line id makes the lookup immune to (sp, store, date) slot-ownership: a row
+ * belonging to ANOTHER receipt's line is never returned.
+ */
+export const findLinePrimaryPrice = async (
+    receiptItemId: number | null,
+    receiptId: number,
+    storeProductId: number,
+    conn?: Connection,
+): Promise<{ id: number; priceVerified: number } | null> => {
+    const db = conn || pool;
+    const [rows]: any = await db.query(
+        `SELECT id, priceVerified FROM Price
+          WHERE isFallback = 0
+            AND (receiptItemId = ?
+                 OR (receiptItemId IS NULL AND receiptId = ? AND storeProductId = ?))
+          ORDER BY (receiptItemId = ?) DESC
+          LIMIT 1`,
+        [receiptItemId, receiptId, storeProductId, receiptItemId],
+    );
+    return rows[0] ?? null;
 };
 
 export const getLatestPriceByStoreProduct = async (storeProductId: number) => {

@@ -1,5 +1,6 @@
 import { jest } from '@jest/globals';
 import request from 'supertest';
+import { primeTokens, asUser } from './helpers/authedRequest.js';
 import app from '../src/index.js';
 import pool from '../src/config/db.js';
 
@@ -8,6 +9,7 @@ const testUserId = '11111111-1111-1111-1111-111111111111';
 jest.setTimeout(20000);
 
 beforeAll(async () => {
+        await primeTokens(testUserId);
     await pool.query(`INSERT INTO StoreChain (id, name) VALUES (1, 'Test Chain') ON DUPLICATE KEY UPDATE id=id`);
     // Store.address is NOT NULL in the schema.
     await pool.query(`INSERT INTO Store (id, chainId, name, address) VALUES (1, 1, 'Test Store', 'Test St. 1') ON DUPLICATE KEY UPDATE id=id`);
@@ -57,7 +59,7 @@ describe('POST /api/receipts', () => {
             },
         };
 
-        const res = await request(app)
+        const res = await asUser(app, testUserId)
             .post('/api/receipts')
             .send(mockPayload);
 
@@ -119,7 +121,7 @@ describe('PATCH /api/receipts/:id/regions — receiptNos column stays in lockste
     it('a re-parse that finds MORE ids (the fresh receiptNos array) converges the column to the full set', async () => {
         const rid = await seedSingleId('2026-06-29');
         // receipt-143: new parser reads all three ids; the client sends the fresh array to /regions.
-        const res = await request(app)
+        const res = await asUser(app, testUserId)
             .patch(`/api/receipts/${rid}/regions`)
             .send({ headerLineRegions: [], footerLineRegions: [], productRegions: [], receiptNos: ['168/645/104148', '104148', '3157'] });
         expect(res.status).toBe(200);
@@ -133,7 +135,7 @@ describe('PATCH /api/receipts/:id/regions — receiptNos column stays in lockste
 
     it('also folds a single corrected receiptNo string (older client) into the column', async () => {
         const rid = await seedSingleId('2026-06-28');
-        const res = await request(app)
+        const res = await asUser(app, testUserId)
             .patch(`/api/receipts/${rid}/regions`)
             .send({ headerLineRegions: [], footerLineRegions: [], productRegions: [], receiptNo: '9/100/55555' });
         expect(res.status).toBe(200);
@@ -157,7 +159,7 @@ describe('PATCH /api/receipts/:id/regions — receiptNos column stays in lockste
         const ridB = Number(insB.insertId);
 
         // A re-parse of B claims 'COLLIDE-1' → would collide with A on (canonical, store, date).
-        const res = await request(app)
+        const res = await asUser(app, testUserId)
             .patch(`/api/receipts/${ridB}/regions`)
             .send({ headerLineRegions: [], footerLineRegions: [], productRegions: [], receiptNos: ['COLLIDE-1'] });
         expect(res.status).toBe(200);                                  // no surprise 500

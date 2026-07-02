@@ -74,3 +74,8 @@ export const publicLimiter = createRateLimiter({ windowMs: 60 * 1000, max: 30 })
 // for a real browsing session (many pin taps + a few capped batches), tight
 // enough to blunt scripted abuse of the comparison engine.
 export const storePricesLimiter = createRateLimiter({ windowMs: 60 * 1000, max: 40 });
+
+// PDF rasterisation is a BLOCKING, CPU/memory-heavy op (poppler spawnSync). Even behind
+// auth, cap the rate so one client can't wedge the single Node event loop with a stream
+// of PDFs. A real user converts a handful of receipt PDFs per minute at most.
+export const pdfConvertLimiter = createRateLimiter({ windowMs: 60 * 1000, max: 10 });

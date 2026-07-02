@@ -1,5 +1,6 @@
 import { RECOGNITION } from '../../../shared/recognitionConfig.js';
 import { MatchThresholds } from '../config/matchThresholds.js';
+import { getReceiptItemLines } from '../models/receiptItemModel.js';
 
 /** Nepriskirta ("Uncategorised") bucket — a real scraped product that didn't match a
  *  catalog category. These are valuable community categorisation work, so the queue
@@ -53,7 +54,10 @@ export async function getReceiptRelatednessScope(receiptId: number, conn: Db): P
     }
     const chainId = Number(parsed?.header?.chainId);
     if (Number.isFinite(chainId) && chainId > 0) scope.chainIds.add(chainId);
-    for (const line of Array.isArray(parsed?.products) ? parsed.products : []) {
+    // Products from ReceiptItem rows (P2 source of truth), blob fallback if not backfilled.
+    let products = await getReceiptItemLines(receiptId, conn);
+    if (products.length === 0 && Array.isArray(parsed?.products)) products = parsed.products;
+    for (const line of products) {
         if (typeof line?.name === 'string' && line.name.trim()) scope.lineNames.push(line.name);
         const sp = Number(line?.storeProductId);
         const alts = Array.isArray(line?.altMatches) ? line.altMatches : [];

@@ -12,6 +12,8 @@
     "receipts:matchaudit": "tsx src/scripts/receiptBatch/matchAudit.ts",
     "receipts:stage": "tsx src/scripts/receiptBatch/stageReceiptsOnDevice.ts",
     "receipts:cleanup": "tsx src/scripts/receiptBatch/cleanupTestReceipts.ts",
+    "receipts:backfillitems": "tsx src/scripts/backfillReceiptItems.ts",
+    "receipts:retireorphans": "tsx src/scripts/retireOrphanStoreProducts.ts",
     "truths:bootstrap": "tsx src/scripts/bootstrapTruthsFromLogs.ts",
     "truths:review": "tsx src/scripts/reviewProvisionalTruth.ts",
     "beta:reinvite": "tsx src/scripts/reinviteBeta.ts",

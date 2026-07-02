@@ -1,5 +1,6 @@
 import pool from '../config/db.js';
 import { deleteReceiptImage } from './storageService.js';
+import { resetReceiptLearning, type ReceiptLearningResetResult } from './receiptLearningResetService.js';
 
 export interface ReceiptDeletionResult {
     deleted: boolean;
@@ -7,7 +8,15 @@ export interface ReceiptDeletionResult {
     storeProducts: number;
     products: number;
     imageDeleted: boolean;
+    learning: ReceiptLearningResetResult;
 }
+
+const EMPTY_LEARNING: ReceiptLearningResetResult = {
+    aliasVotesDeleted: 0,
+    aliasesDeleted: 0,
+    matchVotesDeleted: 0,
+    equivalencesDeleted: 0,
+};
 
 /**
  * DEV-ONLY hard delete of a single receipt and everything it spawned.
@@ -42,7 +51,7 @@ export const deleteReceiptWithData = async (
     );
     const receipt = receiptRows[0];
     if (!receipt) {
-        return { deleted: false, prices: 0, storeProducts: 0, products: 0, imageDeleted: false };
+        return { deleted: false, prices: 0, storeProducts: 0, products: 0, imageDeleted: false, learning: EMPTY_LEARNING };
     }
 
     // StoreProducts (+ their Products) this receipt's prices touch — captured
@@ -61,6 +70,7 @@ export const deleteReceiptWithData = async (
     let prices = 0;
     let storeProducts = 0;
     let products = 0;
+    let learning: ReceiptLearningResetResult = EMPTY_LEARNING;
 
     // ── Essential, atomic part: the receipt + everything keyed to it ──────────
     // Keep ONLY the receipt's own rows in the transaction so the delete is
@@ -80,6 +90,13 @@ export const deleteReceiptWithData = async (
         // rule ever changes (and so a non-cascading FK can't block the delete).
         await conn.query(`DELETE FROM ReceiptSwipeCandidate WHERE receiptId = ?`, [receiptId]);
         await conn.query(`DELETE FROM ReceiptLineIssue WHERE receiptId = ?`, [receiptId]);
+
+        // Clean-slate the receipt's LEARNING side effects (vocabulary aliases/votes, cross-
+        // chain match votes + aggregates, personal equivalences) so re-uploading the same
+        // receipt tests fresh. MUST run BEFORE deleting the Receipt row — the match-vote FK is
+        // ON DELETE SET NULL, so after the row is gone the receiptId link (used to find them)
+        // would be lost. Part of the atomic phase so a clean slate is guaranteed or nothing is.
+        learning = await resetReceiptLearning(receiptId, conn);
 
         await conn.query(`DELETE FROM Receipt WHERE id = ?`, [receiptId]);
 
@@ -143,7 +160,9 @@ export const deleteReceiptWithData = async (
 
     console.log(
         `[receiptDeletion] receipt ${receiptId} purged: ${prices} prices, ` +
-        `${storeProducts} orphan SPs, ${products} orphan products, image=${imageDeleted}`,
+        `${storeProducts} orphan SPs, ${products} orphan products, image=${imageDeleted} | ` +
+        `learning reset: ${learning.aliasVotesDeleted} alias-votes (${learning.aliasesDeleted} aliases GC'd), ` +
+        `${learning.matchVotesDeleted} match-votes, ${learning.equivalencesDeleted} equivalences`,
     );
-    return { deleted: true, prices, storeProducts, products, imageDeleted };
+    return { deleted: true, prices, storeProducts, products, imageDeleted, learning };
 };

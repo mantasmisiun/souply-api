@@ -16,7 +16,7 @@
 import pool from '../config/db.js';
 import { MatchThresholds } from '../config/matchThresholds.js';
 import {
-    applyAggregateDelta,
+    applyVoteTransitionDeltas,
     countRecentVotes,
     getMatchAggregate,
     orderPair,
@@ -68,7 +68,7 @@ export const castOrphanSwipeVote = async (
         // awardSwipePoint moved to AFTER commit (fire-and-forget) — see
         // receiptSaveService for the User-row contention rationale.
 
-        const { previousVote } = await upsertMatchVote(
+        const { previousVote, previousAggregated } = await upsertMatchVote(
             input.userId,
             pair.spIdA,
             pair.spIdB,
@@ -76,14 +76,11 @@ export const castOrphanSwipeVote = async (
             input.dwellMs,
             // receiptId is nullable in the schema; orphan votes pass null.
             null,
+            true,
             connection
         );
-        if (previousVote !== null && previousVote !== input.vote) {
-            await applyAggregateDelta(pair.spIdA, pair.spIdB, previousVote, -1, connection);
-        }
-        if (previousVote !== input.vote) {
-            await applyAggregateDelta(pair.spIdA, pair.spIdB, input.vote, +1, connection);
-        }
+        // Provenance-aware net-delta: only an APPLIED previous vote is retracted.
+        await applyVoteTransitionDeltas(pair.spIdA, pair.spIdB, previousVote, previousAggregated, input.vote, connection);
 
         const [productIdA, productIdB] = await Promise.all([
             getProductIdForStoreProduct(pair.spIdA, connection),
@@ -93,7 +90,7 @@ export const castOrphanSwipeVote = async (
         await applyBaseProductLinkForVote(
             pair.spIdA,
             pair.spIdB,
-            previousVote,
+            previousAggregated ? previousVote : null,
             input.vote,
             connection,
             productIdA,

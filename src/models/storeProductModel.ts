@@ -331,6 +331,44 @@ export const getStoreProductsCrossChainWithProductData = async (excludeChainId: 
         amount: r.amount !== null ? parseFloat(r.amount) : null,
     }));
 };
+
+// ── Match-candidate catalog cache ──────────────────────────────────────────────────
+// The /store-products/match endpoint is called ONCE PER OCR LINE, and each call re-fetched
+// the full ~13k-row chain catalog (13k-row correlated isCatalog subquery + alias attach).
+// A 40-line receipt = 40 identical heavy queries against a 10-connection pool, all firing
+// within a couple of seconds. This TTL cache collapses them to ONE fetch per (chain, locale)
+// per window. The catalog changes on the order of days (scrapes); a short TTL bounds the
+// staleness of freshly-learned vocabulary aliases to seconds. Candidates are read-only in
+// findBestProductMatches, so the shared array is safe to reuse across requests.
+const CATALOG_CACHE_TTL_MS = 30_000;
+type CatalogEntry = { at: number; data: any[] };
+const sameChainCatalogCache = new Map<string, CatalogEntry>();
+const crossChainCatalogCache = new Map<string, CatalogEntry>();
+
+export const getCachedChainCandidates = async (chainId: number, locale: Locale = 'lt'): Promise<any[]> => {
+    const key = `${chainId}:${locale}`;
+    const hit = sameChainCatalogCache.get(key);
+    if (hit && Date.now() - hit.at < CATALOG_CACHE_TTL_MS) return hit.data;
+    const data = await getStoreProductsByChainWithProductData(chainId, locale);
+    sameChainCatalogCache.set(key, { at: Date.now(), data });
+    return data;
+};
+
+export const getCachedCrossChainCandidates = async (excludeChainId: number, locale: Locale = 'lt'): Promise<any[]> => {
+    const key = `${excludeChainId}:${locale}`;
+    const hit = crossChainCatalogCache.get(key);
+    if (hit && Date.now() - hit.at < CATALOG_CACHE_TTL_MS) return hit.data;
+    const data = await getStoreProductsCrossChainWithProductData(excludeChainId, locale);
+    crossChainCatalogCache.set(key, { at: Date.now(), data });
+    return data;
+};
+
+/** Drop cached catalogs (call after a bulk catalog mutation if immediate freshness matters). */
+export const invalidateCatalogCache = (): void => {
+    sameChainCatalogCache.clear();
+    crossChainCatalogCache.clear();
+};
+
 export const searchUnifiedProductsByChain = async (
     chainId: number,
     name: string,

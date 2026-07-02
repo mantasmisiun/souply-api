@@ -41,6 +41,14 @@ const mockGetMatchAggregate = jest.fn<any>();
 jest.unstable_mockModule('../src/models/storeProductMatchModel.js', () => ({
     countRecentVotes: mockCountRecentVotes,
     upsertMatchVote: mockUpsertMatchVote,
+    // PLAIN function (not jest.fn — resetAllMocks would wipe the implementation):
+    // mirrors the real helper's math, delegating to the mocked applyAggregateDelta so
+    // existing per-test delta assertions keep observing the net effect.
+    applyVoteTransitionDeltas: async (a: number, b: number, prev: any, prevAgg: any, newV: any, conn?: any) => {
+        const counted = prev !== null && !!prevAgg;
+        if (counted && prev !== newV) await mockApplyAggregateDelta(a, b, prev, -1, conn);
+        if (newV !== null && !(counted && prev === newV)) await mockApplyAggregateDelta(a, b, newV, +1, conn);
+    },
     applyAggregateDelta: mockApplyAggregateDelta,
     getMatchAggregate: mockGetMatchAggregate,
     orderPair: (a: number, b: number) => ({ spIdA: Math.min(a, b), spIdB: Math.max(a, b) }),
@@ -111,7 +119,7 @@ beforeEach(() => {
 
     mockCountRecentVotes.mockResolvedValue(0);
     mockGetCandidatePair.mockResolvedValue({ orphanSpId: 10, candidateSpId: 20 });
-    mockUpsertMatchVote.mockResolvedValue({ previousVote: null });
+    mockUpsertMatchVote.mockResolvedValue({ previousVote: null, previousAggregated: false });
     mockApplyAggregateDelta.mockResolvedValue(undefined);
     mockGetProductIdForStoreProduct.mockResolvedValue(100);
     mockApplyBaseProductLinkForVote.mockResolvedValue(undefined);

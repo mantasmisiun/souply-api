@@ -20,6 +20,7 @@
  */
 import { jest } from '@jest/globals';
 import request from 'supertest';
+import { primeTokens, asUser } from './helpers/authedRequest.js';
 import app from '../src/index.js';
 import pool from '../src/config/db.js';
 
@@ -37,6 +38,7 @@ const SP_A      = 9901; // StoreProduct that represents PROD_A in the chain
 const SP_B      = 9902; // StoreProduct that represents PROD_B (cross-pair candidate)
 
 beforeAll(async () => {
+        await primeTokens(USER_SQ);
     const conn = await (pool as any).getConnection();
     try {
         await conn.query(`SET foreign_key_checks = 0`);
@@ -132,12 +134,12 @@ function makeReceiptPayload(opts: { priceVerified?: boolean; altMatches?: any[] 
 
 describe('GET /api/receipts/:id/swipe-queue — validation', () => {
     it('returns 400 for non-numeric receipt id', async () => {
-        const res = await request(app).get('/api/receipts/abc/swipe-queue');
+        const res = await asUser(app, USER_SQ).get('/api/receipts/abc/swipe-queue');
         expect(res.status).toBe(400);
     });
 
     it('returns 404 for a receipt that does not exist', async () => {
-        const res = await request(app).get('/api/receipts/999999999/swipe-queue');
+        const res = await asUser(app, USER_SQ).get('/api/receipts/999999999/swipe-queue');
         expect(res.status).toBe(404);
     });
 });
@@ -150,14 +152,14 @@ describe('Receipt swipe queue — end-to-end flow', () => {
     let receiptId: number;
 
     it('POST /api/receipts saves receipt and returns id', async () => {
-        const res = await request(app).post('/api/receipts').send(makeReceiptPayload());
+        const res = await asUser(app, USER_SQ).post('/api/receipts').send(makeReceiptPayload());
         expect(res.status).toBe(201);
         receiptId = res.body.id;
         expect(typeof receiptId).toBe('number');
     });
 
     it('GET /api/receipts/:id returns the saved receipt (simulates existing-mode open)', async () => {
-        const res = await request(app).get(`/api/receipts/${receiptId}`);
+        const res = await asUser(app, USER_SQ).get(`/api/receipts/${receiptId}`);
         expect(res.status).toBe(200);
         expect(res.body.id).toBe(receiptId);
         expect(res.body.parsedData).toBeTruthy();
@@ -171,7 +173,7 @@ describe('Receipt swipe queue — end-to-end flow', () => {
     });
 
     it('GET swipe-queue returns at least one item with the cross-pair candidate', async () => {
-        const res = await request(app)
+        const res = await asUser(app, USER_SQ)
             .get(`/api/receipts/${receiptId}/swipe-queue`)
             .query({ userId: USER_SQ });
         expect(res.status).toBe(200);
@@ -185,13 +187,13 @@ describe('Receipt swipe queue — end-to-end flow', () => {
     });
 
     it('GET swipe-queue without userId still returns items (no filtering applied)', async () => {
-        const res = await request(app).get(`/api/receipts/${receiptId}/swipe-queue`);
+        const res = await asUser(app, USER_SQ).get(`/api/receipts/${receiptId}/swipe-queue`);
         expect(res.status).toBe(200);
         expect(Array.isArray(res.body.items)).toBe(true);
     });
 
     it('POST /api/swipe-votes records the cross-pair vote', async () => {
-        const res = await request(app).post('/api/swipe-votes').send({
+        const res = await asUser(app, USER_SQ).post('/api/swipe-votes').send({
             userId: USER_SQ,
             receiptId,
             receiptLineIdx: 0,
@@ -203,7 +205,7 @@ describe('Receipt swipe queue — end-to-end flow', () => {
     });
 
     it('GET swipe-queue after vote returns empty items (pair now filtered)', async () => {
-        const res = await request(app)
+        const res = await asUser(app, USER_SQ)
             .get(`/api/receipts/${receiptId}/swipe-queue`)
             .query({ userId: USER_SQ });
         expect(res.status).toBe(200);
@@ -223,7 +225,7 @@ describe('Receipt swipe queue — self-pair already verified', () => {
     let receiptId: number;
 
     it('creates a receipt where the line product price is already verified', async () => {
-        const res = await request(app)
+        const res = await asUser(app, USER_SQ)
             .post('/api/receipts')
             .send(makeReceiptPayload({ priceVerified: true, altMatches: [] }));
         expect(res.status).toBe(201);
@@ -231,7 +233,7 @@ describe('Receipt swipe queue — self-pair already verified', () => {
     });
 
     it('swipe-queue returns empty items — no unverified self-pair', async () => {
-        const res = await request(app)
+        const res = await asUser(app, USER_SQ)
             .get(`/api/receipts/${receiptId}/swipe-queue`)
             .query({ userId: USER_SQ });
         expect(res.status).toBe(200);
@@ -247,7 +249,7 @@ describe('Receipt swipe queue — no alt candidates', () => {
     let receiptId: number;
 
     it('creates a receipt with no alt matches and priceVerified=true', async () => {
-        const res = await request(app)
+        const res = await asUser(app, USER_SQ)
             .post('/api/receipts')
             .send(makeReceiptPayload({ priceVerified: true, altMatches: [] }));
         expect(res.status).toBe(201);
@@ -255,7 +257,7 @@ describe('Receipt swipe queue — no alt candidates', () => {
     });
 
     it('swipe-queue returns empty items', async () => {
-        const res = await request(app)
+        const res = await asUser(app, USER_SQ)
             .get(`/api/receipts/${receiptId}/swipe-queue`)
             .query({ userId: USER_SQ });
         expect(res.status).toBe(200);
@@ -263,7 +265,7 @@ describe('Receipt swipe queue — no alt candidates', () => {
     });
 
     it('GET /api/receipts/:id still returns well-formed parsedData', async () => {
-        const res = await request(app).get(`/api/receipts/${receiptId}`);
+        const res = await asUser(app, USER_SQ).get(`/api/receipts/${receiptId}`);
         expect(res.status).toBe(200);
         const parsed = typeof res.body.parsedData === 'string'
             ? JSON.parse(res.body.parsedData)
@@ -278,9 +280,72 @@ describe('Receipt swipe queue — no alt candidates', () => {
 // mandatorySwipesRequired shape on POST /api/receipts response
 // ---------------------------------------------------------------------------
 
+describe('Receipt swipe queue — shared (sp, store, date) price slot across receipts', () => {
+    // Every payload in this suite shares ONE Price slot (SP_A @ STORE_ID @ 2025-01-01):
+    // the unique key allows a single row, and under FIRST-OWNER-WINS a later receipt's
+    // line owns no Price row at all. The line-scoped vote flips + queue filter
+    // (ReceiptItem.priceVerified truth) must keep the later receipt's cards working
+    // anyway — this exact scenario forced the first attempt at the first-owner guard
+    // to be reverted, when the lookups were still keyed by (receiptId, storeProductId).
+    let r1: number;
+    let r2: number;
+
+    it('creates two more receipts observing the same slot', async () => {
+        const res1 = await asUser(app, USER_SQ).post('/api/receipts').send(makeReceiptPayload({ altMatches: [] }));
+        expect(res1.status).toBe(201);
+        r1 = res1.body.id;
+        const res2 = await asUser(app, USER_SQ).post('/api/receipts').send(makeReceiptPayload({ altMatches: [] }));
+        expect(res2.status).toBe(201);
+        r2 = res2.body.id;
+    });
+
+    it("serves the later receipt's unverified self-pair card despite it owning no Price row", async () => {
+        const res = await asUser(app, USER_SQ)
+            .get(`/api/receipts/${r2}/swipe-queue`)
+            .query({ userId: USER_SQ });
+        expect(res.status).toBe(200);
+        expect(res.body.items.length).toBeGreaterThan(0);
+    });
+
+    it("an identical self-pair vote verifies the LINE truth and filters the card", async () => {
+        const vote = await asUser(app, USER_SQ).post('/api/swipe-votes').send({
+            userId: USER_SQ,
+            receiptId: r2,
+            receiptLineIdx: 0,
+            candidateStoreProductId: SP_A,
+            vote: 'identical',
+            dwellMs: 1500,
+        });
+        expect(vote.status).toBe(200);
+
+        // The line-scoped truth updated even though the Price slot row belongs to an
+        // earlier receipt.
+        const [rows]: any = await pool.query(
+            'SELECT priceVerified FROM ReceiptItem WHERE receiptId = ? AND lineIdx = 0',
+            [r2],
+        );
+        expect(Number(rows[0].priceVerified)).toBe(1);
+
+        const res = await asUser(app, USER_SQ)
+            .get(`/api/receipts/${r2}/swipe-queue`)
+            .query({ userId: USER_SQ });
+        expect(res.body.items).toHaveLength(0);
+    });
+
+    it('the slot Price row was never hijacked by the later receipts', async () => {
+        const [rows]: any = await pool.query(
+            'SELECT receiptId FROM Price WHERE storeProductId = ? AND storeId = ? AND isFallback = 0',
+            [SP_A, STORE_ID],
+        );
+        expect(rows.length).toBeGreaterThan(0);
+        // First-owner-wins: no row may have been reassigned to the LATEST writer.
+        for (const r of rows) expect(Number(r.receiptId)).not.toBe(r2);
+    });
+});
+
 describe('POST /api/receipts — mandatorySwipesRequired in response', () => {
     it('returns mandatorySwipesRequired as a number in the response body', async () => {
-        const res = await request(app)
+        const res = await asUser(app, USER_SQ)
             .post('/api/receipts')
             .send(makeReceiptPayload());
         expect(res.status).toBe(201);

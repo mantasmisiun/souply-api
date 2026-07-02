@@ -137,7 +137,7 @@ export const computeReceiptSavings = async (
 
 export const getUserStats = async (userId: string, locale: Locale = 'lt') => {
     const [receipts]: any = await pool.query(
-        `SELECT r.receiptDate, r.parsedData, sc.name AS chainName, sc.miniLogoUrl AS chainMiniLogoUrl
+        `SELECT r.id, r.receiptDate, r.parsedData, sc.name AS chainName, sc.miniLogoUrl AS chainMiniLogoUrl
            FROM Receipt r
            LEFT JOIN Store s ON s.id = r.storeId
            LEFT JOIN StoreChain sc ON sc.id = s.chainId
@@ -159,14 +159,42 @@ export const getUserStats = async (userId: string, locale: Locale = 'lt') => {
     // via their own "same" votes). Empty when there are no matched SPs.
     let rescueByProduct = new Map<number, { categoryId: number | null; leafName: string | null; l2Name: string | null }>();
 
+    // Per-receipt item lists, resolved ONCE for both passes below.
+    let perReceiptItems: Array<{ receipt: any; items: any[] }> = [];
+
     if (receipts.length > 0) {
-        // Pass 1: collect all unique storeProductIds for the batch SP lookup.
-        const allSpIds: number[] = [];
-        for (const receipt of receipts) {
+        // ReceiptItem rows are the item source since the ReceiptItem cutover — the
+        // stored blob keeps products: [] so reading parsedData here would silently
+        // drop every post-cutover receipt from stats/savings. One batch query;
+        // matchedSpId is aliased to the blob's storeProductId shape so the
+        // aggregation below is source-agnostic. The blob products/items remain
+        // ONLY as the legacy fallback for receipts that predate the migration
+        // (no ReceiptItem rows, e.g. an un-backfilled environment).
+        const [itemRows]: any = await pool.query(
+            `SELECT receiptId, matchedSpId AS storeProductId, price, promoPrice, quantity
+               FROM ReceiptItem
+              WHERE receiptId IN (?)`,
+            [receipts.map((r: any) => Number(r.id))],
+        );
+        const itemsByReceipt = new Map<number, any[]>();
+        for (const row of itemRows) {
+            const list = itemsByReceipt.get(Number(row.receiptId)) ?? [];
+            list.push(row);
+            itemsByReceipt.set(Number(row.receiptId), list);
+        }
+        perReceiptItems = receipts.map((receipt: any) => {
+            const rows = itemsByReceipt.get(Number(receipt.id));
+            if (rows && rows.length > 0) return { receipt, items: rows };
             const parsed = typeof receipt.parsedData === 'string'
                 ? JSON.parse(receipt.parsedData)
                 : receipt.parsedData;
-            for (const item of (parsed?.products ?? parsed?.items ?? [])) {
+            return { receipt, items: parsed?.products ?? parsed?.items ?? [] };
+        });
+
+        // Pass 1: collect all unique storeProductIds for the batch SP lookup.
+        const allSpIds: number[] = [];
+        for (const { items } of perReceiptItems) {
+            for (const item of items) {
                 if (item.storeProductId) allSpIds.push(Number(item.storeProductId));
             }
         }
@@ -224,11 +252,7 @@ export const getUserStats = async (userId: string, locale: Locale = 'lt') => {
         }
 
         // Pass 2: aggregate spending + collect (spId, price, qty) for savings.
-        for (const receipt of receipts) {
-            const parsed = typeof receipt.parsedData === 'string'
-                ? JSON.parse(receipt.parsedData)
-                : receipt.parsedData;
-            const items: any[] = parsed?.products ?? parsed?.items ?? [];
+        for (const { receipt, items } of perReceiptItems) {
             const chainName: string = receipt.chainName ?? 'Kita';
             if (!(chainName in chainMiniLogoMap)) {
                 chainMiniLogoMap[chainName] = receipt.chainMiniLogoUrl ?? null;
@@ -275,8 +299,9 @@ export const getUserStats = async (userId: string, locale: Locale = 'lt') => {
     }
 
     // Dynamic savings: compare each receipt item's price against the live
-    // cross-chain market average. Computed from parsedData so historical
-    // receipts (savedAmount defaulted to 0) are correctly included.
+    // cross-chain market average. Computed from the ReceiptItem rows (blob
+    // fallback for pre-migration receipts) so historical receipts
+    // (savedAmount defaulted to 0) are correctly included.
     // Includes both real receipt prices (isFallback=0) AND scraped catalog
     // prices (isFallback=1, receiptId IS NULL). Excludes within-chain
     // propagated fallbacks (isFallback=1, receiptId IS NOT NULL).

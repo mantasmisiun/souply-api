@@ -6,13 +6,14 @@ import {
 } from '../services/swipeVoteService.js';
 import { recordMandatorySwipe, shouldShowBurstWarning } from '../services/swipeSessionService.js';
 import { getUserPointsProfile } from '../services/userPointsService.js';
+import { getReceiptOwnerId } from '../models/receiptModel.js';
+import { withDeadlockRetry } from '../utils/withDeadlockRetry.js';
 
 const VALID_VOTES: SwipeVote[] = ['identical', 'similar', 'different'];
 
 export const submitSwipeVote = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const {
-            userId,
             receiptId,
             receiptLineIdx,
             candidateStoreProductId,
@@ -21,12 +22,24 @@ export const submitSwipeVote = async (req: Request, res: Response, next: NextFun
             isMandatory,
         } = req.body ?? {};
 
-        if (!userId || typeof userId !== 'string') {
-            res.status(400).json({ error: 'userId is required' });
+        // Voter identity comes from the session token (requireUser), never the body.
+        const userId = req.authUserId;
+        if (!userId) {
+            res.status(401).json({ error: 'auth-required' });
             return;
         }
         if (!Number.isFinite(receiptId)) {
             res.status(400).json({ error: 'receiptId is required' });
+            return;
+        }
+        // The swipe acts on the caller's OWN receipt line — bind receiptId to the owner.
+        const ownerId = await getReceiptOwnerId(Number(receiptId));
+        if (ownerId === null) {
+            res.status(404).json({ error: 'receipt not found' });
+            return;
+        }
+        if (ownerId !== userId) {
+            res.status(403).json({ error: 'forbidden' });
             return;
         }
         if (!Number.isFinite(receiptLineIdx) || receiptLineIdx < 0) {
@@ -43,7 +56,7 @@ export const submitSwipeVote = async (req: Request, res: Response, next: NextFun
         }
         const dwell = Number.isFinite(dwellMs) ? Number(dwellMs) : 0;
 
-        const result = await castSwipeVote({
+        const result = await withDeadlockRetry(() => castSwipeVote({
             userId: String(userId),
             receiptId: Number(receiptId),
             receiptLineIdx: Number(receiptLineIdx),
@@ -51,7 +64,7 @@ export const submitSwipeVote = async (req: Request, res: Response, next: NextFun
             vote,
             dwellMs: dwell,
             isMandatory: Boolean(isMandatory),
-        });
+        }), { label: 'swipe-vote' });
 
         let burstWarning = false;
         if (isMandatory && result.ok && result.effect !== 'dropped-rate-limit') {
@@ -74,14 +87,24 @@ export const submitSwipeVote = async (req: Request, res: Response, next: NextFun
  */
 export const undoSwipeVoteHandler = async (req: Request, res: Response, next: NextFunction) => {
     try {
-        const { userId, receiptId, receiptLineIdx, candidateStoreProductId } = req.body ?? {};
+        const { receiptId, receiptLineIdx, candidateStoreProductId } = req.body ?? {};
 
-        if (!userId || typeof userId !== 'string') {
-            res.status(400).json({ error: 'userId is required' });
+        const userId = req.authUserId;
+        if (!userId) {
+            res.status(401).json({ error: 'auth-required' });
             return;
         }
         if (!Number.isFinite(receiptId)) {
             res.status(400).json({ error: 'receiptId is required' });
+            return;
+        }
+        const ownerId = await getReceiptOwnerId(Number(receiptId));
+        if (ownerId === null) {
+            res.status(404).json({ error: 'receipt not found' });
+            return;
+        }
+        if (ownerId !== userId) {
+            res.status(403).json({ error: 'forbidden' });
             return;
         }
         if (!Number.isFinite(receiptLineIdx) || receiptLineIdx < 0) {
@@ -93,12 +116,12 @@ export const undoSwipeVoteHandler = async (req: Request, res: Response, next: Ne
             return;
         }
 
-        const result = await undoSwipeVote({
+        const result = await withDeadlockRetry(() => undoSwipeVote({
             userId: String(userId),
             receiptId: Number(receiptId),
             receiptLineIdx: Number(receiptLineIdx),
             candidateStoreProductId: Number(candidateStoreProductId),
-        });
+        }), { label: 'swipe-vote-undo' });
 
         res.json(result);
     } catch (error) {

@@ -23,7 +23,7 @@ export interface NeedsHumanInput {
     /** Any confidence veto present on the line (price-implausible, cross-chain, …). */
     hasVeto: boolean;
     /** Resolver outcome for this line. */
-    source: 'reused' | 'created' | 'bootstrapped' | 'skipped_unpriced' | 'none';
+    source: 'reused' | 'created' | 'bootstrapped' | 'skipped_unpriced' | 'unmatched' | 'none';
     /** Total € paid for the line (price × qty, promo if lower) — the price-impact driver. */
     lineTotalEur: number;
 }

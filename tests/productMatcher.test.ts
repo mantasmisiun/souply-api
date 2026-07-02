@@ -100,6 +100,30 @@ describe('findBestProductMatches — OCR split-word heal + subset + abbrev (rece
 });
 
 // ---------------------------------------------------------------------------
+// OCR confusion-weighted char rescue (ocrConfusions.ts): a name garbled by VISUAL
+// OCR confusions (digit↔letter, ll↔ti) matches its in-catalog product, gated so a
+// genuinely-different name sharing packaging tokens can NOT be nudged over the floor.
+// ---------------------------------------------------------------------------
+describe('findBestProductMatches — OCR confusion-weighted char rescue', () => {
+    const BASMATI = makeCandidate({ id: 800, storeProductName: 'Skanėja ryžiai basmati', isCatalog: true });
+    const BANANAS = makeCandidate({ id: 801, storeProductName: 'Bananai', isCatalog: true });
+
+    it('rescues a digit/visual-garbled name onto its real catalog product', () => {
+        // "SKANĖJA RYŽIAI BASMATI" OCR'd "SKANĖ JA RYZ14 BAsMall" (1←i, 4←a, ll←ti). Plain
+        // char sim ~0.75 ≥ rescue gate → the confusion weighting lifts it over the char floor.
+        const r = findBestProductMatches('SKANĖ JA RYZ14 BAsMall', null, null, [BASMATI, BANANAS]);
+        expect(r.length).toBeGreaterThan(0);
+        expect(r[0].storeProductId).toBe(800);
+    });
+
+    it('does NOT rescue a genuinely-different name sharing only packaging tokens (apples≠potatoes)', () => {
+        // apples-OCR vs potatoes: plain sim ~0.58 < the rescue gate → weighting can't nudge it.
+        const potatoes = makeCandidate({ id: 802, storeProductName: 'Fasuotos bulvės LAURA IKI ŪKIS', isCatalog: true });
+        expect(findBestProductMatches('Fasuoti obuol ia1 IKI OKIS', null, 'kg', [potatoes])).toEqual([]);
+    });
+});
+
+// ---------------------------------------------------------------------------
 // Learned receipt-name aliases (Issue H vocabulary): a CANONICAL alias is scored
 // as an additional match target, so a garbled OCR line matches the way the chain
 // prints the SP even when the catalog name alone wouldn't.
@@ -300,5 +324,34 @@ describe('findBestProductMatches — weighable gate', () => {
     it('null gate (legacy) keeps both', () => {
         const m = findBestProductMatches('Raudonosios paprikos', null, null, [PACKED, LOOSE]);
         expect(m.length).toBe(2);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// findBestProductMatches — fat-% / variant-number disambiguation (receipt-218)
+// ---------------------------------------------------------------------------
+
+describe('findBestProductMatches — variant number disambiguation', () => {
+    const Z9 = makeCandidate({ id: 66841, storeProductName: 'ŽEMAITIJOS varškė 9% rieb.' });
+    const ZDESSERT = makeCandidate({ id: 63859, storeProductName: 'Desertinė varškė (plombyro skonio, 7,7% rieb.) ŽEMAITIJOS' });
+    const ZLIESA = makeCandidate({ id: 67708, storeProductName: 'Varškė liesa ŽEMAITIJOS 0,5% rieb.' });
+
+    it('a "9%" query prefers the 9% variant over the 7,7% dessert and 0,5% liesa (no more 3-way tie)', () => {
+        const m = findBestProductMatches('ZEMAITIJOS VARSKE, 9% RIE', null, null, [ZDESSERT, Z9, ZLIESA], 0.4, 5, null);
+        expect(m[0].storeProductId).toBe(66841);
+        const z9 = m.find(x => x.storeProductId === 66841)!;
+        const dessert = m.find(x => x.storeProductId === 63859);
+        if (dessert) expect(z9.confidence).toBeGreaterThan(dessert.confidence);
+    });
+
+    it('rejects a different-flavour, different-% product (5% peach-passionfruit ≠ 2,5% peach-apricot)', () => {
+        const APRICOT = makeCandidate({ id: 23106, storeProductName: 'Jogurtas su persik., abrik. JO, 2,5 %' });
+        const m = findBestProductMatches('Jogurtas 5% persik-pasifl.', null, null, [APRICOT], 0.4, 5, null);
+        expect(m.find(x => x.storeProductId === 23106)).toBeUndefined();
+    });
+
+    it('does NOT penalise when the query has no number (OCR dropped the %)', () => {
+        const m = findBestProductMatches('ZEMAITIJOS VARSKE', null, null, [Z9], 0.4, 5, null);
+        expect(m.find(x => x.storeProductId === 66841)).toBeTruthy();
     });
 });

@@ -1,8 +1,16 @@
 import { Router } from 'express';
 import { addBasket, fetchBasketsByUserId, fetchBasketById, updateBasket, changeBasketStatus, removeBasket, renameBasket, calculateBasket, getBasketStorePrices, copyBasket } from '../controllers/basketController.js';
 import { storePricesLimiter } from '../middleware/rateLimit.js';
+import { requireUser, requireSelfUserParam } from '../middleware/sessionAuth.js';
+import { requireBasketOwner } from '../middleware/resourceAuth.js';
 
 const router = Router();
+
+// Baskets are STRICT single-owner (no share/public flow — only templates and lists are
+// shareable). requireUser sets identity from the token; requireBasketOwner('id') binds each
+// :id route to it. `copy` forks the SOURCE into a NEW basket owned by the caller — since
+// baskets aren't shareable, the source must also be owner-only (audit CROSS-USER-FORK call).
+const owns = requireBasketOwner('id');
 /**
  * @swagger
  * /api/baskets:
@@ -29,7 +37,7 @@ const router = Router();
  *         description: User ID is required
  */
 // POST /api/baskets - Create a new basket
-router.post('/baskets', addBasket);
+router.post('/baskets', requireUser, addBasket);
 /**
  * @swagger
  * /api/baskets/user/{userId}:
@@ -49,7 +57,7 @@ router.post('/baskets', addBasket);
  *         description: A list of baskets for the user 
  */
 // GET /api/baskets/user/:userId - Get all baskets for a specific user
-router.get('/baskets/user/:userId', fetchBasketsByUserId);
+router.get('/baskets/user/:userId', requireUser, requireSelfUserParam, fetchBasketsByUserId);
 /**
  * @swagger
  * /api/baskets/{id}:
@@ -68,7 +76,7 @@ router.get('/baskets/user/:userId', fetchBasketsByUserId);
  *         description: Basket retrieved successfully
  */
 // GET /api/baskets/:id - Get a single basket by ID
-router.get('/baskets/:id', fetchBasketById);
+router.get('/baskets/:id', requireUser, owns, fetchBasketById);
 
 /**
  * @swagger
@@ -88,7 +96,7 @@ router.get('/baskets/:id', fetchBasketById);
  *         description: Basket updated successfully
  */
 // PATCH /api/baskets/:id - Update a basket's updated_at timestamp
-router.patch('/baskets/:id', updateBasket);
+router.patch('/baskets/:id', requireUser, owns, updateBasket);
 
 /**
  * @swagger
@@ -121,7 +129,7 @@ router.patch('/baskets/:id', updateBasket);
  *         description: Basket status updated successfully
  */
 // PATCH /api/baskets/:id/status - Change the status of a basket
-router.patch('/baskets/:id/status', changeBasketStatus);
+router.patch('/baskets/:id/status', requireUser, owns, changeBasketStatus);
 
 /**
  * @swagger
@@ -141,16 +149,16 @@ router.patch('/baskets/:id/status', changeBasketStatus);
  *         description: Basket deleted successfully
  */
 // DELETE /api/baskets/:id - Delete a basket by ID
-router.delete('/baskets/:id', removeBasket);
+router.delete('/baskets/:id', requireUser, owns, removeBasket);
 
-router.patch('/baskets/:id/name', renameBasket);
+router.patch('/baskets/:id/name', requireUser, owns, renameBasket);
 
-router.post('/baskets/:id/calculate', calculateBasket);
+router.post('/baskets/:id/calculate', requireUser, owns, calculateBasket);
 
 // On-demand map pricing — body { storeIds:number[1..10], lat?, lng? }.
 // Read-only, cached, rate-limited. Powers tap-a-pin + "calculate this area".
-router.post('/baskets/:id/store-prices', storePricesLimiter, getBasketStorePrices);
+router.post('/baskets/:id/store-prices', requireUser, owns, storePricesLimiter, getBasketStorePrices);
 
-router.post('/baskets/:id/copy', copyBasket);
+router.post('/baskets/:id/copy', requireUser, owns, copyBasket);
 
 export default router;

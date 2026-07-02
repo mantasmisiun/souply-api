@@ -77,9 +77,9 @@ export const fetchExtraSwipeQueue = async (
     next: NextFunction
 ) => {
     try {
-        const userId = typeof req.query.userId === 'string' ? req.query.userId.trim() : '';
+        const userId = req.authUserId ?? ''; // token subject (requireUser); query userId ignored
         if (!userId) {
-            res.status(400).json({ error: 'userId is required' });
+            res.status(401).json({ error: 'auth-required' });
             return;
         }
         const rawLimit = Number(req.query.limit);
@@ -119,10 +119,11 @@ export const submitOrphanSwipeVote = async (
     next: NextFunction
 ) => {
     try {
-        const { userId, candidateId, vote, dwellMs } = req.body ?? {};
+        const { candidateId, vote, dwellMs } = req.body ?? {};
+        const userId = req.authUserId; // token subject (requireUser); body userId ignored
 
         if (!userId || typeof userId !== 'string') {
-            res.status(400).json({ error: 'userId is required' });
+            res.status(401).json({ error: 'auth-required' });
             return;
         }
         if (!Number.isFinite(candidateId)) {

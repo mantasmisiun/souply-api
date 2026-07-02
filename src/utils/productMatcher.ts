@@ -1,18 +1,20 @@
 /**
  * Product name matching for OCR'd grocery receipt entries.
  *
- * Two scoring lanes combined:
- *   - tokenScore: per-token best-match with Levenshtein + length weighting.
- *     Good when OCR preserves word boundaries.
- *   - charScore: Levenshtein similarity on the joined normalized string.
- *     Rescues cases where OCR split a word across spaces (`gėr imas` for
- *     `gėrimas`) or lost/swapped a single letter — the full-string view
- *     sees most characters are still there even though the token view
- *     sees unmatched fragments.
- *
- * Final confidence = max(tokenScore, charScore * 0.95). Char is slightly
- * discounted so clean token matches still beat noisy-but-similar blobs
- * of the wrong product.
+ * Scoring lanes (see scoreNameConfidence; thresholds in shared/recognitionConfig.ts):
+ *   - tokenScore: per-token best-match with Levenshtein + length weighting, after an
+ *     OCR space-heal glues split tokens back ("KIAUL IENA" → "kiauliena"). Docked by a
+ *     distinguishing-noun penalty (apples vs potatoes sharing only brand words).
+ *   - charScore: whole-string Levenshtein (floor-gated, discounted), with a
+ *     confusion-weighted OCR rescue (ocrConfusions.ts) that only fires when the plain
+ *     similarity already clears ocrRescueMinSim.
+ *   - subset lane + abbreviation bonus: gated behind a shared significant token —
+ *     they can only ADD coverage, never originate a match.
+ *   - anchor gate: a query may only match a name sharing its anchor token (or a
+ *     near-identical char rescue) — stops single-word coincidences.
+ * Per-candidate adjustments AFTER the lane max: canonical-alias targets (vocabulary),
+ * L3 category boost, pack-size bonus/penalty, unit-family penalty, variant-number
+ * (fat-%) mismatch penalty, weighable form gate, catalog-first tiebreak.
  *
  * Normalization additionally strips common receipt prefixes the parsers
  * may leak (loyalty card X's, `nuol.` / `galut. kaina` / "sutaupete" /
@@ -21,6 +23,7 @@
  */
 
 import { levenshtein } from './addressMatcher.js';
+import { weightedLevenshtein } from './ocrConfusions.js';
 import { extractPackSize } from '../../../shared/parsers/rimiParser.js';
 import { sharesRequiredAnchor, sharedSignificantToken } from './nameMatchGate.js';
 import { RECOGNITION } from '../../../shared/recognitionConfig.js';
@@ -69,6 +72,21 @@ function tokenize(normalizedName: string): string[] {
     return normalizedName.split(' ').filter(t => t.length > 0);
 }
 
+// Full DECIMAL numbers in a name ("9%", "7,7% rieb.", "2,5%", "500 g") as canonical strings.
+// Pulled from the RAW name so "7,7" stays one number (the normalized "7 7" split would let
+// "2,5%" and "3,2%" collide on the digit "2"). Used to disambiguate same-named variants whose
+// only difference is a fat-% / size the token lanes tie on.
+function extractNameNumbers(name: string): Set<string> {
+    const out = new Set<string>();
+    const m = name ? name.match(/\d+(?:[.,]\d+)?/g) : null;
+    if (!m) return out;
+    for (const raw of m) {
+        const v = parseFloat(raw.replace(',', '.'));
+        if (Number.isFinite(v)) out.add(String(v));
+    }
+    return out;
+}
+
 function bestTokenMatch(queryToken: string, candidateTokens: string[]): number {
     let best = 0;
     for (const cand of candidateTokens) {
@@ -98,8 +116,15 @@ function charSimilarity(a: string, b: string): number {
     if (maxLen === 0) return 0;
     const minLen = Math.min(aCompact.length, bCompact.length);
     if (minLen / maxLen < 0.4) return 0;
-    const dist = levenshtein(aCompact, bCompact);
-    return 1 - dist / maxLen;
+    const plainSim = 1 - levenshtein(aCompact, bCompact) / maxLen;
+    // OCR confusion-weighted RESCUE, gated to already-close strings (plainSim ≥
+    // ocrRescueMinSim). A real garble of the SAME name (ryz14→ryžiai, plain ~0.75) is
+    // mostly-identical, so it qualifies and the cheap confusions (digit↔letter, homoglyph,
+    // ll↔ti) lift it over the char floor. A genuinely-different name that only shares
+    // packaging tokens (apples ~0.58 vs potatoes) stays on the plain score, so the weighting
+    // can never nudge an unrelated product across the floor. Diacritics fold to 0 upstream.
+    if (plainSim < RECOGNITION.match.ocrRescueMinSim) return plainSim;
+    return 1 - weightedLevenshtein(aCompact, bCompact) / maxLen;
 }
 
 export interface MatchCandidate {
@@ -308,17 +333,33 @@ function subsetCoverage(healedQuery: string[], candTokens: string[], allowAbbrev
  * already normalized + tokenized. Pure name signal — amount/unit bonuses are applied
  * by the caller.
  */
+/**
+ * Per-name lane breakdown, filled ONLY when scoreNameConfidence is passed a `prov`
+ * object (diagnostics — the hot path passes nothing, so its behaviour is unchanged).
+ * `explainMatch` uses it to report which lane produced a match.
+ */
+export interface NameLaneProv {
+    gated?: boolean;   // anchor gate blocked it (→ 0)
+    healed?: boolean;  // OCR space-heal glued a split token before scoring
+    token?: number;    // token lane contribution (post distinguishing penalty)
+    char?: number;     // whole-string char-rescue contribution
+    subset?: number;   // token-set subset lane contribution
+    abbrev?: number;   // abbreviation bonus added
+}
+
 function scoreNameConfidence(
     normalizedQuery: string,
     queryTokens: string[],
     normalizedName: string,
     nameTokens: string[],
+    prov?: NameLaneProv,
 ): number {
     // Anchor-token gate: a single-significant-word query may only match a name that
     // contains it EXACTLY, unless the two strings are near-identical char-wise (the
     // OCR split-word case the char lane rescues). Stops "Airanas" → "Šafranas KOTANYI".
     if (!sharesRequiredAnchor(normalizedQuery, normalizedName)
         && charSimilarity(normalizedQuery, normalizedName) < RECOGNITION.match.anchorCharSimRescue) {
+        if (prov) prov.gated = true;
         return 0;
     }
 
@@ -326,15 +367,18 @@ function scoreNameConfidence(
     // glued back ("kiauliena") before the token lane scores it.
     const sharedAnchor = sharedSignificantToken(normalizedQuery, normalizedName);
     const healedQuery = healQueryTokens(queryTokens, nameTokens);
+    if (prov) prov.healed = healedQuery.join(' ') !== queryTokens.join(' ');
 
     let tokenScore = scoreTokens(healedQuery, nameTokens);
     // Dock the token score when a distinguishing query noun has no counterpart
     // (apples vs potatoes share only "Fasuoti/IKI/ŪKIS"). Token lane only.
     if (tokenScore > 0) tokenScore = Math.max(0, tokenScore - distinguishingPenalty(healedQuery, nameTokens));
+    if (prov) prov.token = tokenScore;
     // Whole-string char rescue for OCR-split tokens; floored so incidental substring
     // overlap between unrelated words can't false-match.
     const charScore = charSimilarity(normalizedQuery, normalizedName);
     const charContribution = charScore >= RECOGNITION.match.charScoreFloor ? charScore * RECOGNITION.match.charScoreDiscount : 0;
+    if (prov) prov.char = charContribution;
     let confidence = Math.max(tokenScore, charContribution);
 
     // Token-set SUBSET lane + anchored abbreviation bonus — gated behind a shared
@@ -342,9 +386,9 @@ function scoreNameConfidence(
     // ranking between names that already overlap on a content word.
     if (sharedAnchor) {
         const cov = subsetCoverage(healedQuery, nameTokens, true);
-        if (cov >= RECOGNITION.match.subsetMinCoverage) {
-            confidence = Math.max(confidence, cov * RECOGNITION.match.subsetFullWeight);
-        }
+        const subsetContribution = cov >= RECOGNITION.match.subsetMinCoverage ? cov * RECOGNITION.match.subsetFullWeight : 0;
+        if (subsetContribution > 0) confidence = Math.max(confidence, subsetContribution);
+        if (prov) prov.subset = subsetContribution;
         const SHORT = RECOGNITION.match.shortTokenThreshold;
         const candLong = nameTokens.filter(t => t.length > SHORT);
         let abbrevHits = 0;
@@ -353,7 +397,9 @@ function scoreNameConfidence(
             if (nameTokens.includes(qt)) continue;                        // already an exact token match
             if (candLong.some(ct => ct.startsWith(qt))) abbrevHits++;
         }
-        if (abbrevHits > 0) confidence = Math.min(1, confidence + Math.min(RECOGNITION.match.abbrevBonusCap, abbrevHits * RECOGNITION.match.abbrevBonus));
+        const abbrevAdd = abbrevHits > 0 ? Math.min(RECOGNITION.match.abbrevBonusCap, abbrevHits * RECOGNITION.match.abbrevBonus) : 0;
+        if (abbrevAdd > 0) confidence = Math.min(1, confidence + abbrevAdd);
+        if (prov) prov.abbrev = abbrevAdd;
     }
     return confidence;
 }
@@ -375,6 +421,8 @@ export function findBestProductMatches(
     const normalizedQuery = normalizeProductName(ocrName);
     const queryTokens = tokenize(normalizedQuery);
     if (queryTokens.length === 0) return [];
+    // Variant-discriminating numbers in the query (fat-% / size). Compared per-candidate below.
+    const queryNums = extractNameNumbers(ocrName);
 
     // Vocabulary L2-scope (Issue H): if the query EXACTLY matches a learned 'similarity'
     // alias (a same-category-substitute link), restrict matching to that SP's L2 family
@@ -480,6 +528,19 @@ export function findBestProductMatches(
             }
         }
 
+        // FAT-% / VARIANT-NUMBER disambiguation: when the query name specifies a number the
+        // candidate LACKS and the candidate carries its OWN numbers, they are different variants
+        // ("ŽEMAITIJOS varškė 9%" vs the 7,7% dessert / 0,5% liesa — all tie on the shared words).
+        // The token/char lanes treat these short numeric tokens as noise, so demote the mismatch
+        // to break the tie toward the value-matching variant. Skipped when either side has no
+        // numbers (OCR dropped the %, or the SP doesn't state it) so it can't hurt those.
+        if (queryNums.size > 0) {
+            const candNums = extractNameNumbers(cand.storeProductName);
+            if (candNums.size > 0 && [...queryNums].some(n => !candNums.has(n))) {
+                confidence = Math.max(0, confidence - RECOGNITION.match.numberMismatchPenalty);
+            }
+        }
+
         if (confidence >= minConfidence) {
             scored.push({ cand, confidence });
         }
@@ -514,4 +575,53 @@ export function findBestProductMatches(
         confidence: Math.round(confidence * 100) / 100,
         isCatalog: cand.isCatalog,
     }));
+}
+
+/**
+ * Diagnostics-only (Log 3): re-score ONE candidate's names against the OCR query WITH
+ * provenance, to report HOW the top match was produced — which NAME won (the catalog
+ * storeProductName vs a learned receipt alias) and which LANE carried it (token / char /
+ * subset, whether OCR heal fired, whether the abbrev bonus nudged it). Runs
+ * scoreNameConfidence exactly as findBestProductMatches does but for a single candidate,
+ * so it adds nothing to the hot matching path and cannot change match results.
+ */
+export interface MatchProvenance {
+    via: 'catalog-name' | 'learned-alias' | 'none';
+    aliasText: string | null;
+    lane: string;    // e.g. 'token', 'char', 'subset', 'token(healed)', 'subset+abbrev'
+    healed: boolean;
+    confidence: number;
+}
+
+export function explainMatch(ocrName: string, cand: MatchCandidate): MatchProvenance {
+    const normalizedQuery = normalizeProductName(ocrName);
+    const queryTokens = tokenize(normalizedQuery);
+    const names: Array<{ via: 'catalog-name' | 'learned-alias'; text: string; norm: string }> = [];
+    const normCat = normalizeProductName(cand.storeProductName);
+    if (tokenize(normCat).length > 0) names.push({ via: 'catalog-name', text: cand.storeProductName, norm: normCat });
+    for (const a of cand.aliases ?? []) {
+        if (tokenize(a).length > 0) names.push({ via: 'learned-alias', text: a, norm: a }); // aliases are pre-normalized
+    }
+    let best = { conf: -1, via: 'none' as MatchProvenance['via'], text: null as string | null, prov: {} as NameLaneProv };
+    for (const n of names) {
+        const prov: NameLaneProv = {};
+        const c = scoreNameConfidence(normalizedQuery, queryTokens, n.norm, tokenize(n.norm), prov);
+        if (c > best.conf) best = { conf: c, via: n.via, text: n.via === 'learned-alias' ? n.text : null, prov };
+    }
+    // Winning lane = the largest contributor scoreNameConfidence recorded.
+    const p = best.prov;
+    let lane = 'none';
+    let laneScore = 0;
+    for (const [label, val] of [['token', p.token ?? 0], ['char', p.char ?? 0], ['subset', p.subset ?? 0]] as Array<[string, number]>) {
+        if (val > laneScore) { laneScore = val; lane = label; }
+    }
+    if (lane === 'token' && p.healed) lane = 'token(healed)';
+    if ((p.abbrev ?? 0) > 0) lane = `${lane}+abbrev`;
+    return {
+        via: best.conf > 0 ? best.via : 'none',
+        aliasText: best.text,
+        lane,
+        healed: !!p.healed,
+        confidence: Math.round(Math.max(0, best.conf) * 100) / 100,
+    };
 }

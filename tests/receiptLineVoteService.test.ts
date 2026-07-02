@@ -1,14 +1,32 @@
 import { jest } from '@jest/globals';
 import { castReceiptLineVote } from '../src/services/receiptLineVoteService.js';
+import { lineToItem } from '../src/models/receiptItemModel.js';
 
-function makeConn(parsedData: any) {
+// Mock connection (P2 Step C): the vote reads the line from ReceiptItem rows (built here via
+// lineToItem) + the chainId from the receipt header, and confirms/demotes as a single-row
+// UPDATE ReceiptItem. castReceiptLineVote returns the mutated line, which the tests assert on.
+function makeConn(pd: any) {
+    const lines = Array.isArray(pd?.products) ? pd.products : [];
+    const chainId = Number(pd?.header?.chainId) || 3;
+    const rows = lines.map((line: any, i: number) => lineToItem(108, i, line));
     const calls: Array<{ sql: string; params: any[] }> = [];
     const conn: any = {
         _calls: calls,
         query: jest.fn(async (sql: string, params: any[]) => {
             calls.push({ sql, params });
-            if (/SELECT parsedData/.test(sql)) return [[{ parsedData: JSON.stringify(parsedData) }]];
-            if (/SELECT chainId/.test(sql)) return [[{ chainId: 3 }]];
+            if (/FROM ReceiptItem/.test(sql)) {
+                if (/matchedSpId IN/.test(sql)) {
+                    const [, a, b] = params;
+                    return [rows.filter((r: any) => r.matchedSpId === a || r.matchedSpId === b)];
+                }
+                if (/lineIdx = \?/.test(sql)) {
+                    const r = rows.find((r: any) => r.lineIdx === params[1]);
+                    return [r ? [r] : []];
+                }
+                return [rows];
+            }
+            if (/SELECT parsedData/.test(sql)) return [[{ parsedData: JSON.stringify({ header: { chainId } }) }]];
+            if (/SELECT chainId|chainId FROM StoreProduct/.test(sql)) return [[{ chainId }]];
             if (/SELECT receiptLineIdx/.test(sql)) return [[]];
             return [{ affectedRows: 1 }];
         }),

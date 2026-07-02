@@ -1,7 +1,5 @@
 import pool from '../config/db.js';
-import { createProduct } from '../models/productModel.js';
 import {
-    createStoreProduct,
     findExactMatchingStoreProduct,
     markStoreProductWeighable,
 } from '../models/storeProductModel.js';
@@ -10,11 +8,13 @@ import { RECOGNITION } from '../../../shared/recognitionConfig.js';
 
 type Connection = typeof pool | any;
 
-// Cross-chain bootstrap gates — applied when the matcher surfaces a
+// Cross-chain acceptance gates — applied when the matcher surfaces a
 // StoreProduct from a DIFFERENT chain than the receipt's (Lidl/Norfa
-// receipts against the scraped Maxima/Rimi/IKI catalog). We only
-// bootstrap a new SP in the receipt's chain when ALL gates pass,
-// otherwise we fall through to creating a new Product entirely.
+// receipts against the scraped Maxima/Rimi/IKI catalog). NO-MINT (P3):
+// the resolver NEVER creates StoreProducts or Products — when the gates
+// pass it REUSES a same-chain SP of the matched Product if one exists;
+// when they fail (or nothing matches) the line stays UNMATCHED
+// (matchedSpId NULL, recorded as a ReceiptItem observation only).
 //
 //   PRICE: asymmetric band around the cross-chain SP's latest Price.
 //     Lidl/Norfa are structurally ~10-20% cheaper than Maxima/Rimi,
@@ -91,8 +91,12 @@ export interface ResolveResult {
      *  the receipt's chain pointing at the matched Product.
      *  'skipped_unpriced' = the line has no usable price (≤0), so the OCR is
      *  treated as too garbled to trust — we REUSE an existing SP if one matches
-     *  but never CREATE a fresh one, so a bad parse can't mint catalog junk. */
-    source: 'reused' | 'created' | 'bootstrapped' | 'skipped_unpriced';
+     *  but never CREATE a fresh one, so a bad parse can't mint catalog junk.
+     *  'unmatched' = NO-MINT policy (P3): a match existed only cross-chain (no same-
+     *  chain SP) or no match at all. The receipt NEVER creates an SP/Product — the line
+     *  stays unmatched (matchedSpId NULL, no Price); the ReceiptItem records the
+     *  observation and the vocabulary/promotion path may create the SP later. */
+    source: 'reused' | 'created' | 'bootstrapped' | 'skipped_unpriced' | 'unmatched';
     /** When 'bootstrapped' or 'reused' following a cross-chain redirect,
      *  this flags that the resolver intentionally did NOT use the SP the
      *  caller passed in (it belonged to a different chain) — useful for
@@ -233,6 +237,9 @@ export const resolveReceiptLineStoreProduct = async (
 ): Promise<ResolveResult> => {
     const db = conn || pool;
     const skipped: ResolveResult = { storeProductId: null, source: 'skipped_unpriced' };
+    // NO-MINT (P3): a priced line that finds no EXISTING same-chain SP stays unmatched —
+    // the receipt records the observation (ReceiptItem) but never creates catalog rows.
+    const unmatched: ResolveResult = { storeProductId: null, source: 'unmatched' };
 
     // If the caller supplied an SP id (mobile matcher's choice, or a
     // prior resolver run), check whether it belongs to the receipt's
@@ -298,26 +305,11 @@ export const resolveReceiptLineStoreProduct = async (
                         crossChainBootstrap: true,
                     };
                 }
-                if (!allowCreate) return skipped; // price-less line → don't mint
-                // Mint new SP. Receipt supplies the user-visible fields
-                // (name, amount, unit); cross-chain altSp contributes
-                // catalog enrichment (brandName, isWeighable, imageUrl).
-                const newSpId = await createStoreProduct(
-                    sp.productId,
-                    chainId,
-                    line.name,
-                    line.brandName ?? sp.brandName,
-                    line.isWeighable || sp.isWeighable,
-                    line.amount,
-                    line.unit,
-                    sp.imageUrl,
-                    db
-                );
-                return {
-                    storeProductId: newSpId,
-                    source: 'bootstrapped',
-                    crossChainBootstrap: true,
-                };
+                if (!allowCreate) return skipped; // price-less / garbled line
+                // NO-MINT (P3): the receipt never CREATES an SP. A confident cross-chain
+                // match with no existing same-chain SP stays UNMATCHED — the vocabulary/
+                // promotion path may create the SP later once evidence accumulates.
+                return { ...unmatched, crossChainBootstrap: true };
             }
             // Fall through on rejection, but remember the reason so
             // the caller can surface it in logs/metrics. Pass
@@ -325,14 +317,9 @@ export const resolveReceiptLineStoreProduct = async (
             // doesn't quietly link the new SP to the rejected cross-
             // chain Product via `line.altMatchProductId` — that would
             // defeat the gate decision at the Product level.
-            if (!allowCreate) return skipped; // price-less line → don't create
-            if (!line.name || !line.name.trim()) {
-                throw new Error('Cannot resolve receipt line without a name');
-            }
-            const fallback = await createFreshProductAndSp(chainId, line, db, {
-                skipAltMatchProductReuse: true,
-            });
-            return { ...fallback, rejectReason: reject };
+            if (!allowCreate) return skipped; // price-less / garbled line
+            // NO-MINT (P3): a REJECTED cross-chain match creates nothing → UNMATCHED.
+            return { ...unmatched, rejectReason: reject };
         }
         // SP id provided but row no longer exists (deleted mid-flow).
         // Fall through as if no SP was supplied.
@@ -354,82 +341,8 @@ export const resolveReceiptLineStoreProduct = async (
         return { storeProductId: existing, source: 'reused' };
     }
 
-    if (!allowCreate) return skipped; // price-less line → don't create catalog junk
-    return await createFreshProductAndSp(chainId, line, db);
-};
-
-/**
- * Create a Product (or reuse altMatchProductId's Product) + new SP for
- * `line` in `chainId`. Used as the standard path when there's no SP to
- * reuse, and as the fallback when the cross-chain bootstrap gates fail.
- *
- * `altMatchProductId` reuse is the helper's main quirk: when the matcher
- * surfaced a candidate Product (same-chain dedup clustering), we link
- * the new SP to it so different OCR name variants of the same product
- * collapse onto one `Product` row. Callers entering from a cross-chain
- * gate REJECTION must pass `skipAltMatchProductReuse: true` — otherwise
- * the rejected cross-chain match still leaks into the new SP via the
- * altMatch's productId, defeating the gate at the Product level.
- */
-const createFreshProductAndSp = async (
-    chainId: number,
-    line: ReceiptLineInput,
-    db: Connection,
-    options: { skipAltMatchProductReuse?: boolean } = {},
-): Promise<ResolveResult> => {
-    let productId: number | null = null;
-    let categoryId: number | null = null;
-    if (line.altMatchProductId && !options.skipAltMatchProductReuse) {
-        const [rows]: any = await db.query(
-            'SELECT id, categoryId FROM Product WHERE id = ? LIMIT 1',
-            [line.altMatchProductId]
-        );
-        if (rows.length > 0) {
-            // Borrow the candidate's CATEGORY always (a wrong-but-related match still
-            // yields a sane category), but only CLUSTER the new SP under its Product
-            // when the match is confident enough. A weak match (apples @0.51 onto a
-            // potatoes Product) borrows the category but spawns a FRESH Product, so
-            // apples never file under potatoes. null confidence (legacy callers / no
-            // altMatches threaded) preserves the prior reuse-always behaviour.
-            categoryId = rows[0].categoryId;
-            const conf = line.altMatchConfidence;
-            if (conf == null || conf >= RECOGNITION.resolve.autoBaseProductThreshold) {
-                productId = rows[0].id;
-            }
-        }
-    }
-    if (categoryId === null) {
-        categoryId = await getUnassignedCategoryId(db);
-    }
-
-    const resolvedProductId: number =
-        productId ?? (await createProduct(categoryId, null, line.name, db));
-
-    let storeProductId: number;
-    try {
-        storeProductId = await createStoreProduct(
-            resolvedProductId,
-            chainId,
-            line.name,
-            line.brandName,
-            !!line.isWeighable,
-            line.amount,
-            line.unit,
-            line.imageUrl,
-            db
-        );
-    } catch (e: any) {
-        if (e.code === 'ER_DUP_ENTRY') {
-            // Race or same-product different-OCR-name: the UNIQUE key on
-            // (chainId, productId, amount, unit) already has this combination.
-            // Find and reuse the existing SP instead of crashing.
-            const existing = await findSpByChainProductSize(
-                chainId, resolvedProductId, line.amount, line.unit, db
-            );
-            if (existing) return { storeProductId: existing, source: 'reused' };
-        }
-        throw e;
-    }
-
-    return { storeProductId, source: 'created' };
+    if (!allowCreate) return skipped; // price-less / garbled line — no match, no create
+    // NO-MINT (P3): no existing SP matched → UNMATCHED. The receipt records the observation
+    // as a ReceiptItem; it never mints catalog SPs/Products.
+    return unmatched;
 };

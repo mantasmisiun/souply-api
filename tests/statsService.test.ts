@@ -127,29 +127,33 @@ describe('computeReceiptSavings', () => {
 // ---------------------------------------------------------------------------
 
 describe('getUserStats', () => {
-    // Query order for receipts with storeProductId items:
+    // Query order (post-ReceiptItem-cutover):
     //   1. Receipts query (always)
-    //   2. SP→productId+category join (when any item has storeProductId)
-    //   3. Market avg query for savings (when spPriceList is non-empty)
+    //   2. ReceiptItem batch query (when any receipts exist)
+    //   3. SP→productId+category join (when any item has storeProductId)
+    //   4. Market avg query for savings (when spPriceList is non-empty)
     //
-    // For receipts WITHOUT storeProductId items the SP and market avg queries
-    // are skipped — only the receipts query fires.
+    // Items come from ReceiptItem rows; the blob products/items is ONLY the
+    // legacy fallback for receipts that have no rows. Receipts need an `id`
+    // for the item grouping — every fixture row carries one.
 
-    // Helper: set up pool for receipts that have no storeProductId items.
-    // Savings will be 0 (no matched SPs) — no extra queries needed.
-    function setupPoolNoSp(receipts: any[]) {
+    // Helper: receipts whose items carry no storeProductId (SP + avg queries skipped).
+    // itemRows defaults to [] = legacy blob fallback path.
+    function setupPoolNoSp(receipts: any[], itemRows: any[] = []) {
         mockPoolQuery.mockResolvedValueOnce([receipts]);
+        if (receipts.length > 0) mockPoolQuery.mockResolvedValueOnce([itemRows]);
     }
 
-    // Helper: set up pool for receipts WITH storeProductId items.
-    // Caller provides the SP rows (query 2) and avg rows (query 3).
+    // Helper: receipts WITH storeProductId items.
     function setupPoolWithSp(
         receipts: any[],
         spRows: any[],
         avgRows: any[],
+        itemRows: any[] = [],
     ) {
         mockPoolQuery
             .mockResolvedValueOnce([receipts])  // receipts
+            .mockResolvedValueOnce([itemRows])  // ReceiptItem batch
             .mockResolvedValueOnce([spRows])    // SP→productId+category
             .mockResolvedValueOnce([avgRows]);  // market avg
     }
@@ -330,23 +334,70 @@ describe('getUserStats', () => {
         expect(result.categoryBreakdown[0].categoryName).toBe('Pienas');
     });
 
-    it('issues at most 3 pool queries for receipts with matched SPs', async () => {
+    it('issues at most 4 pool queries for receipts with matched SPs', async () => {
         const parsedData = { products: [{ price: '1.00', quantity: '1', storeProductId: 10 }] };
         setupPoolWithSp(
-            [{ receiptDate: '2026-05-01', parsedData, chainName: 'Maxima' }],
+            [{ id: 1, receiptDate: '2026-05-01', parsedData, chainName: 'Maxima' }],
             [{ spId: 10, productId: 100, categoryName: 'Pienas' }],
             [{ productId: 100, avg_price: '2.00' }],
         );
 
         await getUserStats('user1');
 
-        // receipts + SP join + market avg = 3
-        expect(mockPoolQuery).toHaveBeenCalledTimes(3);
+        // receipts + ReceiptItem batch + SP join + market avg = 4
+        expect(mockPoolQuery).toHaveBeenCalledTimes(4);
     });
 
     it('issues only 1 pool query when there are no receipts', async () => {
         setupPoolNoSp([]);
         await getUserStats('user1');
         expect(mockPoolQuery).toHaveBeenCalledTimes(1);
+    });
+
+    // ── ReceiptItem cutover: rows are the item source, the blob is empty ──
+
+    it('aggregates from ReceiptItem rows when the blob products[] is empty (post-cutover receipts)', async () => {
+        // The P0 regression this guards: post-cutover blobs store products: [],
+        // so a blob-only read reports zero spending/savings for every new receipt.
+        setupPoolWithSp(
+            [{ id: 42, receiptDate: '2026-05-01', parsedData: { products: [] }, chainName: 'Maxima' }],
+            [{ spId: 10, productId: 100, categoryName: 'Pienas' }],
+            [{ productId: 100, avg_price: '2.00' }],
+            [{ receiptId: 42, storeProductId: 10, price: '1.50', promoPrice: null, quantity: '2' }],
+        );
+
+        const result = await getUserStats('user1');
+
+        const maxima = result.storeBreakdown.find((s: any) => s.chainName === 'Maxima');
+        expect(maxima.total).toBeCloseTo(3.00);          // 1.50 × 2 from the ROWS
+        expect(result.totalSavings).toBeCloseTo(1.00);   // (2.00 − 1.50) × 2
+        const pienas = result.categoryBreakdown.find((c: any) => c.categoryName === 'Pienas');
+        expect(pienas.total).toBeCloseTo(3.00);
+    });
+
+    it('uses promoPrice from ReceiptItem rows when set (what the user actually paid)', async () => {
+        setupPoolNoSp(
+            [{ id: 7, receiptDate: '2026-05-01', parsedData: { products: [] }, chainName: 'Lidl' }],
+            [{ receiptId: 7, storeProductId: null, price: '2.00', promoPrice: '1.20', quantity: '1' }],
+        );
+
+        const result = await getUserStats('user1');
+        const lidl = result.storeBreakdown.find((s: any) => s.chainName === 'Lidl');
+        expect(lidl.total).toBeCloseTo(1.20);
+    });
+
+    it('mixes row-backed and legacy blob-backed receipts in one aggregation', async () => {
+        // Receipt 1 (post-cutover): rows only, blob empty. Receipt 2 (legacy): blob only, no rows.
+        setupPoolNoSp(
+            [
+                { id: 1, receiptDate: '2026-05-01', parsedData: { products: [] }, chainName: 'Maxima' },
+                { id: 2, receiptDate: '2026-05-02', parsedData: { products: [{ price: '5.00', quantity: '1' }] }, chainName: 'Rimi' },
+            ],
+            [{ receiptId: 1, storeProductId: null, price: '2.00', promoPrice: null, quantity: '1' }],
+        );
+
+        const result = await getUserStats('user1');
+        expect(result.storeBreakdown.find((s: any) => s.chainName === 'Maxima').total).toBeCloseTo(2.00);
+        expect(result.storeBreakdown.find((s: any) => s.chainName === 'Rimi').total).toBeCloseTo(5.00);
     });
 });

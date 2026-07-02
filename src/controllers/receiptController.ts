@@ -16,7 +16,8 @@ import {
     type IssueFlags,
 } from "../models/receiptLineIssueModel.js";
 import { getPresignedUrl } from "../services/storageService.js";
-import { persistReceiptPrices } from '../services/receiptSaveService.js';
+import { persistReceiptPrices, applyReceiptAutosave } from '../services/receiptSaveService.js';
+import { withDeadlockRetry } from '../utils/withDeadlockRetry.js';
 import { demoteReceiptLineDirect } from '../services/receiptLineDemotionService.js';
 import { buildReceiptResolveCards, markServedResolveLinesAsked } from '../services/receiptResolveQueueService.js';
 import { castReceiptLineVote } from '../services/receiptLineVoteService.js';
@@ -201,9 +202,12 @@ export const fetchReceiptItems = async (req: Request, res: Response, next: NextF
  */
 export const createReceiptFromOcr = async (req: Request, res: Response, next: NextFunction) => {
     try {
-        const { userId, filePath, fileType, parsedData } = req.body;
+        // Owner = the token subject (requireUser), NEVER a client-supplied body userId —
+        // otherwise a caller could create a receipt owned by another account.
+        const userId = req.authUserId;
+        const { filePath, fileType, parsedData } = req.body;
         if (!userId || !parsedData) {
-            res.status(400).json({ error: 'userId and parsedData are required' });
+            res.status(400).json({ error: 'auth and parsedData are required' });
             return;
         }
         // Reject duplicates early so re-photographing the same receipt doesn't
@@ -239,7 +243,7 @@ export const createReceiptFromOcr = async (req: Request, res: Response, next: Ne
         // we just inserted and return a clean 409. The mobile app treats
         // 409 as a terminal state and navigates back to the Analize tab.
         try {
-            const result = await persistReceiptPrices(receiptId, userId, parsedData, {
+            const result = await withDeadlockRetry(() => persistReceiptPrices(receiptId, userId, parsedData, {
                 chainId: parsedData.header?.chainId,
                 storeId,
                 receiptNo: parsedData.footer?.receiptNo ?? null,
@@ -254,7 +258,7 @@ export const createReceiptFromOcr = async (req: Request, res: Response, next: Ne
                     quantity: p.quantity,
                     unit: p.unit,
                 })),
-            }, true);
+            }, true), { label: `create receipt ${receiptId}` });
             res.status(201).json({ id: receiptId, ...result });
             // Fire-and-forget default-template regeneration. Runs after the
             // response has been sent so client-perceived latency is unaffected.
@@ -300,14 +304,21 @@ export const createReceiptFromOcr = async (req: Request, res: Response, next: Ne
 export const updateReceiptFromOcr = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const id = Number(req.params.id);
-        const { userId, parsedData } = req.body;
+        // Identity from the token (requireUser + requireReceiptOwner already proved the
+        // caller owns this receipt). The body userId is ignored.
+        const userId = req.authUserId;
+        const { parsedData } = req.body;
         if (isNaN(id) || !userId || !parsedData) {
-            res.status(400).json({ error: 'Invalid id or missing userId/parsedData' });
+            res.status(400).json({ error: 'Invalid id or missing auth/parsedData' });
             return;
         }
 
         try {
-            const result = await persistReceiptPrices(id, userId, parsedData, {
+            // NON-DESTRUCTIVE autosave: merges client-owned edits into the existing
+            // ReceiptItem/Price rows instead of re-running the full save pipeline
+            // (which DELETE+INSERTed items, cascade-deleted prices, and overwrote
+            // server-side vote/reject state with the client's stale blob).
+            const result = await withDeadlockRetry(() => applyReceiptAutosave(id, userId, parsedData, {
                 chainId: parsedData.header?.chainId,
                 storeId: parsedData.header?.storeId ?? null,
                 receiptNo: parsedData.footer?.receiptNo ?? null,
@@ -322,7 +333,7 @@ export const updateReceiptFromOcr = async (req: Request, res: Response, next: Ne
                     quantity: p.quantity,
                     unit: p.unit,
                 })),
-            }, false, false); // awardPoints=false, isInitialSave=false (autosave/edit — no dup summary)
+            }), { label: `autosave receipt ${id}` });
             res.json({ id, ...result });
         } catch (err: any) {
             // Duplicate-receipt safety net for the update path. This
@@ -400,12 +411,27 @@ export const convertPdfToImage = async (req: Request, res: Response, next: NextF
             res.status(400).json({ error: 'pdfBase64 decoded to an empty buffer' });
             return;
         }
-        const { convertPdfBufferToImagePages } = await import('../services/pdfService.js');
-        const pages = await convertPdfBufferToImagePages(pdfBuffer);
-        res.json({
-            images: pages.map((b) => b.toString('base64')),
-            mimeType: 'image/png',
-        });
+        // Hard binary-size cap (independent of the 10mb JSON body limit) so a giant
+        // decoded blob can't reach the rasteriser.
+        const MAX_PDF_BYTES = 8 * 1024 * 1024;
+        if (pdfBuffer.length > MAX_PDF_BYTES) {
+            res.status(413).json({ error: 'pdf too large' });
+            return;
+        }
+        const { convertPdfBufferToImagePages, PdfTooLargeError } = await import('../services/pdfService.js');
+        try {
+            const pages = await convertPdfBufferToImagePages(pdfBuffer);
+            res.json({
+                images: pages.map((b) => b.toString('base64')),
+                mimeType: 'image/png',
+            });
+        } catch (inner: any) {
+            if (inner instanceof PdfTooLargeError) {
+                res.status(413).json({ error: 'pdf too large or too complex' });
+                return;
+            }
+            throw inner;
+        }
     } catch (error: any) {
         console.error('PDF → PNG conversion failed:', error?.message ?? error);
         next(error);
@@ -511,8 +537,21 @@ export const updateReceiptRegions = async (req: Request, res: Response, next: Ne
             return;
         }
 
-        const receipt: any = await getReceiptById(id);
+        // Read-modify-write the parsedData blob under a ROW LOCK so this can't race the
+        // debounced autosave PUT (which also writes the blob) into a lost update — the
+        // FOR UPDATE below serializes the two on the Receipt row. Everything through the
+        // final UPDATE runs in this one transaction.
+        const conn = await (pool as any).getConnection();
+        let committed = false;
+        try {
+        await conn.beginTransaction();
+        const [lockRows]: any = await conn.query(
+            'SELECT parsedData, receiptNos, receiptNoCanonical AS receiptNo FROM Receipt WHERE id = ? FOR UPDATE',
+            [id],
+        );
+        const receipt: any = lockRows[0];
         if (!receipt) {
+            await conn.rollback();
             res.status(404).json({ error: 'Receipt not found' });
             return;
         }
@@ -522,10 +561,12 @@ export const updateReceiptRegions = async (req: Request, res: Response, next: Ne
         try {
             parsed = parsedDataIsString ? JSON.parse(receipt.parsedData) : receipt.parsedData;
         } catch {
+            await conn.rollback();
             res.status(500).json({ error: 'Malformed parsedData' });
             return;
         }
         if (!parsed || typeof parsed !== 'object') {
+            await conn.rollback();
             res.status(500).json({ error: 'Malformed parsedData' });
             return;
         }
@@ -610,7 +651,7 @@ export const updateReceiptRegions = async (req: Request, res: Response, next: Ne
         parsed.footer.receiptNos = recomputedReceiptNos;
 
         try {
-            await pool.query(
+            await conn.query(
                 'UPDATE Receipt SET parsedData = ?, receiptNos = ? WHERE id = ?',
                 [JSON.stringify(parsed), recomputedReceiptNos.length ? JSON.stringify(recomputedReceiptNos) : null, id],
             );
@@ -624,12 +665,20 @@ export const updateReceiptRegions = async (req: Request, res: Response, next: Ne
                 try { const a = JSON.parse(receipt.receiptNos ?? 'null'); if (Array.isArray(a)) stored = a.map(String); } catch { /* leave [] */ }
                 parsed.footer.receiptNos = stored;
                 console.warn(`[regions] receiptNos change for receipt ${id} would collide on unique_receipt — kept existing identity, persisted parsedData only`);
-                await pool.query('UPDATE Receipt SET parsedData = ? WHERE id = ?', [JSON.stringify(parsed), id]);
+                await conn.query('UPDATE Receipt SET parsedData = ? WHERE id = ?', [JSON.stringify(parsed), id]);
             } else {
                 throw e;
             }
         }
+        await conn.commit();
+        committed = true;
         res.json({ id, ok: true });
+        } catch (txErr) {
+            if (!committed) { try { await conn.rollback(); } catch { /* already gone */ } }
+            throw txErr;
+        } finally {
+            conn.release();
+        }
     } catch (error) {
         next(error);
     }
@@ -680,7 +729,7 @@ export const fetchReceiptSwipeQueue = async (req: Request, res: Response, next: 
             res.status(400).json({ error: 'Invalid receipt ID' });
             return;
         }
-        const userId = typeof req.query.userId === 'string' ? req.query.userId : null;
+        const userId = req.authUserId ?? null; // token subject; owns-check already passed
 
         const receipt = await getReceiptById(id);
         if (!receipt) {
@@ -748,9 +797,10 @@ export const reportReceiptLineIssue = async (req: Request, res: Response, next: 
             res.status(400).json({ error: 'Invalid receipt id or line index' });
             return;
         }
-        const { userId, flags, note } = req.body ?? {};
+        const { flags, note } = req.body ?? {};
+        const userId = req.authUserId; // token subject; owns-check already passed
         if (!userId || typeof userId !== 'string') {
-            res.status(400).json({ error: 'userId is required' });
+            res.status(401).json({ error: 'auth-required' });
             return;
         }
         if (!flags || typeof flags !== 'object') {
@@ -851,9 +901,9 @@ export const submitReceiptLineVote = async (req: Request, res: Response, next: N
         const receiptId = Number(req.params.id);
         const lineIdx = Number(req.params.idx);
         const vote = req.body?.vote;
-        // Optional — used by the vocabulary capture (Issue H) to attribute the
-        // alias confirmation to a distinct user (the K-user auto-promote).
-        const userId = typeof req.body?.userId === 'string' && req.body.userId ? req.body.userId : undefined;
+        // Used by the vocabulary capture (Issue H) to attribute the alias confirmation to
+        // a distinct user (the K-user auto-promote). From the token subject, not the body.
+        const userId = req.authUserId;
         if (isNaN(receiptId) || isNaN(lineIdx) || lineIdx < 0) {
             res.status(400).json({ error: 'Invalid receipt id or line index' });
             return;

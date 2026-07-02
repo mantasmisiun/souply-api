@@ -3,6 +3,7 @@ import {
     postTemplateCover,
     fetchTemplateCoverSignedUrl,
 } from '../controllers/templateCoverController.js';
+import { requireUser } from '../middleware/sessionAuth.js';
 
 const router = Router();
 
@@ -18,7 +19,10 @@ const router = Router();
  *   GET /api/uploads/template-cover/signed-url?key=template-covers/...
  *     200:  { storageKey, url, expiresAt }
  */
-router.post('/uploads/template-cover', postTemplateCover);
+// Cover upload is namespaced by the CALLER's id (template-covers/{authUserId}/…) —
+// identity from the token, not a body userId. signed-url stays open (prefix-guarded,
+// covers render on public template pages).
+router.post('/uploads/template-cover', requireUser, postTemplateCover);
 router.get('/uploads/template-cover/signed-url', fetchTemplateCoverSignedUrl);
 
 export default router;

@@ -233,9 +233,7 @@ describe('resolveReceiptLineStoreProduct — cross-chain bootstrap', () => {
         expect(mockCreateStoreProduct).not.toHaveBeenCalled();
     });
 
-    it('creates a new SP in the receipt chain when gates pass and no existing SP', async () => {
-        mockCreateStoreProduct.mockResolvedValue(30);
-
+    it('NO-MINT: gates pass but no existing same-chain SP → creates nothing, stays unmatched', async () => {
         const mockQuery = jest.fn<any>()
             .mockResolvedValueOnce([[makeSpLookup(2)]])   // getSpById → cross-chain
             .mockResolvedValueOnce([[{ price: '2.00' }]]) // price in band
@@ -248,14 +246,12 @@ describe('resolveReceiptLineStoreProduct — cross-chain bootstrap', () => {
             conn
         );
 
-        expect(result).toEqual({ storeProductId: 30, source: 'bootstrapped', crossChainBootstrap: true });
-        expect(mockCreateStoreProduct).toHaveBeenCalledTimes(1);
+        expect(result).toEqual({ storeProductId: null, source: 'unmatched', crossChainBootstrap: true });
+        expect(mockCreateStoreProduct).not.toHaveBeenCalled();
         expect(mockCreateProduct).not.toHaveBeenCalled();
     });
 
-    it('passes open (bootstraps) when the alt SP has no price history', async () => {
-        mockCreateStoreProduct.mockResolvedValue(30);
-
+    it('NO-MINT: cross-chain gates pass, no price history, no existing SP → unmatched (no bootstrap mint)', async () => {
         const mockQuery = jest.fn<any>()
             .mockResolvedValueOnce([[makeSpLookup(2)]]) // cross-chain
             .mockResolvedValueOnce([[]])                 // no price → fail open
@@ -268,20 +264,17 @@ describe('resolveReceiptLineStoreProduct — cross-chain bootstrap', () => {
             conn
         );
 
-        expect(result.source).toBe('bootstrapped');
+        expect(result.source).toBe('unmatched');
         expect(result.crossChainBootstrap).toBe(true);
+        expect(mockCreateStoreProduct).not.toHaveBeenCalled();
     });
 
-    it('rejects and creates fresh product when line price is out of band (< 60% of alt price)', async () => {
+    it('NO-MINT: rejects cross-chain (price out of band) → unmatched w/ rejectReason, creates nothing', async () => {
         // line.price=1.00, alt SP latest price=10.00 → ratio=0.10 < 0.60 → reject
-        mockCreateProduct.mockResolvedValue(200);
-        mockCreateStoreProduct.mockResolvedValue(300);
-
         const mockQuery = jest.fn<any>()
             .mockResolvedValueOnce([[makeSpLookup(2)]])    // getSpById → cross-chain
             .mockResolvedValueOnce([[{ price: '10.00' }]]) // getLatestPriceForSp → out of band
             .mockResolvedValueOnce([[]]);                   // findSpByChainProductSize (parallel, discarded on reject)
-        // unassignedCategoryIdCache already set from earlier test — no extra pool.query
         const conn = { query: mockQuery };
 
         const result = await resolveReceiptLineStoreProduct(
@@ -290,9 +283,9 @@ describe('resolveReceiptLineStoreProduct — cross-chain bootstrap', () => {
             conn
         );
 
-        expect(result.source).toBe('created');
+        expect(result.source).toBe('unmatched');
         expect(result.rejectReason).toBe('price_out_of_band');
-        expect(mockCreateStoreProduct).toHaveBeenCalledTimes(1);
+        expect(mockCreateStoreProduct).not.toHaveBeenCalled();
     });
 
     it('rejects and creates fresh product when amounts mismatch', async () => {
@@ -312,8 +305,9 @@ describe('resolveReceiptLineStoreProduct — cross-chain bootstrap', () => {
             conn
         );
 
-        expect(result.source).toBe('created');
+        expect(result.source).toBe('unmatched');
         expect(result.rejectReason).toBe('amount_mismatch');
+        expect(mockCreateStoreProduct).not.toHaveBeenCalled();
     });
 
     it('on gate rejection, does NOT reuse altMatchProductId — creates a fresh Product instead', async () => {
@@ -349,17 +343,11 @@ describe('resolveReceiptLineStoreProduct — cross-chain bootstrap', () => {
             conn
         );
 
-        // A fresh Product was created (proves altMatchProductId was NOT reused).
-        expect(mockCreateProduct).toHaveBeenCalledTimes(1);
-        // The new SP points at the freshly-created Product, NOT at 555.
-        expect(mockCreateStoreProduct).toHaveBeenCalledWith(
-            777,            // freshly-created productId, not altMatchProductId
-            1,              // receipt's chain
-            'Test Product', // line.name
-            null, false, null, null, null,
-            conn
-        );
-        expect(result.source).toBe('created');
+        // NO-MINT (P3): a rejected cross-chain match creates NOTHING — no fresh Product/SP,
+        // and altMatchProductId (555) is never even looked up.
+        expect(mockCreateProduct).not.toHaveBeenCalled();
+        expect(mockCreateStoreProduct).not.toHaveBeenCalled();
+        expect(result.source).toBe('unmatched');
         expect(result.rejectReason).toBe('price_out_of_band');
     });
 });
@@ -380,27 +368,20 @@ describe('resolveReceiptLineStoreProduct — no SP (dedup / create)', () => {
         expect(mockCreateStoreProduct).not.toHaveBeenCalled();
     });
 
-    it('creates a new Product + SP when no exact match exists', async () => {
+    it('NO-MINT: no exact match → unmatched, creates nothing', async () => {
         mockFindExact.mockResolvedValue(null);
-        mockCreateProduct.mockResolvedValue(200);
-        mockCreateStoreProduct.mockResolvedValue(300);
-        // unassignedCategoryIdCache is set from earlier test — no pool.query needed
         const conn = { query: jest.fn() };
 
         const result = await resolveReceiptLineStoreProduct(1, makeLine(), conn);
 
-        expect(result).toEqual({ storeProductId: 300, source: 'created' });
-        expect(mockCreateProduct).toHaveBeenCalledTimes(1);
-        expect(mockCreateStoreProduct).toHaveBeenCalledTimes(1);
+        expect(result).toEqual({ storeProductId: null, source: 'unmatched' });
+        expect(mockCreateProduct).not.toHaveBeenCalled();
+        expect(mockCreateStoreProduct).not.toHaveBeenCalled();
     });
 
-    it('reuses the existing Product when altMatchProductId resolves successfully', async () => {
+    it('NO-MINT: altMatchProductId is never reused — no exact match → unmatched', async () => {
         mockFindExact.mockResolvedValue(null);
-        mockCreateStoreProduct.mockResolvedValue(300);
-
-        const mockQuery = jest.fn<any>()
-            .mockResolvedValueOnce([[{ id: 999, categoryId: 5 }]]); // altMatchProductId lookup
-        const conn = { query: mockQuery };
+        const conn = { query: jest.fn<any>() };
 
         const result = await resolveReceiptLineStoreProduct(
             1,
@@ -408,20 +389,14 @@ describe('resolveReceiptLineStoreProduct — no SP (dedup / create)', () => {
             conn
         );
 
-        // createProduct should NOT be called — existing Product 999 was reused
         expect(mockCreateProduct).not.toHaveBeenCalled();
-        expect(mockCreateStoreProduct).toHaveBeenCalledWith(999, 1, 'Test Product', null, false, null, null, null, conn);
-        expect(result.source).toBe('created');
+        expect(mockCreateStoreProduct).not.toHaveBeenCalled();
+        expect(result).toEqual({ storeProductId: null, source: 'unmatched' });
     });
 
-    it('does NOT cluster under altMatchProductId when its confidence is below the threshold — borrows the categoryId, mints a FRESH Product (apples@0.51 must not file under potatoes)', async () => {
+    it('NO-MINT: a below-threshold altMatch mints NOTHING → unmatched (apples@0.51 filed nowhere)', async () => {
         mockFindExact.mockResolvedValue(null);
-        mockCreateProduct.mockResolvedValue(778);
-        mockCreateStoreProduct.mockResolvedValue(301);
-
-        const mockQuery = jest.fn<any>()
-            .mockResolvedValueOnce([[{ id: 999, categoryId: 5 }]]); // altMatch lookup — categoryId borrowed, Product NOT reused
-        const conn = { query: mockQuery };
+        const conn = { query: jest.fn<any>() };
 
         const result = await resolveReceiptLineStoreProduct(
             1,
@@ -429,10 +404,9 @@ describe('resolveReceiptLineStoreProduct — no SP (dedup / create)', () => {
             conn
         );
 
-        // A FRESH Product (778) was created under the BORROWED category 5 — never clustered under 999.
-        expect(mockCreateProduct).toHaveBeenCalledWith(5, null, 'Test Product', conn);
-        expect(mockCreateStoreProduct).toHaveBeenCalledWith(778, 1, 'Test Product', null, false, null, null, null, conn);
-        expect(result.source).toBe('created');
+        expect(mockCreateProduct).not.toHaveBeenCalled();
+        expect(mockCreateStoreProduct).not.toHaveBeenCalled();
+        expect(result).toEqual({ storeProductId: null, source: 'unmatched' });
     });
 
     it('throws when SP row is deleted and line has no name', async () => {

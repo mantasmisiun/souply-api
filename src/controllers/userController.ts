@@ -11,6 +11,7 @@ import { getUserStats } from '../services/statsService.js';
 import { getVoteHistory, orderPair, type MatchVote } from '../models/storeProductMatchModel.js';
 import { editVote } from '../services/swipeVoteService.js';
 import { deleteUser } from '../services/userDeletionService.js';
+import { issueSessionToken } from '../services/authService.js';
 
 export const addUser = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -34,7 +35,16 @@ export const addUser = async (req: Request, res: Response, next: NextFunction) =
         // distinguish but don't have to.
         const existing = await getUserById(id);
         await createUser(id);
-        res.status(existing ? 200 : 201).json({ id });
+
+        // Anonymous session token: this is the bearer the app sends on every
+        // per-user route (receipts, swipe votes). Issued ONLY for anonymous users —
+        // a VERIFIED account gets its token from POST /api/auth/oauth, so we must
+        // never mint one here for a verified UUID (that would let anyone holding a
+        // verified user's id obtain a valid session for it). Verified callers simply
+        // get {id} back and keep using their OAuth token.
+        const isVerifiedUser = !!existing && existing.authProvider != null;
+        const token = isVerifiedUser ? undefined : await issueSessionToken(id);
+        res.status(existing ? 200 : 201).json({ id, ...(token ? { token } : {}) });
     } catch (error) {
         next(error);
     }

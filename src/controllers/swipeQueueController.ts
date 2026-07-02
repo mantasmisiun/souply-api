@@ -61,13 +61,24 @@ function canonicalKey(spA: number, spB: number): string {
 function buildSlot1Queue(
     rows: RawSlot1Row[],
     votedPairKeys: Set<string>,
+    label = 'global',
 ): SwipeQueueCard[] {
     const seen = new Set<string>();
     const items: SwipeQueueCard[] = [];
+    let dup = 0, voted = 0;
+
+    // [GLOBAL-QUEUE] funnel — CONSOLE-visible (unlike swipeLog, which only writes
+    // swipe-debug.log): for every cross-chain "related" candidate pair, why it does or
+    // doesn't become a swipe card. Answers "what was considered + why N available". The
+    // deeper per-anchor GENERATION trace (why only N raw pairs exist) is [Slot1] in
+    // swipe-debug.log.
+    console.log(`[GLOBAL-QUEUE] slot1 (${label}): ${rows.length} raw cross-chain candidate pair(s) generated`);
 
     for (const row of rows) {
         const key = canonicalKey(row.leftSpId, row.rightSpId);
-        if (seen.has(key) || votedPairKeys.has(key)) continue;
+        const pair = `SP${row.leftSpId} ${JSON.stringify(row.left?.name)} ⇄ SP${row.rightSpId} ${JSON.stringify(row.right?.name)} score=${row.score.toFixed(3)}`;
+        if (seen.has(key)) { dup++; console.log(`[GLOBAL-QUEUE]   ✗ ${pair} → SKIP duplicate pair (same SPs from another anchor)`); continue; }
+        if (votedPairKeys.has(key)) { voted++; console.log(`[GLOBAL-QUEUE]   ✗ ${pair} → SKIP already-voted (no-repeat: you swiped this pair before)`); continue; }
         seen.add(key);
 
         // Enforce canonical (smaller spId = left) for consistent card rendering.
@@ -84,9 +95,11 @@ function buildSlot1Queue(
             left:  { spId: leftSpId,  ...leftSide },
             right: { spId: rightSpId, ...rightSide },
         });
+        console.log(`[GLOBAL-QUEUE]   ✓ ${pair} → SERVED`);
     }
 
     items.sort((a, b) => b.score - a.score);
+    console.log(`[GLOBAL-QUEUE]   => ${items.length} slot1 card(s) available (filtered ${dup} duplicate, ${voted} already-voted)`);
     return items;
 }
 
@@ -179,7 +192,7 @@ async function buildSwipeQueueItems(
     ]);
 
     const slot2Items = buildSlot2Queue(slot2Rows, votedPairKeys);
-    const slot1Items = buildSlot1Queue(slot1Rows, votedPairKeys);
+    const slot1Items = buildSlot1Queue(slot1Rows, votedPairKeys, receiptIdParam !== undefined ? `receipt-anchored r${receiptIdParam}` : 'global');
     const slot3Items = buildSlot3Queue(slot3Rows, votedPairKeys);
 
     const slot2Cards: SwipeQueueCard[] = slot2Items.map(item => ({
@@ -203,11 +216,16 @@ async function buildSwipeQueueItems(
     if (relatedTo !== undefined && Number.isFinite(relatedTo)) {
         const scope = await getReceiptRelatednessScope(relatedTo, pool);
         const before = items.length;
+        const slot1Before = items.filter((c) => c.slot === 1).length;
         items = items.filter((c) =>
             isCardRelated({ categoryId: c.left.categoryId, name: c.left.name, imageUrl: c.left.imageUrl }, scope) ||
             isCardRelated({ categoryId: c.right.categoryId, name: c.right.name, imageUrl: c.right.imageUrl }, scope),
         );
+        const slot1After = items.filter((c) => c.slot === 1).length;
         swipeLog(`[Relatedness] relatedTo=${relatedTo} scope: ${scope.categoryIds.size} cats, ${scope.lineNames.length} line-names → kept ${items.length}/${before}`);
+        if (slot1Before !== slot1After) {
+            console.log(`[GLOBAL-QUEUE] relatedness gate (relatedTo=${relatedTo}): dropped ${slot1Before - slot1After} slot1 card(s) not related to the receipt → ${slot1After} kept`);
+        }
     }
 
     return { items, slotCounts: { slot1: slot1Items.length, slot2: slot2Items.length, slot3: slot3Items.length } };
@@ -289,6 +307,11 @@ export const getSwipeQueue = async (
         for (const card of items) {
             swipeLog(`[SwipeQueue]   [slot${card.slot}] "${card.left.name}" (${card.left.chainName}) vs "${card.right.name}" (${card.right.chainName}) score=${card.score.toFixed(3)}`);
         }
+        // CONSOLE summary (the per-card list above is in swipe-debug.log). This is the POOL the
+        // client draws from — the client mixes it with Card-B crop cards and caps the session via
+        // capVoluntaryQueue (shared/swipeQueueCap.ts). So a low slot1 here = few related candidates
+        // existed, NOT a cap; a high slot1 that still serves few on-device = the client cap.
+        console.log(`[GLOBAL-QUEUE] pool for receipt ${receiptIdParam ?? 'none'}: slot1(cross-chain related)=${slotCounts.slot1} · slot2(orphan-rescue)=${slotCounts.slot2} · slot3(same-chain dedup)=${slotCounts.slot3} · total=${items.length}`);
 
         res.json({ items, slotCounts });
     } catch (error) {

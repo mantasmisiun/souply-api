@@ -33,6 +33,7 @@
  */
 import '../../config/env.js';
 import pool from '../../config/db.js';
+import { itemToLine } from '../../models/receiptItemModel.js';
 import {
     getStoreProductsByChainWithProductData,
     getStoreProductsCrossChainWithProductData,
@@ -43,8 +44,25 @@ import { RECOGNITION, confidenceBand } from '../../../../shared/recognitionConfi
 import * as fs from 'fs';
 import * as path from 'path';
 
-// ── The receipt-203 regression canary: this exact OCR line must resolve to #60946. ──
-const CANARY = { receiptId: 203, ocrName: 'IKI SMULKINTA KIAUL IENA R', expectSpId: 60946 };
+// ── The receipt-203 regression canary, as a DETERMINISTIC matcher assertion. ──
+// "IKI SMULKINTA KIAUL IENA R" must resolve to the 20% variant (#60946), NOT the "maišyta"
+// (#60808) or "35%" (#60816) same-named siblings. Uses a FIXED candidate fixture: the old form
+// re-parsed live receipt 203 against the live catalog, so it broke the instant that receipt was
+// deleted (dev churn) or a swipe added a vocab alias — noise that has nothing to do with the
+// matcher logic this canary guards.
+const mkCanaryCand = (id: number, storeProductName: string): MatchCandidate => ({
+    id, productId: id, categoryId: 1, categoryName: null, categoryL2Name: null,
+    storeProductName, brandName: null, amount: null, unit: null, isWeighable: false, imageUrl: null,
+});
+const CANARY = {
+    ocrName: 'IKI SMULKINTA KIAUL IENA R',
+    expectSpId: 60946,
+    candidates: [
+        mkCanaryCand(60808, 'Smulkinta maišyta kiauliena ir/jautiena dujose, IKI'),
+        mkCanaryCand(60946, 'Smulkinta kiauliena riebumas ne did./kaip 20% dujose, IKI'),
+        mkCanaryCand(60816, 'Smulkinta kiauliena riebumas ne didesnis kaip 35%'),
+    ],
+};
 
 const PRICE_TOL = 0.1; // ±10% catalog-vs-receipt price match (the priceConfirm/priceConflict proxy)
 
@@ -104,10 +122,26 @@ async function main() {
     const orphanMintCount: Record<number, number> = {};
     for (const r of orphanRows) orphanMintCount[Number(r.chainId)] = Number(r.n);
 
-    // All receipts with products[].
+    // All receipts with product lines. Post-ReceiptItem-cutover the blob stores
+    // products: [], so the corpus MUST come from ReceiptItem rows — keying on the blob
+    // silently narrowed the audit to legacy receipts only ("no regressions" over an
+    // ever-shrinking set). Blob products remain the fallback for pre-migration rows.
     const [receipts]: any = await pool.query(
-        "SELECT id, parsedData FROM Receipt WHERE JSON_LENGTH(parsedData, '$.products') > 0 ORDER BY id",
+        'SELECT id, parsedData FROM Receipt WHERE parsedData IS NOT NULL ORDER BY id',
     );
+    const receiptIds = (receipts as any[]).map((r: any) => Number(r.id));
+    const itemsByReceipt = new Map<number, any[]>();
+    if (receiptIds.length > 0) {
+        const [itemRows]: any = await pool.query(
+            'SELECT * FROM ReceiptItem WHERE receiptId IN (?) ORDER BY receiptId, lineIdx',
+            [receiptIds],
+        );
+        for (const r of itemRows as any[]) {
+            const list = itemsByReceipt.get(Number(r.receiptId)) ?? [];
+            list.push(itemToLine(r));
+            itemsByReceipt.set(Number(r.receiptId), list);
+        }
+    }
 
     const catalogCache = new Map<number, MatchCandidate[]>();
     const getCatalog = async (chainId: number): Promise<MatchCandidate[]> => {
@@ -128,7 +162,10 @@ async function main() {
         const chainId = Number(parsed?.header?.chainId);
         if (!Number.isFinite(chainId) || chainId <= 0) continue;
         if (args.chain != null && chainId !== args.chain) continue;
-        const products: any[] = Array.isArray(parsed?.products) ? parsed.products : [];
+        const rowLines = itemsByReceipt.get(Number(row.id)) ?? [];
+        const products: any[] = rowLines.length > 0
+            ? rowLines
+            : (Array.isArray(parsed?.products) ? parsed.products : []);
         if (products.length === 0) continue;
 
         const candidates = await getCatalog(chainId);
@@ -253,11 +290,12 @@ async function main() {
             const c = byChain[ch];
             console.log(`    chain ${ch}: lines ${c.lines}  catalog ${c.topIsCatalogPct}%  orphanTop ${c.topIsOrphanPct}%  priceConfirmed ${c.priceConfirmedPct}%  conflict ${c.priceConflictCount}  mintedOrphans ${c.orphanMintCount}`);
         }
-        // The receipt-203 canary line, always shown.
-        const canary = perLine.find(r => r.receiptId === CANARY.receiptId && r.ocrName.trim() === CANARY.ocrName);
-        if (canary) {
-            const ok = canary.topSpId === CANARY.expectSpId;
-            console.log(`\n  CANARY r${CANARY.receiptId} "${CANARY.ocrName}" → top=${canary.topSpId} (${canary.topName}) conf=${canary.topConf} ${ok ? '✓ #60946' : `✗ expected #${CANARY.expectSpId}` }${canary.priceConflict ? `  [priceConflict → missed #${canary.missedSpId}]` : ''}`);
+        // The kiauliena canary line, always shown — a deterministic matcher check.
+        {
+            const cm = findBestProductMatches(CANARY.ocrName, null, null, CANARY.candidates, undefined, RECOGNITION.match.topN, null);
+            const top = cm[0];
+            const ok = (top?.storeProductId ?? null) === CANARY.expectSpId;
+            console.log(`\n  CANARY "${CANARY.ocrName}" → top=#${top?.storeProductId ?? '-'} (${top?.name ?? '-'}) conf=${top?.confidence?.toFixed(2) ?? '-'} ${ok ? '✓ #60946' : `✗ expected #${CANARY.expectSpId}`}`);
         }
         // The worst offenders: catalog SP at the line price exists but the matcher missed it.
         const conflicts = perLine.filter(r => r.priceConflict).slice(0, 20);
@@ -308,9 +346,12 @@ async function main() {
     // ── Canary assertion (CI gate). ──
     let exitCode = 0;
     if (args.assert) {
-        const canary = perLine.find(r => r.receiptId === CANARY.receiptId && r.ocrName.trim() === CANARY.ocrName);
-        const ok = !!canary && canary.topSpId === CANARY.expectSpId;
-        console.log(`\n[assert] r${CANARY.receiptId} → #${CANARY.expectSpId}: ${ok ? 'PASS' : 'FAIL'}`);
+        // Run the canary OCR name against the fixed candidate fixture — pure matcher logic,
+        // no dependency on a stored receipt row or the live vocabulary.
+        const m = findBestProductMatches(CANARY.ocrName, null, null, CANARY.candidates, undefined, RECOGNITION.match.topN, null);
+        const topSpId = m[0]?.storeProductId ?? null;
+        const ok = topSpId === CANARY.expectSpId;
+        console.log(`\n[assert] "${CANARY.ocrName}" → top=#${topSpId ?? '-'} (expect #${CANARY.expectSpId}): ${ok ? 'PASS' : 'FAIL'}`);
         if (!ok) exitCode = 1;
     }
 

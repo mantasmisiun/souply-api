@@ -36,7 +36,7 @@ export interface ItemConfidenceInput {
     /** Top-candidate confidence minus runner-up (0 when <2 candidates). */
     gapToRunnerUp: number;
     /** Resolver outcome for this line. */
-    source: 'reused' | 'created' | 'bootstrapped' | 'skipped_unpriced' | 'none';
+    source: 'reused' | 'created' | 'bootstrapped' | 'skipped_unpriced' | 'unmatched' | 'none';
     /** Round-2 flagged the regular price implausible (catalog-poison guard). */
     priceImplausible: boolean;
     /** The user swiped 'different' on this line's match (personal 1-vote split). */

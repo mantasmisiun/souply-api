@@ -23,6 +23,27 @@ import * as path from 'path';
  * poppler-utils` on Debian/Ubuntu, equivalent on the deployment
  * container).
  */
+/**
+ * Resource caps against a crafted-PDF DoS (event-loop freeze / OOM) on the
+ * unauthenticated-enumerable convert endpoint:
+ *   - MAX_PAGES: a receipt PDF is 1–3 pages; reject page-bombs.
+ *   - MAX_PAGE_PT: PDF MediaBox tops out at 14400pt (200in); at 200dpi that's
+ *     ~40000px/side → gigapixel raster. Cap at a generous receipt bound (~28in).
+ *   - SPAWN_TIMEOUT_MS + maxBuffer: pdfinfo/pdftoppm are BLOCKING (spawnSync),
+ *     so a pathological input would freeze the single Node event loop without these.
+ */
+const MAX_PAGES = 12;
+const MAX_PAGE_PT = 2100;
+const SPAWN_TIMEOUT_MS = 20_000;
+const SPAWN_MAX_BUFFER = 64 * 1024 * 1024;
+
+export class PdfTooLargeError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = 'PdfTooLargeError';
+    }
+}
+
 export const convertPdfBufferToImagePages = async (
     pdfBuffer: Buffer,
     opts: { density?: number } = {}
@@ -31,6 +52,7 @@ export const convertPdfBufferToImagePages = async (
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pdf-rasterize-'));
     const tmpPdf = path.join(tmpDir, 'input.pdf');
     const outPrefix = path.join(tmpDir, 'p');
+    const spawnOpts = { encoding: 'utf8' as const, timeout: SPAWN_TIMEOUT_MS, maxBuffer: SPAWN_MAX_BUFFER };
 
     try {
         await fs.writeFile(tmpPdf, pdfBuffer);
@@ -38,20 +60,38 @@ export const convertPdfBufferToImagePages = async (
         // Need page count up front — pdftoppm uses different output
         // filename conventions for single vs multi-page PDFs and we
         // want stable read-back ordering without globbing the dir.
-        const info = spawnSync('pdfinfo', [tmpPdf], { encoding: 'utf8' });
+        const info = spawnSync('pdfinfo', [tmpPdf], spawnOpts);
+        if (info.error && (info.error as any).code === 'ETIMEDOUT') {
+            throw new PdfTooLargeError('pdfinfo timed out');
+        }
         if (info.status !== 0) {
             throw new Error(`pdfinfo failed: ${info.stderr || 'unknown error'}`);
         }
         const pagesMatch = info.stdout.match(/^Pages:\s*(\d+)/m);
         const pageCount = pagesMatch ? parseInt(pagesMatch[1], 10) : 1;
         if (pageCount <= 0) throw new Error('PDF reports zero pages');
+        if (pageCount > MAX_PAGES) {
+            throw new PdfTooLargeError(`PDF has ${pageCount} pages (max ${MAX_PAGES})`);
+        }
+        // Reject an oversized MediaBox before rasterising — "Page size: 595.32 x 841.92 pts".
+        const sizeMatch = info.stdout.match(/^Page size:\s*([\d.]+)\s*x\s*([\d.]+)\s*pts/m);
+        if (sizeMatch) {
+            const w = parseFloat(sizeMatch[1]);
+            const h = parseFloat(sizeMatch[2]);
+            if (w > MAX_PAGE_PT || h > MAX_PAGE_PT) {
+                throw new PdfTooLargeError(`PDF page ${w}x${h}pt exceeds ${MAX_PAGE_PT}pt cap`);
+            }
+        }
 
         if (pageCount === 1) {
             const r = spawnSync(
                 'pdftoppm',
                 ['-r', String(density), '-png', '-singlefile', tmpPdf, outPrefix],
-                { encoding: 'utf8' }
+                spawnOpts
             );
+            if (r.error && (r.error as any).code === 'ETIMEDOUT') {
+                throw new PdfTooLargeError('pdftoppm timed out');
+            }
             if (r.status !== 0) {
                 throw new Error(`pdftoppm failed: ${r.stderr || 'unknown error'}`);
             }
@@ -62,8 +102,11 @@ export const convertPdfBufferToImagePages = async (
         const r = spawnSync(
             'pdftoppm',
             ['-r', String(density), '-png', tmpPdf, outPrefix],
-            { encoding: 'utf8' }
+            spawnOpts
         );
+        if (r.error && (r.error as any).code === 'ETIMEDOUT') {
+            throw new PdfTooLargeError('pdftoppm timed out');
+        }
         if (r.status !== 0) {
             throw new Error(`pdftoppm failed: ${r.stderr || 'unknown error'}`);
         }

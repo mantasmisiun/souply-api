@@ -1,8 +1,11 @@
 import pool from '../config/db.js';
+import { getReceiptItemKey, updateReceiptItem } from '../models/receiptItemModel.js';
 import { MatchThresholds } from '../config/matchThresholds.js';
+import { findLinePrimaryPrice } from '../models/priceModel.js';
 import { applyBaseProductLinkDelta } from '../models/baseProductLinkModel.js';
 import {
     applyAggregateDelta,
+    applyVoteTransitionDeltas,
     countRecentVotes,
     deleteMatchVote,
     getMatchAggregate,
@@ -25,6 +28,29 @@ import { awardSwipePoint } from './userPointsService.js';
 import { isBurstSwipe } from './swipeSessionService.js';
 
 type Connection = typeof pool | any;
+
+/**
+ * The line's identity for price work: its ReceiptItem row id (the PRECISE Price link —
+ * immune to (sp, store, date) slot-ownership) + its matched StoreProduct id. The row is
+ * the source of truth (P2); the blob fallback (pre-backfill receipts) yields itemId null,
+ * which downgrades the price locator to the legacy (receiptId, sp) key.
+ */
+async function resolveLineKey(
+    receiptId: number,
+    lineIdx: number,
+): Promise<{ itemId: number | null; spId: number | null }> {
+    const key = await getReceiptItemKey(receiptId, lineIdx);
+    if (key && key.matchedSpId != null && key.matchedSpId > 0) {
+        return { itemId: key.id, spId: key.matchedSpId };
+    }
+    if (key) return { itemId: key.id, spId: null };
+    const [rows]: any = await pool.query('SELECT parsedData FROM Receipt WHERE id = ? LIMIT 1', [receiptId]);
+    if (!rows[0]) return { itemId: null, spId: null };
+    let parsed: any;
+    try { parsed = typeof rows[0].parsedData === 'string' ? JSON.parse(rows[0].parsedData) : rows[0].parsedData; } catch { return { itemId: null, spId: null }; }
+    const v = Number(parsed?.products?.[lineIdx]?.storeProductId);
+    return { itemId: null, spId: Number.isFinite(v) && v > 0 ? v : null };
+}
 
 export type SwipeVote = MatchVote;
 
@@ -95,27 +121,32 @@ export const editVote = async (input: EditVoteInput): Promise<CastSwipeVoteResul
         await upsertEquivalence(input.userId, input.spIdA, input.spIdB, equivalenceVerdict, connection);
         await clearReverification(input.userId, input.spIdA, input.spIdB, connection);
 
-        const { previousVote } = await upsertMatchVote(
+        // editVote is a deliberate retrospective change — always aggregated. The
+        // provenance-aware transition handles a burst PREVIOUS vote correctly (it was
+        // never counted, so nothing is decremented; the new vote is counted fresh).
+        const { previousVote, previousAggregated } = await upsertMatchVote(
             input.userId,
             input.spIdA,
             input.spIdB,
             input.vote,
             null,
             null,
+            true,
             connection,
         );
-
-        if (previousVote !== null && previousVote !== input.vote) {
-            await applyAggregateDelta(input.spIdA, input.spIdB, previousVote, -1, connection);
-        }
-        if (previousVote !== input.vote) {
-            await applyAggregateDelta(input.spIdA, input.spIdB, input.vote, +1, connection);
-        }
+        await applyVoteTransitionDeltas(
+            input.spIdA, input.spIdB,
+            previousVote, previousAggregated,
+            input.vote,
+            connection,
+        );
 
         await applyBaseProductLinkForVote(
             input.spIdA,
             input.spIdB,
-            previousVote,
+            // The link tally only ever received APPLIED votes — a burst previous
+            // 'similar' was never added, so it must not be subtracted.
+            previousAggregated ? previousVote : null,
             input.vote,
             connection,
             productIdA,
@@ -151,21 +182,10 @@ export const castSwipeVote = async (
         return { ok: true, effect: 'dropped-rate-limit' };
     }
 
-    // Resolve the line's current storeProductId from parsedData — after C2a
-    // every line has one.
-    const [receiptRows]: any = await pool.query(
-        `SELECT parsedData FROM Receipt WHERE id = ? LIMIT 1`,
-        [input.receiptId]
-    );
-    if (receiptRows.length === 0) {
-        return { ok: true, effect: 'no-candidate' };
-    }
-    const parsed =
-        typeof receiptRows[0].parsedData === 'string'
-            ? JSON.parse(receiptRows[0].parsedData)
-            : receiptRows[0].parsedData;
-    const lineSpId = Number(parsed?.products?.[input.receiptLineIdx]?.storeProductId);
-    if (!Number.isFinite(lineSpId) || lineSpId <= 0) {
+    // The line's current storeProductId + row id — from the ReceiptItem row (source of
+    // truth), with a blob fallback for any receipt not yet backfilled.
+    const { itemId: lineItemId, spId: lineSpId } = await resolveLineKey(input.receiptId, input.receiptLineIdx);
+    if (lineSpId == null || lineSpId <= 0) {
         return { ok: true, effect: 'no-candidate' };
     }
 
@@ -190,7 +210,7 @@ export const castSwipeVote = async (
     // confidence auto-matches where different is rare.
     if (input.candidateStoreProductId === lineSpId) {
         console.log(`[SWIPE] SELF-PAIR: "${lineName}" (sp=${lineSpId}) | dwell=${input.dwellMs}ms`);
-        return await acknowledgeSelfPair(input, lineSpId);
+        return await acknowledgeSelfPair(input, lineSpId, lineItemId);
     }
 
     const burst = isBurstSwipe(input.dwellMs);
@@ -216,23 +236,25 @@ export const castSwipeVote = async (
             // If this pair was flagged for re-verification, the user has now re-voted — clear the flag.
             await clearReverification(input.userId, pair.spIdA, pair.spIdB, connection);
         }
-        const { previousVote } = await upsertMatchVote(
+        // The row records its aggregation PROVENANCE (`!burst`); the transition helper
+        // then adjusts the aggregate by what was REALLY counted before vs now — a burst
+        // previous vote is never decremented, a burst re-vote never counted.
+        const { previousVote, previousAggregated } = await upsertMatchVote(
             input.userId,
             pair.spIdA,
             pair.spIdB,
             input.vote,
             input.dwellMs,
             input.receiptId,
+            !burst,
             connection
         );
-        if (!burst) {
-            if (previousVote !== null && previousVote !== input.vote) {
-                await applyAggregateDelta(pair.spIdA, pair.spIdB, previousVote, -1, connection);
-            }
-            if (previousVote !== input.vote) {
-                await applyAggregateDelta(pair.spIdA, pair.spIdB, input.vote, +1, connection);
-            }
-        }
+        await applyVoteTransitionDeltas(
+            pair.spIdA, pair.spIdB,
+            previousVote, previousAggregated,
+            burst ? null : input.vote,
+            connection,
+        );
 
         // Phase C3: maintain cross-baseProduct similarity link tallies. A
         // swipe that crosses a baseProduct boundary with vote='similar'
@@ -244,23 +266,31 @@ export const castSwipeVote = async (
         ]);
 
         let merge: MergeDecision | undefined;
-        if (!burst) {
+        // Link tally follows the same provenance rules as the aggregate: only an
+        // APPLIED (aggregated) previous vote is subtracted, and a burst new vote adds
+        // nothing (passed as null — deletion semantics for the link delta). This also
+        // removes a previously-applied 'similar' when the user burst-re-votes.
+        const effectivePrev = previousAggregated ? previousVote : null;
+        const effectiveNew = burst ? null : input.vote;
+        if (effectivePrev !== null || effectiveNew !== null) {
             await applyBaseProductLinkForVote(
                 pair.spIdA,
                 pair.spIdB,
-                previousVote,
-                input.vote,
+                effectivePrev,
+                effectiveNew,
                 connection,
                 productIdA,
                 productIdB,
             );
+        }
+        if (!burst) {
             const agg = await getMatchAggregate(pair.spIdA, pair.spIdB, connection);
             merge = await reevaluateMerge(pair.spIdA, pair.spIdB, agg, connection, productIdA, productIdB);
         }
 
         // Also flip the line's Price verification as a user-visible signal.
         // (Aggregate/merge happens silently; this gives the user immediate feedback.)
-        const linePriceEffect = await applyLinePriceEffect(input, lineSpId, connection);
+        const linePriceEffect = await applyLinePriceEffect(input, lineSpId, lineItemId, connection);
 
         await connection.commit();
         awardSwipePoint(input.userId).catch((e) =>
@@ -293,32 +323,24 @@ export const castSwipeVote = async (
 export const undoSwipeVote = async (
     input: UndoSwipeVoteInput
 ): Promise<CastSwipeVoteResult> => {
-    const [receiptRows]: any = await pool.query(
-        `SELECT parsedData FROM Receipt WHERE id = ? LIMIT 1`,
-        [input.receiptId]
-    );
-    if (receiptRows.length === 0) {
-        return { ok: true, effect: 'no-candidate' };
-    }
-    const parsed =
-        typeof receiptRows[0].parsedData === 'string'
-            ? JSON.parse(receiptRows[0].parsedData)
-            : receiptRows[0].parsedData;
-    const lineSpId = Number(parsed?.products?.[input.receiptLineIdx]?.storeProductId);
-    if (!Number.isFinite(lineSpId) || lineSpId <= 0) {
+    const { itemId: lineItemId, spId: lineSpId } = await resolveLineKey(input.receiptId, input.receiptLineIdx);
+    if (lineSpId == null || lineSpId <= 0) {
         return { ok: true, effect: 'no-candidate' };
     }
 
-    // Self-pair undo: no vote row to delete. Just reverse the Price flip.
+    // Self-pair undo: no vote row to delete. A self-pair vote can only VERIFY the
+    // price (identical/similar) or flag the line (different — never touches the
+    // price), so the only reversible price effect is a verification: treat the
+    // undo as undoing an 'identical'. Never blind-verify here.
     if (input.candidateStoreProductId === lineSpId) {
-        return await revertLinePriceEffect(input, lineSpId);
+        return await revertLinePriceEffect(input, lineSpId, lineItemId, 'identical');
     }
 
     const pair = orderPair(input.candidateStoreProductId, lineSpId);
     const connection = await (pool as any).getConnection();
     try {
         await connection.beginTransaction();
-        const { deletedVote } = await deleteMatchVote(
+        const { deletedVote, deletedAggregated } = await deleteMatchVote(
             input.userId,
             pair.spIdA,
             pair.spIdB,
@@ -328,7 +350,9 @@ export const undoSwipeVote = async (
             getProductIdForStoreProduct(pair.spIdA, connection),
             getProductIdForStoreProduct(pair.spIdB, connection),
         ]);
-        if (deletedVote !== null) {
+        // Reverse ONLY contributions that were actually applied: a burst vote wrote a
+        // row but never fed the aggregate/link — blind reversal drove counts negative.
+        if (deletedVote !== null && deletedAggregated) {
             await applyAggregateDelta(pair.spIdA, pair.spIdB, deletedVote, -1, connection);
             // Also reverse any BaseProductLink increment the vote caused.
             // Passing newVote=null here — deletion is the terminal state.
@@ -345,7 +369,7 @@ export const undoSwipeVote = async (
         const agg = await getMatchAggregate(pair.spIdA, pair.spIdB, connection);
         const merge = await reevaluateMerge(pair.spIdA, pair.spIdB, agg, connection, productIdA, productIdB);
 
-        const linePriceEffect = await revertLinePriceEffect(input, lineSpId, connection);
+        const linePriceEffect = await revertLinePriceEffect(input, lineSpId, lineItemId, deletedVote, connection);
 
         await connection.commit();
         return {
@@ -479,6 +503,7 @@ export async function reevaluateMerge(
 async function acknowledgeSelfPair(
     input: CastSwipeVoteInput,
     lineSpId: number,
+    lineItemId: number | null,
 ): Promise<CastSwipeVoteResult> {
     if (input.vote === 'different') {
         await pool.query(
@@ -489,38 +514,42 @@ async function acknowledgeSelfPair(
         return { ok: true, effect: 'vote-recorded' };
     }
 
-    const [rows]: any = await pool.query(
-        `SELECT id, priceVerified FROM Price
-          WHERE receiptId = ? AND storeProductId = ? AND isFallback = 0
-          LIMIT 1`,
-        [input.receiptId, lineSpId],
-    );
-    if (rows.length === 0) {
+    // ReceiptItem.priceVerified is the LINE-scoped truth the queue filter reads —
+    // synced even when the Price slot row belongs to another receipt (same sp,
+    // store, date), so the confirmed card never re-surfaces.
+    if (lineItemId != null) {
+        await updateReceiptItem(input.receiptId, input.receiptLineIdx, { priceVerified: true });
+    }
+    const priceRow = await findLinePrimaryPrice(lineItemId, input.receiptId, lineSpId);
+    if (!priceRow) {
         return { ok: true, effect: 'no-price-row' };
     }
-    if (rows[0].priceVerified) {
+    if (priceRow.priceVerified) {
         return { ok: true, effect: 'price-already-verified' };
     }
-    await pool.query(`UPDATE Price SET priceVerified = 1 WHERE id = ?`, [rows[0].id]);
+    await pool.query(`UPDATE Price SET priceVerified = 1 WHERE id = ?`, [priceRow.id]);
     return { ok: true, effect: 'price-verified' };
 }
 
 async function applyLinePriceEffect(
     input: CastSwipeVoteInput,
     lineSpId: number,
+    lineItemId: number | null,
     conn?: Connection
 ): Promise<CastSwipeVoteResult> {
     const db = conn || pool;
-    const [rows]: any = await db.query(
-        `SELECT id, priceVerified FROM Price
-          WHERE receiptId = ? AND storeProductId = ? AND isFallback = 0
-          LIMIT 1`,
-        [input.receiptId, lineSpId]
-    );
-    if (rows.length === 0) {
+
+    // Keep the LINE-scoped truth (ReceiptItem.priceVerified — what the queue filter
+    // reads) in step with the vote, regardless of Price slot ownership.
+    if (lineItemId != null && (input.vote === 'identical' || input.vote === 'different')) {
+        await updateReceiptItem(input.receiptId, input.receiptLineIdx,
+            { priceVerified: input.vote === 'identical' }, db);
+    }
+
+    const priceRow = await findLinePrimaryPrice(lineItemId, input.receiptId, lineSpId, db);
+    if (!priceRow) {
         return { ok: true, effect: 'no-price-row' };
     }
-    const priceRow = rows[0];
 
     if (input.vote === 'identical') {
         if (priceRow.priceVerified) {
@@ -543,34 +572,40 @@ async function applyLinePriceEffect(
 }
 
 /**
- * Undo counterpart of `applyLinePriceEffect`. Note we don't know what the
- * price-verified state was *before* the original vote, so we pragmatically
- * assume the swipe is being immediately undone and just reverse the last
- * effect (identical → unverify; different → verify; similar → noop).
+ * Undo counterpart of `applyLinePriceEffect` — VOTE-AWARE, and it NEVER VERIFIES:
+ *   identical → the vote verified the price → undo: UNVERIFY (when currently verified)
+ *   different → the vote MAY have unverified it (or was a no-op if it was already
+ *               unverified — we don't store the prior state) → undo: NO-OP. Restoring
+ *               verification here could mark a never-vote-verified price as VERIFIED,
+ *               which is the dangerous direction (it feeds the baseline/clearance
+ *               machinery); staying unverified is always safe.
+ *   similar   → never touched the price → undo: no-op
+ *   null      → no vote row was deleted (double-undo / unknown) → no-op
+ * The old blind toggle flipped whatever state it found, so undoing a 'similar' (or a
+ * repeated undo) could false-verify an OCR price.
  */
 async function revertLinePriceEffect(
     input: UndoSwipeVoteInput,
     lineSpId: number,
+    lineItemId: number | null,
+    undoneVote: MatchVote | null,
     conn?: Connection
 ): Promise<CastSwipeVoteResult> {
+    if (undoneVote !== 'identical') {
+        return { ok: true, effect: 'vote-recorded' }; // nothing safely reversible
+    }
     const db = conn || pool;
-    const [rows]: any = await db.query(
-        `SELECT id, priceVerified FROM Price
-          WHERE receiptId = ? AND storeProductId = ? AND isFallback = 0
-          LIMIT 1`,
-        [input.receiptId, lineSpId]
-    );
-    if (rows.length === 0) {
+    // Un-verify the LINE truth too (mirrors applyLinePriceEffect's sync).
+    if (lineItemId != null) {
+        await updateReceiptItem(input.receiptId, input.receiptLineIdx, { priceVerified: false }, db);
+    }
+    const priceRow = await findLinePrimaryPrice(lineItemId, input.receiptId, lineSpId, db);
+    if (!priceRow) {
         return { ok: true, effect: 'no-price-row' };
     }
-    const priceRow = rows[0];
-
-    // Best-effort reversal: if currently verified, unverify; if currently not,
-    // the undo is of a "different" (which unverified) — re-verify.
-    if (priceRow.priceVerified) {
-        await db.query(`UPDATE Price SET priceVerified = 0 WHERE id = ?`, [priceRow.id]);
-        return { ok: true, effect: 'price-unverified' };
+    if (!priceRow.priceVerified) {
+        return { ok: true, effect: 'price-already-unverified' };
     }
-    await db.query(`UPDATE Price SET priceVerified = 1 WHERE id = ?`, [priceRow.id]);
-    return { ok: true, effect: 'price-verified' };
+    await db.query(`UPDATE Price SET priceVerified = 0 WHERE id = ?`, [priceRow.id]);
+    return { ok: true, effect: 'price-unverified' };
 }

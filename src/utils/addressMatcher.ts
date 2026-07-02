@@ -57,6 +57,36 @@ export function levenshtein(a: string, b: string): number {
     return prev[n];
 }
 
+/**
+ * Extract the CITY component of an address: the segment after the LAST comma,
+ * reduced to lowercase ASCII letters (diacritics folded, digits/punctuation/spaces
+ * dropped). Returns '' when the address has no comma (no city part), e.g. IKI's
+ * in-app street-only view "LYROS G. 5A".
+ *
+ *   "Vilniaus g. 128-2, Šiauliai" → "siauliai"
+ *   "Vilniaus g. l 2, Siau'iai"   → "siauiai"   (OCR-garbled Šiauliai)
+ *   "LYROS G. 5A"                 → ""          (no city)
+ */
+export function extractCity(addr: string): string {
+    if (!addr) return '';
+    const parts = addr.split(',');
+    if (parts.length < 2) return '';
+    return parts[parts.length - 1]
+        .toLowerCase()
+        .normalize('NFD').replace(/[̀-ͯ]/g, '')
+        .replace(/[^a-z]/g, '');
+}
+
+/** City-name similarity 0..1 (1 = identical), tolerant of OCR truncation via a prefix bonus. */
+export function citySimilarity(a: string, b: string): number {
+    if (!a || !b) return 0;
+    // OCR often truncates the tail of a city ("siau" for "šiauliai"); treat a solid
+    // shared prefix as a full match so a cut-off-but-correct city still clears the gate.
+    const [short, long] = a.length <= b.length ? [a, b] : [b, a];
+    if (short.length >= 4 && long.startsWith(short)) return 1;
+    return 1 - levenshtein(a, b) / Math.max(a.length, b.length);
+}
+
 export interface AddressMatch<T> {
     store: T;
     distance: number;
@@ -74,12 +104,23 @@ export interface AddressMatch<T> {
  * mismatch, while the full-to-full pairing still wins for Rimi/Maxima where
  * the OCR captures both parts.
  *
+ * CITY GATE: when the OCR carries a city (the address had a comma), a store in a
+ * DIFFERENT city is disqualified BEFORE the street is scored. Many chains reuse the
+ * same street name across towns (IKI has 13 "Vilniaus g." stores), so a garbled house
+ * number can leave the street a near-match to the WRONG town's branch ("Vilniaus g. l 2,
+ * Šiauliai" scored 1 edit from "Vilniaus g.62, Ukmergė"). Requiring city agreement first
+ * makes the town the decisive signal. Skipped entirely when the OCR has no city (IKI's
+ * in-app street-only view) so that path is unchanged.
+ *
  * @param maxRatio - Maximum allowed (distance / maxLen) ratio. 0.3 = allow ~30% edit.
+ * @param cityGate - Minimum city similarity (0..1) a store must clear when the OCR has a
+ *                   city. 0 disables the gate.
  */
 export function findBestStoreMatch<T extends { address: string }>(
     ocrAddress: string,
     stores: T[],
-    maxRatio: number = 0.3
+    maxRatio: number = 0.3,
+    cityGate: number = 0.6
 ): AddressMatch<T> | null {
     const ocrVariants = Array.from(
         new Set(
@@ -91,9 +132,20 @@ export function findBestStoreMatch<T extends { address: string }>(
     );
     if (ocrVariants.length === 0) return null;
 
+    const ocrCity = extractCity(ocrAddress);
+    // Only gate when the OCR gave us a usable city token (≥3 letters after the comma).
+    const gateActive = cityGate > 0 && ocrCity.length >= 3;
+
     let best: AddressMatch<T> | null = null;
 
     for (const store of stores) {
+        // CITY GATE — disqualify a store in a different town before scoring its street.
+        // Passes through when the store address has no usable city (can't gate it).
+        if (gateActive) {
+            const storeCity = extractCity(store.address ?? '');
+            if (storeCity.length >= 3 && citySimilarity(ocrCity, storeCity) < cityGate) continue;
+        }
+
         const storeVariants = Array.from(
             new Set(
                 [

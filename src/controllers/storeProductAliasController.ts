@@ -19,6 +19,16 @@ export const getAliasCards = async (req: Request, res: Response, next: NextFunct
         const chainId = chainRaw !== null && Number.isFinite(chainRaw) ? chainRaw : null;
         const limit = typeof req.query.limit === 'string' ? Number(req.query.limit) : 10;
         const cards = await fetchPendingAliasCards(userId, chainId, limit);
+        // Log 4 — community pending-alias cards served for consensus voting.
+        const scope = chainId != null ? ` (chain ${chainId})` : '';
+        if (cards.length > 0) {
+            const sample = cards.slice(0, 2)
+                .map((c) => `#${c.aliasId} ${JSON.stringify(c.rawSample ?? c.normalizedAlias)} ?= SP ${c.storeProductId} "${c.storeProductName}"`)
+                .join(' · ');
+            console.log(`[VOCAB] served ${cards.length} alias-card${cards.length === 1 ? '' : 's'} → user ${userId.slice(0, 8)}${scope}: ${sample}${cards.length > 2 ? ` · +${cards.length - 2}` : ''}`);
+        } else {
+            console.log(`[VOCAB] no pending alias-cards for user ${userId.slice(0, 8)}${scope} (nothing awaiting community consensus)`);
+        }
         res.json({ cards });
     } catch (error) {
         next(error);
@@ -45,9 +55,11 @@ export const submitAliasVote = async (req: Request, res: Response, next: NextFun
         const conn = await (pool as any).getConnection();
         try {
             await conn.beginTransaction();
-            const status = await recordAliasVoteById(aliasId, userId, vote, conn);
+            const outcome = await recordAliasVoteById(aliasId, userId, vote, conn);
             await conn.commit();
-            res.json({ ok: true, status });
+            // [VOCAB] alias-card vote outcome (community pending-card confirmation).
+            console.log(`[VOCAB] alias-card vote by user=${userId.slice(0, 8)} alias#${aliasId} ${vote.toUpperCase()} → status=${(outcome?.status ?? 'gone').toUpperCase()} votes id/sim/diff=${outcome?.identicalUsers ?? 0}/${outcome?.similarUsers ?? 0}/${outcome?.differentUsers ?? 0}`);
+            res.json({ ok: true, status: outcome?.status ?? null });
         } catch (e) {
             await conn.rollback();
             throw e;

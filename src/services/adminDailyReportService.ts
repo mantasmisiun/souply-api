@@ -1,5 +1,6 @@
 import pool from '../config/db.js';
 import { notifyTelegram, resolveEnv } from '../scrapers/shared/telegramAlert.js';
+import { drainFailOpen } from './failOpenMetrics.js';
 
 /**
  * Daily 20:00 Europe/Vilnius Telegram digest of pending
@@ -99,7 +100,11 @@ const FAIL_REASON_LT: Record<string, string> = {
     mask_failed: 'Nepavyko paslėpti kortelės',
 };
 
-function formatDigest(counts: PendingCounts, failed: { total: number; byReason: Record<string, number> }): string {
+function formatDigest(
+    counts: PendingCounts,
+    failed: { total: number; byReason: Record<string, number> },
+    failOpen: Record<string, number> = {},
+): string {
     // HTML mode — `notifyTelegram` already sets parse_mode=HTML.
     const lines: string[] = [];
     lines.push('📋 <b>Vartotojų pranešimai</b>');
@@ -122,6 +127,18 @@ function formatDigest(counts: PendingCounts, failed: { total: number; byReason: 
             if (n > 0) lines.push(`• ${FAIL_REASON_LT[reason] ?? reason}: ${n}`);
         }
     }
+
+    // Fail-open counters: silent best-effort failures (fallback propagation, points,
+    // alias learning, orphan refill, per-line resolver) that would otherwise only reach
+    // stdout. A non-zero here means a background subsystem is degrading while users still
+    // get 201s — worth eyeballing. Since restart resets the counters, treat this as a
+    // "within-the-day" signal, not an exact daily total.
+    const failOpenEntries = Object.entries(failOpen).filter(([, n]) => n > 0);
+    if (failOpenEntries.length > 0) {
+        lines.push('');
+        lines.push('⚠️ <b>Fail-open įvykiai (nuo paleidimo)</b>');
+        for (const [site, n] of failOpenEntries) lines.push(`• ${site}: ${n}`);
+    }
     return lines.join('\n');
 }
 
@@ -129,13 +146,15 @@ export async function sendDailyReceiptIssuesReport(): Promise<void> {
     try {
         const counts = await queryPendingCounts();
         const failed = await queryFailedReceiptCounts();
-        // Skip only when BOTH the Žymos inbox and the failed-receipt log are
-        // quiet, so the digest still fires when only failures came in.
-        if (counts.total === 0 && failed.total === 0) {
-            console.log('[adminDailyReport] nothing pending (issues + failures) — skipping digest');
+        const failOpen = drainFailOpen();
+        const failOpenTotal = Object.values(failOpen).reduce((a, b) => a + b, 0);
+        // Skip only when the Žymos inbox, the failed-receipt log AND the fail-open
+        // counters are all quiet, so the digest still fires on a silent background outage.
+        if (counts.total === 0 && failed.total === 0 && failOpenTotal === 0) {
+            console.log('[adminDailyReport] nothing pending (issues + failures + fail-open) — skipping digest');
             return;
         }
-        const msg = formatDigest(counts, failed);
+        const msg = formatDigest(counts, failed, failOpen);
         await notifyTelegram(msg);
         console.log(`[adminDailyReport] sent — issues total=${counts.total} last24h=${counts.last24h} failed24h=${failed.total}`);
     } catch (e: any) {

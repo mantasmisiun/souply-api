@@ -44,6 +44,14 @@ const mockGetMatchAggregate = jest.fn<any>();
 jest.unstable_mockModule('../src/models/storeProductMatchModel.js', () => ({
     countRecentVotes: mockCountRecentVotes,
     upsertMatchVote: mockUpsertMatchVote,
+    // PLAIN function (not jest.fn — resetAllMocks would wipe the implementation):
+    // mirrors the real helper's math, delegating to the mocked applyAggregateDelta so
+    // existing per-test delta assertions keep observing the net effect.
+    applyVoteTransitionDeltas: async (a: number, b: number, prev: any, prevAgg: any, newV: any, conn?: any) => {
+        const counted = prev !== null && !!prevAgg;
+        if (counted && prev !== newV) await mockApplyAggregateDelta(a, b, prev, -1, conn);
+        if (newV !== null && !(counted && prev === newV)) await mockApplyAggregateDelta(a, b, newV, +1, conn);
+    },
     applyAggregateDelta: mockApplyAggregateDelta,
     getMatchAggregate: mockGetMatchAggregate,
     orderPair: (a: number, b: number) => ({ spIdA: Math.min(a, b), spIdB: Math.max(a, b) }),
@@ -149,7 +157,7 @@ beforeEach(() => {
     mockCountRecentVotes.mockResolvedValue(0);
     mockAwardSwipePoint.mockResolvedValue(undefined);
     mockUpsertEquivalence.mockResolvedValue(undefined);
-    mockUpsertMatchVote.mockResolvedValue({ previousVote: null });
+    mockUpsertMatchVote.mockResolvedValue({ previousVote: null, previousAggregated: false });
     mockApplyAggregateDelta.mockResolvedValue(undefined);
     mockGetProductIdForStoreProduct.mockResolvedValue(100);
     mockApplyBaseProductLinkForVote.mockResolvedValue(undefined);
@@ -167,10 +175,15 @@ describe('castSlot2Vote', () => {
         expect(mockGetConnection).not.toHaveBeenCalled();
     });
 
-    it('burst: awards point but skips equivalence and aggregate', async () => {
+    it('burst: awards point, WRITES the row (aggregated=false), skips equivalence and aggregate', async () => {
         const result = await castSlot2Vote({ ...BASE_INPUT, dwellMs: 100 });
         expect(mockAwardSwipePoint).toHaveBeenCalledTimes(1);
-        expect(mockUpsertMatchVote).not.toHaveBeenCalled();
+        // The row must exist (no-repeat + rate limit see it) but with aggregated=false…
+        expect(mockUpsertMatchVote).toHaveBeenCalledTimes(1);
+        expect(mockUpsertMatchVote.mock.calls[0][6]).toBe(false);
+        // …and the aggregate/equivalence signal is skipped.
+        expect(mockApplyAggregateDelta).not.toHaveBeenCalled();
+        expect(mockUpsertEquivalence).not.toHaveBeenCalled();
         expect(result).toMatchObject({ ok: true, effect: 'vote-recorded', isBurst: true });
     });
 

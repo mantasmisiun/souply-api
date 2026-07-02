@@ -69,6 +69,21 @@ jest.unstable_mockModule('../src/services/statsService.js', () => ({
 }));
 
 // ---------------------------------------------------------------------------
+// receiptItemModel — the P1 dual-write (blob + rows). No-op mock: the save-flow
+// assertions cover the blob; ReceiptItem parity has its own suite.
+// ---------------------------------------------------------------------------
+
+const mockReplaceReceiptItems = jest.fn<any>(async () => new Map());
+jest.unstable_mockModule('../src/models/receiptItemModel.js', () => ({
+    replaceReceiptItems: mockReplaceReceiptItems,
+    getReceiptItemLines: jest.fn(),
+    getReceiptItemRows: jest.fn(),
+    updateReceiptItem: jest.fn(),
+    lineToItem: jest.fn(),
+    itemToLine: jest.fn(),
+}));
+
+// ---------------------------------------------------------------------------
 // receiptSwipeCandidateModel
 // ---------------------------------------------------------------------------
 
@@ -383,6 +398,7 @@ describe('persistReceiptPrices — createPrice arguments', () => {
             1,                // receiptId
             false,            // requiresCoupon
             mockConn,         // connection
+            null,             // receiptItemId (empty in these mocked tests)
         );
     });
 
@@ -393,7 +409,7 @@ describe('persistReceiptPrices — createPrice arguments', () => {
         await persistReceiptPrices(1, 'u1', parsedData, input);
 
         expect(mockCreatePrice).toHaveBeenCalledWith(
-            100, 10, 2.00, null, null, false, expect.any(Date), false, 1, false, mockConn,
+            100, 10, 2.00, null, null, false, expect.any(Date), false, 1, false, mockConn, null,
         );
     });
 });
@@ -519,5 +535,44 @@ describe('persistReceiptPrices — transaction', () => {
         expect(mockConn.rollback).toHaveBeenCalled();
         expect(mockConn.commit).not.toHaveBeenCalled();
         expect(mockConn.release).toHaveBeenCalled();
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Unmatched lines — no stale SP id, true source label
+// ---------------------------------------------------------------------------
+
+describe('persistReceiptPrices — unmatched lines', () => {
+    it('nulls the stale app/round-1 SP id and records the resolver\'s TRUE source on unmatched lines', async () => {
+        // The app sent a (possibly cross-chain) round-1 pick, but the resolver says UNMATCHED.
+        mockResolveReceiptLineStoreProduct.mockResolvedValue({ storeProductId: null, source: 'unmatched' });
+        const input = makeInput({ products: [{ storeProductId: 111, matchConfirmed: true, price: 2.0 }] });
+        const parsedData = makeParsedData([
+            { name: 'GARBLED X', storeProductId: 111, matchedName: 'Wrong cross-chain SP', storeProductImageUrl: 'x.jpg', price: 2.0, quantity: 1 },
+        ]);
+
+        await persistReceiptPrices(1, 'u1', parsedData, input);
+
+        // The stale pick is scrubbed everywhere it could leak from…
+        expect(parsedData.products[0].storeProductId).toBeNull();
+        expect(parsedData.products[0].matchedName).toBeNull();
+        expect(parsedData.products[0].storeProductImageUrl).toBeNull();
+        expect(input.products[0].storeProductId).toBeNull();
+        // …and the ReceiptItem dual-write records NULL + the true source, not 'skipped_unpriced'.
+        const itemLines = mockReplaceReceiptItems.mock.calls[0][1];
+        expect(itemLines[0].storeProductId).toBeNull();
+        expect(itemLines[0].matchSource).toBe('unmatched');
+    });
+
+    it("keeps 'skipped_unpriced' as the source for price-less garbled lines", async () => {
+        mockResolveReceiptLineStoreProduct.mockResolvedValue({ storeProductId: null, source: 'skipped_unpriced' });
+        const input = makeInput({ products: [{ storeProductId: null, matchConfirmed: false, price: 0 }] });
+        const parsedData = makeParsedData([{ name: 'NO PRICE LINE', price: 0, quantity: 1 }]);
+
+        await persistReceiptPrices(1, 'u1', parsedData, input);
+
+        const itemLines = mockReplaceReceiptItems.mock.calls[0][1];
+        expect(itemLines[0].matchSource).toBe('skipped_unpriced');
+        expect(itemLines[0].storeProductId ?? null).toBeNull();
     });
 });

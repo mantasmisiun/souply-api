@@ -1,5 +1,11 @@
 import { Router } from 'express';
 import { addListItem, fetchListItemsByShoppingListId, updateListItem, toggleListItemChecked, removeListItem } from '../controllers/shoppingListItemController.js';
+import { requireUser } from '../middleware/sessionAuth.js';
+import { requireListMember, requireListMemberFromBody, requireListItemMember } from '../middleware/resourceAuth.js';
+
+// List items are collaborative — any MEMBER of the parent list may add/read/edit/toggle/
+// remove (matches the shared-list model). POST reads listId from the body; item :id routes
+// resolve item→parent list → membership.
 
 const router = Router();
 
@@ -33,7 +39,7 @@ const router = Router();
  *         description: Shopping list item added successfully
  */
 // POST /api/list-items - Add an item to a shopping list
-router.post('/list-items', addListItem);
+router.post('/list-items', requireUser, requireListMemberFromBody('listId'), addListItem);
 
 /**
  * @swagger
@@ -53,7 +59,7 @@ router.post('/list-items', addListItem);
 *         description: A list of items in the shopping list
  */
 // GET /api/shopping-lists/:listId/items - Get all items in a shopping list
-router.get('/shopping-lists/:listId/items', fetchListItemsByShoppingListId);
+router.get('/shopping-lists/:listId/items', requireUser, requireListMember('listId'), fetchListItemsByShoppingListId);
 
 /**
  * @swagger
@@ -85,7 +91,7 @@ router.get('/shopping-lists/:listId/items', fetchListItemsByShoppingListId);
  *         description: Shopping list item updated successfully
  */
 // PUT /api/list-items/:id - Update the quantity of a shopping list item
-router.put('/list-items/:id', updateListItem);
+router.put('/list-items/:id', requireUser, requireListItemMember('id'), updateListItem);
 
 /**
  * @swagger
@@ -105,7 +111,7 @@ router.put('/list-items/:id', updateListItem);
 *         description: Shopping list item status updated successfully
  */
 // PATCH /api/list-items/:id/toggle - Toggle the checked status of a shopping list item
-router.patch('/list-items/:id/toggle', toggleListItemChecked);
+router.patch('/list-items/:id/toggle', requireUser, requireListItemMember('id'), toggleListItemChecked);
 
 /**
  * @swagger
@@ -125,6 +131,6 @@ router.patch('/list-items/:id/toggle', toggleListItemChecked);
 *         description: Shopping list item removed successfully
  */
 // DELETE /api/list-items/:id - Remove an item from a shopping list
-router.delete('/list-items/:id', removeListItem);
+router.delete('/list-items/:id', requireUser, requireListItemMember('id'), removeListItem);
 
 export default router;

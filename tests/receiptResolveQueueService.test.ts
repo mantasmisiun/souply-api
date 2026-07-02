@@ -7,6 +7,7 @@ function makeConn(parsedData: any, resolvedRows: any[] = []) {
     const db: any = {
         query: jest.fn(async (sql: string) => {
             if (/SELECT parsedData/.test(sql)) return [[{ parsedData: JSON.stringify(parsedData) }]];
+            if (/FROM ReceiptItem/.test(sql)) return [[]]; // no rows → fall back to blob products
             if (/SELECT receiptLineIdx/.test(sql)) return [resolvedRows];
             return [{ affectedRows: 1 }];
         }),
@@ -128,6 +129,7 @@ describe('buildReceiptResolveCards', () => {
         const conn: any = {
             query: jest.fn(async (sql: string, params: any[]) => {
                 if (/SELECT parsedData/.test(sql)) return [[{ parsedData: JSON.stringify(parsed) }]];
+                if (/FROM ReceiptItem/.test(sql)) return [[]]; // no rows → fall back to blob products
                 if (/SELECT receiptLineIdx/.test(sql)) return [[...ledger].map((i) => ({ receiptLineIdx: i }))];
                 if (/INSERT IGNORE INTO ReceiptLineResolution/.test(sql)) { ledger.add(Number(params[1])); return [{ affectedRows: 1 }]; }
                 return [{ affectedRows: 1 }];

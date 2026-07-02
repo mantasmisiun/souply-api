@@ -1,5 +1,6 @@
 import { type SeqLine } from './mandatoryQueueBuilder.js';
 import { getResolvedLineIdxSet, markLineAsked } from '../models/receiptLineResolutionModel.js';
+import { getReceiptItemLines } from '../models/receiptItemModel.js';
 import { RECOGNITION } from '../../../shared/recognitionConfig.js';
 
 /**
@@ -66,8 +67,10 @@ export async function buildReceiptResolveCards(
     } catch {
         return { cards: [], image: null };
     }
-    const products = parsed?.products;
-    if (!Array.isArray(products)) return { cards: [], image: null };
+    // Products come from ReceiptItem rows (P2 source of truth), blob fallback if not backfilled.
+    let products = await getReceiptItemLines(receiptId, conn);
+    if (products.length === 0 && Array.isArray(parsed?.products)) products = parsed.products;
+    if (!Array.isArray(products) || products.length === 0) return { cards: [], image: null };
 
     // parsed.image dims (OCR portrait space) — the app re-projects the stored photo
     // into this space so the per-line region corners line up 1:1 with the crop.
@@ -78,22 +81,36 @@ export async function buildReceiptResolveCards(
             ? { width: imgW, height: imgH }
             : null;
 
+    // Per-line CARDING trail (Log 2): for EVERY line, why it does or doesn't become a
+    // Card-B swipe card — the matched SP, its band + confidence score + needsHuman, and
+    // the verdict. Answers "which cards were suggested, and why these".
+    const chainId = Number(parsed?.header?.chainId);
+    interface Trail { idx: number; ocr: string; sp: number | null; name: string | null; band: string; score: number | null; needsHuman: number; verdict: string }
+    const trail: Trail[] = [];
     const seqLines: SeqLine[] = [];
-    const skips: string[] = []; // per-line skip reasons, for the diagnostic summary below
     for (let i = 0; i < products.length; i++) {
         const line = products[i];
         const sp = Number(line?.storeProductId);
-        const band = line?.itemConfidence?.band;
-        if (!Number.isFinite(sp) || sp <= 0) { skips.push(`#${i + 1} no-match`); continue; } // nothing to confirm
-        // Card B compares against a MATCHED product — an orphan line (no matchedName,
-        // a freshly-created SP) has nothing to show on the match side, so skip it here;
-        // it belongs to orphan-rescue, not "is this right?".
-        if (typeof line.matchedName !== 'string' || !line.matchedName.trim()) { skips.push(`#${i + 1} orphan-no-matchedName`); continue; }
-        if (band !== 'S2' && band !== 'S3') { skips.push(`#${i + 1} band-confident(${band ?? '—'})`); continue; }
+        const band = line?.itemConfidence?.band ?? '—';
+        const s = Number(line?.itemConfidence?.score);
+        const needsHuman = Number(line?.needsHuman) || 0;
+        const name = typeof line?.matchedName === 'string' ? line.matchedName : null;
+        const t: Trail = {
+            idx: i, ocr: typeof line?.name === 'string' ? line.name : '',
+            sp: Number.isFinite(sp) && sp > 0 ? sp : null, name, band,
+            score: Number.isFinite(s) ? s : null, needsHuman, verdict: '',
+        };
+        if (!Number.isFinite(sp) || sp <= 0) { t.verdict = 'SKIP no-match (line linked to no SP)'; trail.push(t); continue; }
+        // Card B compares against a MATCHED product — an orphan line (no matchedName, a
+        // freshly-created SP) has nothing to show on the match side; it belongs to
+        // orphan-rescue, not "is this right?".
+        if (!name || !name.trim()) { t.verdict = 'SKIP orphan-no-matchedName (a minted orphan → goes to orphan-rescue, not Card-B)'; trail.push(t); continue; }
+        if (band !== 'S2' && band !== 'S3') { t.verdict = `SKIP band-confident (${band} = matcher is sure, no human needed)`; trail.push(t); continue; }
         const qty = Number.isFinite(line.quantity) ? Number(line.quantity) : 1;
         const unitPrice = line.promoPrice != null && line.promoPrice < line.price ? Number(line.promoPrice) : Number(line.price);
         const lineTotalEur = Number.isFinite(unitPrice) ? Math.max(0, unitPrice) * (qty > 0 ? qty : 1) : 0;
-        seqLines.push({ lineIdx: i, band, needsHuman: Number(line.needsHuman) || 0, lineTotalEur });
+        seqLines.push({ lineIdx: i, band, needsHuman, lineTotalEur });
+        trail.push(t); // eligible — verdict finalized after the pick below
     }
 
     const resolved = await getResolvedLineIdxSet(receiptId, conn);
@@ -101,12 +118,24 @@ export async function buildReceiptResolveCards(
         .filter((l) => l.needsHuman > 0 && !resolved.has(l.lineIdx)) // band already gated in seqLines build
         .sort((a, b) => b.needsHuman - a.needsHuman)
         .slice(0, Math.max(0, limit));
+    const pickedSet = new Set(picked.map((l) => l.lineIdx));
+
+    // Finalize the eligible (S2/S3 + matched) lines' verdicts now the pick is known.
+    for (const t of trail) {
+        if (t.verdict) continue; // already a SKIP decided above
+        if (resolved.has(t.idx)) t.verdict = 'SKIP already-resolved (you voted on it before)';
+        else if (t.needsHuman <= 0) t.verdict = 'SKIP needsHuman=0 (uncertain but low value to ask)';
+        else if (pickedSet.has(t.idx)) t.verdict = 'CARDED (uncertain match — asks you to confirm / reject)';
+        else t.verdict = 'SKIP over card limit (deprioritized this session)';
+    }
 
     console.log(
-        `=== RECEIPT ${receiptId} RESOLVE-CARDS: ${picked.length} carded / ${seqLines.length} eligible / ${skips.length} skipped (limit ${limit}) ===` +
-        `\n  carded: ${picked.map((l) => `#${l.lineIdx + 1}(nh ${l.needsHuman.toFixed(2)} ${l.band})`).join(', ') || 'none'}` +
-        `\n  skipped: ${skips.join(', ') || 'none'}` +
-        `\n  resolved-already: ${[...resolved].map((x) => `#${x + 1}`).join(', ') || 'none'}`,
+        `=== RECEIPT ${receiptId} CARDING (chain ${Number.isFinite(chainId) ? chainId : '—'}, limit ${limit}) ===\n` +
+        trail.map((t) =>
+            `  L${t.idx} ${JSON.stringify(t.ocr)} → ${t.sp ? `SP ${t.sp}${t.name ? ` ${JSON.stringify(t.name)}` : ''}` : 'no SP'}` +
+            ` | band=${t.band} score=${t.score != null ? t.score.toFixed(2) : '—'} needsHuman=${t.needsHuman.toFixed(2)}\n       → ${t.verdict}`,
+        ).join('\n') +
+        `\n  => carded ${picked.length}, skipped ${trail.length - picked.length}, eligible ${seqLines.length}`,
     );
 
     const cards: ReceiptResolveCard[] = picked.map((l) => {

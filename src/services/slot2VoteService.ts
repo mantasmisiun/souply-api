@@ -1,7 +1,7 @@
 import pool from '../config/db.js';
 import { MatchThresholds } from '../config/matchThresholds.js';
 import {
-    applyAggregateDelta,
+    applyVoteTransitionDeltas,
     countRecentVotes,
     getMatchAggregate,
     orderPair,
@@ -137,6 +137,15 @@ export const castSlot2Vote = async (
         // post-commit call fires regardless of burst so engagement metrics
         // stay honest.
 
+        // Burst votes still write their ROW (aggregated=0) so the no-repeat rule sees
+        // the card and the rate limit accrues; only the aggregate/equivalence/merge
+        // signal below is burst-gated.
+        if (burst) {
+            await upsertMatchVote(
+                input.userId, spIdA, spIdB, input.vote, input.dwellMs,
+                input.receiptId ?? null, false, connection,
+            );
+        }
         if (!burst) {
             // Personal equivalence for the user's own receipt view:
             //   'identical' → same: full rescue (category + image)
@@ -152,23 +161,19 @@ export const castSlot2Vote = async (
                 input.vote === 'identical' || input.vote === 'similar' ? 'same' : 'different';
             await upsertEquivalence(input.userId, spIdA, spIdB, equivalenceVerdict, connection);
 
-            const { previousVote } = await upsertMatchVote(
+            const { previousVote, previousAggregated } = await upsertMatchVote(
                 input.userId,
                 spIdA,
                 spIdB,
                 input.vote,
                 input.dwellMs,
-                null,
+                input.receiptId ?? null,
+                true,
                 connection,
             );
 
-            // Net-delta aggregate update: retract old vote then apply new one.
-            if (previousVote !== null && previousVote !== input.vote) {
-                await applyAggregateDelta(spIdA, spIdB, previousVote, -1, connection);
-            }
-            if (previousVote !== input.vote) {
-                await applyAggregateDelta(spIdA, spIdB, input.vote, +1, connection);
-            }
+            // Provenance-aware net-delta: only an APPLIED previous vote is retracted.
+            await applyVoteTransitionDeltas(spIdA, spIdB, previousVote, previousAggregated, input.vote, connection);
 
             const [productIdA, productIdB] = await Promise.all([
                 getProductIdForStoreProduct(spIdA, connection),
@@ -178,7 +183,7 @@ export const castSlot2Vote = async (
             await applyBaseProductLinkForVote(
                 spIdA,
                 spIdB,
-                previousVote,
+                previousAggregated ? previousVote : null,
                 input.vote,
                 connection,
                 productIdA,
