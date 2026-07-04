@@ -426,11 +426,20 @@ function scoreNameConfidence(
     // significant token so neither can ORIGINATE a match, only add coverage / nudge
     // ranking between names that already overlap on a content word.
     if (sharedAnchor) {
+        const SHORT = RECOGNITION.match.shortTokenThreshold;
         const cov = subsetCoverage(healedQuery, nameTokens, true);
-        const subsetContribution = cov >= RECOGNITION.match.subsetMinCoverage ? cov * RECOGNITION.match.subsetFullWeight : 0;
+        let subsetContribution = cov >= RECOGNITION.match.subsetMinCoverage ? cov * RECOGNITION.match.subsetFullWeight : 0;
+        // UNDER-DETERMINED subset (receipt-292 "IKI LEDO F" → the mold): the query's only
+        // significant token is a single shared word, but the candidate has ≥2 more significant
+        // tokens the query never evidenced. That match is a guess — cap it below the S1
+        // auto-apply band so it becomes a swipe card instead of a confident wrong link.
+        const sigQ = healedQuery.filter(t => t.length > SHORT);
+        const sigCand = nameTokens.filter(t => t.length > SHORT);
+        if (subsetContribution > 0 && sigQ.length <= 1 && sigCand.length - sigQ.length >= 2) {
+            subsetContribution = Math.min(subsetContribution, RECOGNITION.match.underdeterminedSubsetCap);
+        }
         if (subsetContribution > 0) confidence = Math.max(confidence, subsetContribution);
         if (prov) prov.subset = subsetContribution;
-        const SHORT = RECOGNITION.match.shortTokenThreshold;
         const candLong = nameTokens.filter(t => t.length > SHORT);
         let abbrevHits = 0;
         for (const qt of healedQuery) {
@@ -440,6 +449,13 @@ function scoreNameConfidence(
         }
         const abbrevAdd = abbrevHits > 0 ? Math.min(RECOGNITION.match.abbrevBonusCap, abbrevHits * RECOGNITION.match.abbrevBonus) : 0;
         if (abbrevAdd > 0) confidence = Math.min(1, confidence + abbrevAdd);
+        // Re-cap the UNDER-DETERMINED subset case AFTER the abbrev nudge, but never below a
+        // legitimate token/char-lane score — the floor is max(tokenScore, charContribution,
+        // cap), so a real word-for-word match (a strong token lane) is untouched; only the
+        // subset+abbrev inflation above it is trimmed to the review band.
+        if (subsetContribution > 0 && sigQ.length <= 1 && sigCand.length - sigQ.length >= 2) {
+            confidence = Math.min(confidence, Math.max(tokenScore, charContribution, RECOGNITION.match.underdeterminedSubsetCap));
+        }
         if (prov) prov.abbrev = abbrevAdd;
     }
     return confidence;

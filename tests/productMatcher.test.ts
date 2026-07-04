@@ -99,6 +99,24 @@ describe('findBestProductMatches — OCR split-word heal + subset + abbrev (rece
     });
 });
 
+// receipt-292: a DESTROYED name whose only significant token is a single common word must
+// NOT auto-apply to a much-more-specific product it has no evidence for. "IKI LEDO F"
+// (real: IKI ledo kubeliai / ice cubes) subset-matched "Ledo kubelių formelė, 3 dizainų"
+// (the mold) — the one shared word "ledo" + the single-letter "F"→"Formelė" abbrev pushed
+// it to 0.97 S1. The under-determined cap holds it below the 0.85 auto-apply band so it
+// becomes a human swipe. Contrast receipt-203 (two significant base tokens) where the same
+// single-letter abbrev is a legitimate tiebreak and MUST stay confident (canary above).
+describe('findBestProductMatches — under-determined single-token subset (receipt-292)', () => {
+    const MOLD = makeCandidate({ id: 60055, storeProductName: 'Ledo kubelių formelė, 3 dizainų', isCatalog: true });
+    const BOOK = makeCandidate({ id: 53777, storeProductName: 'Knyga LEDO ŠALIS. SPALVINK PAGAL PAVYZDĮ', isCatalog: true });
+
+    it('does not auto-apply — the single shared "ledo" + "F"→"Formelė" stays below S1', () => {
+        const r = findBestProductMatches('IKI LEDO F', null, null, [MOLD, BOOK]);
+        expect(r.length).toBeGreaterThan(0);
+        expect(r[0].confidence).toBeLessThan(0.85);   // needs-human band, not a confident wrong link
+    });
+});
+
 // ---------------------------------------------------------------------------
 // OCR confusion-weighted char rescue (ocrConfusions.ts): a name garbled by VISUAL
 // OCR confusions (digit↔letter, ll↔ti) matches its in-catalog product, gated so a
