@@ -241,6 +241,12 @@ export const createReceiptFromOcr = async (req: Request, res: Response, next: Ne
                         0,
                         Number(existing.mandatorySwipesRequired ?? 0) - Number(existing.mandatorySwipesCompleted ?? 0),
                     ),
+                    // TRUE when the existing row never got its photo (the abort-then-retry
+                    // shape) — the client resumes ONLY then (or when swipes are pending).
+                    // A COMPLETE duplicate (photo present, no pending swipes) must surface
+                    // the "already uploaded" error instead: silently resuming a deliberate
+                    // re-scan overwrote the stored photo with the new frame (user report).
+                    photoPending: !(typeof existing.filePath === 'string' && existing.filePath.trim().length > 0),
                 });
                 return;
             }

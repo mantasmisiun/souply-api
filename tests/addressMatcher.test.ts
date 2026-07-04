@@ -211,3 +211,56 @@ describe('findBestStoreMatch city gate', () => {
         expect(result).toBeNull();
     });
 });
+
+// receipt-293: the OCR/parser can emit the address CITY-FIRST ("Šiauliai, Lyros g. 19A-1").
+// extractCity only read the last comma-segment, so it grabbed the STREET as the "city" and
+// the gate rejected the exact-match store → the map appeared for a store already in the DB.
+describe('findBestStoreMatch — order-independent (city-first or -last)', () => {
+    const stores = [
+        { id: 358, address: 'LYROS G. 5A, Šiauliai' },
+        { id: 435, address: 'LYROS G. 19A-1, Šiauliai' },
+        { id: 999, address: 'Vilniaus g. 62, Ukmergė' },
+        { id: 888, address: 'Vilniaus g. 12, Šiauliai' },
+    ];
+
+    it('matches the exact store whether the city is printed first or last', () => {
+        expect(findBestStoreMatch('Lyros g. 19A-1, Šiauliai', stores)!.store.id).toBe(435);
+        expect(findBestStoreMatch('Šiauliai, Lyros g. 19A-1', stores)!.store.id).toBe(435);
+        expect(findBestStoreMatch('Lyros g. 19A-1', stores)!.store.id).toBe(435);
+    });
+
+    it('still disambiguates same-street-different-town when the city is first', () => {
+        expect(findBestStoreMatch('Šiauliai, Vilniaus g. 12', stores)!.store.id).toBe(888); // not Ukmergė
+    });
+
+    it('a bare city part never ties every store in that town at distance 0', () => {
+        // "Šiauliai" alone (no street/number) must NOT confidently match a Šiauliai store.
+        const r = findBestStoreMatch('Šiauliai', stores);
+        expect(r === null || r.confidence < 0.85).toBe(true);
+    });
+});
+
+// receipt-302: OCR can scramble the WORD ORDER entirely ("36-101, Vilnius auletekio al."
+// for "Saulėtekio al. 36-101, Vilnius"), which defeats edit distance on every variant
+// pairing. The TOKEN lane accepts when the store's house number appears as an exact token
+// AND the street name fuzzy-matches an OCR token — word order becomes irrelevant.
+describe('findBestStoreMatch — scrambled word order (token lane)', () => {
+    const stores = [
+        { id: 367, address: 'SAULĖTEKIO AL. 36-101, Vilnius' },
+        { id: 297, address: 'Zarasų g. 5A, Vilnius' },
+    ];
+
+    it('matches the fully-scrambled receipt-302 address', () => {
+        const r = findBestStoreMatch('36-101, Vilnius auletekio al.', stores);
+        expect(r).not.toBeNull();
+        expect(r!.store.id).toBe(367);
+    });
+
+    it('clean addresses still score a full-confidence edit-lane match', () => {
+        expect(findBestStoreMatch('Saulėtekio al. 36-101, Vilnius', stores)!.confidence).toBeCloseTo(1, 2);
+    });
+
+    it('an unrelated address still returns null', () => {
+        expect(findBestStoreMatch('visiškai kitas adresas 99, Kaunas', stores)).toBeNull();
+    });
+});

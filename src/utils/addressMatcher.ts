@@ -122,14 +122,20 @@ export function findBestStoreMatch<T extends { address: string }>(
     maxRatio: number = 0.3,
     cityGate: number = 0.6
 ): AddressMatch<T> | null {
-    const ocrVariants = Array.from(
-        new Set(
-            [
-                normalizeAddress(ocrAddress),
-                normalizeAddress(ocrAddress.split(',')[0]),
-            ].filter((s) => s.length > 0)
-        )
-    );
+    // Normalized comparison variants: the FULL address plus every comma-segment that looks
+    // like a STREET (carries a house number). Adding the street segment — not just the first
+    // part — makes matching ORDER-INDEPENDENT: the street is found whether the OCR printed
+    // "Lyros g. 19A-1, Šiauliai" or "Šiauliai, Lyros g. 19A-1". A bare CITY segment is never
+    // added — matching city-to-city would tie every store in that town at distance 0.
+    const streetVariants = (addr: string): string[] => {
+        const out = [normalizeAddress(addr)];
+        for (const part of addr.split(',')) {
+            const np = normalizeAddress(part);
+            if (np && /\d/.test(np)) out.push(np); // a house number ⇒ this segment is the street
+        }
+        return Array.from(new Set(out.filter((s) => s.length > 0)));
+    };
+    const ocrVariants = streetVariants(ocrAddress);
     if (ocrVariants.length === 0) return null;
 
     const ocrCity = extractCity(ocrAddress);
@@ -138,22 +144,29 @@ export function findBestStoreMatch<T extends { address: string }>(
 
     let best: AddressMatch<T> | null = null;
 
+    // Position-independent city presence: the folded OCR address (all letters, no spaces/
+    // punctuation) — so the store's city can be found whether the OCR printed it LAST
+    // ("Lyros g. 19A-1, Šiauliai") or FIRST ("Šiauliai, Lyros g. 19A-1"). extractCity only
+    // reads the last comma-segment, so a city-first address made it grab the STREET as the
+    // "city" and the gate then rejected the correct store (Šiauliai Lyros).
+    const ocrFolded = normalizeAddress(ocrAddress).replace(/[0-9]/g, '');
+
     for (const store of stores) {
         // CITY GATE — disqualify a store in a different town before scoring its street.
         // Passes through when the store address has no usable city (can't gate it).
         if (gateActive) {
             const storeCity = extractCity(store.address ?? '');
-            if (storeCity.length >= 3 && citySimilarity(ocrCity, storeCity) < cityGate) continue;
+            // Pass if the city matches the last segment (OCR-truncation tolerant) OR appears
+            // ANYWHERE in the folded OCR address (order-independent — city-first or -last).
+            if (storeCity.length >= 3) {
+                const cityPresent =
+                    citySimilarity(ocrCity, storeCity) >= cityGate ||
+                    (storeCity.length >= 4 && ocrFolded.includes(storeCity));
+                if (!cityPresent) continue;
+            }
         }
 
-        const storeVariants = Array.from(
-            new Set(
-                [
-                    normalizeAddress(store.address ?? ''),
-                    normalizeAddress((store.address ?? '').split(',')[0]),
-                ].filter((s) => s.length > 0)
-            )
-        );
+        const storeVariants = streetVariants(store.address ?? '');
         if (storeVariants.length === 0) continue;
 
         // Pick the variant pairing with the smallest ratio. Using ratio (not
@@ -169,6 +182,31 @@ export function findBestStoreMatch<T extends { address: string }>(
                     bestRatio = r;
                     bestDistance = d;
                 }
+            }
+        }
+
+        // TOKEN lane (order-independent): OCR can scramble the word ORDER entirely
+        // ("36-101, Vilnius auletekio al." for "Saulėtekio al. 36-101, Vilnius" —
+        // receipt-302), which defeats edit distance on any variant pairing. Accept when
+        // the store's HOUSE NUMBER appears as an exact token AND its STREET NAME
+        // fuzzy-matches (≤25% edits — tolerates the dropped "S" of "auletekio") one of
+        // the OCR's letter tokens. The number+street pair is specific enough that word
+        // order becomes irrelevant; scored just under a clean full match.
+        if (bestRatio > maxRatio) {
+            const tokens = (s: string) => s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
+                .split(/[^a-z0-9]+/).filter(Boolean);
+            const ocrToks = tokens(ocrAddress);
+            const storeStreetSeg = (store.address ?? '').split(',').find((p) => /\d/.test(p)) ?? '';
+            const houseNum = (storeStreetSeg.match(/\d[\w-]*/g) ?? []).map((h) => h.replace(/[^a-z0-9]/gi, '').toLowerCase());
+            const streetNames = tokens(storeStreetSeg).filter((t) => t.length >= 5 && !/\d/.test(t));
+            const houseHit = houseNum.length > 0 && houseNum.every((h) =>
+                ocrToks.includes(h) || ocrToks.join('').includes(h));
+            const streetHit = streetNames.length > 0 && streetNames.some((sn) =>
+                ocrToks.some((ot) => ot.length >= 4 && levenshtein(ot, sn) <= Math.ceil(sn.length * 0.25)));
+            if (houseHit && streetHit) {
+                const conf = 0.9;
+                if (!best || best.confidence < conf) best = { store, distance: 1, confidence: conf };
+                continue;
             }
         }
 
