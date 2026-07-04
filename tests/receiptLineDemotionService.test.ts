@@ -154,8 +154,12 @@ describe('demoteRejectedReceiptLine', () => {
         expect(conn._calls.some((c: any) => /INSERT INTO StoreProduct/.test(c.sql))).toBe(false);
         expect(conn._calls.some((c: any) => /INSERT INTO Product/.test(c.sql))).toBe(false);
         // The rejected match's Price was marked UNVERIFIED (not moved to an orphan).
-        const unverify = conn._calls.find((c: any) => /UPDATE Price SET priceVerified = 0/.test(c.sql));
-        expect(unverify.params).toEqual([108, 97651, 108, 97651]); // line-scoped predicate binds (receiptId, sp) twice // receiptId, oldSp(lineSp)
+        // TWO statements since the index-defeating OR was split (each binds receiptId, sp):
+        // one for receiptItemId-linked rows, one for the legacy receiptId+sp rows.
+        const unverifies = conn._calls.filter((c: any) => /UPDATE Price SET priceVerified = 0/.test(c.sql));
+        expect(unverifies).toHaveLength(2);
+        expect(unverifies[0].params).toEqual([108, 97651]);
+        expect(unverifies[1].params).toEqual([108, 97651]);
     });
 
     it('demoteReceiptLineDirect (self-pair) demotes the line at lineIdx regardless of pair', async () => {

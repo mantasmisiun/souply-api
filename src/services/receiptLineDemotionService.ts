@@ -155,12 +155,20 @@ async function applyDemotion(
     // fall through to OCR-only below. (Previously this minted a quarantined orphan SP to carry
     // the price; under the no-mint policy the observation lives on the ReceiptItem instead.)
     if (Number.isFinite(chainId) && chainId > 0 && Number.isFinite(Number(line.price)) && Number(line.price) > 0) {
+        // TWO statements, NOT one OR: MariaDB refuses index_merge on an UPDATE target, so
+        // the OR walked all 13M Price rows under locks (~20s per 'different' swipe — the
+        // receipt-344 hang class; same fix as receiptLineIssueModel).
         await conn.query(
             `UPDATE Price SET priceVerified = 0
               WHERE isFallback = 0
-                AND (receiptItemId IN (SELECT id FROM ReceiptItem WHERE receiptId = ? AND matchedSpId = ?)
-                     OR (receiptItemId IS NULL AND receiptId = ? AND storeProductId = ?))`,
-            [receiptId, lineSp, receiptId, lineSp],
+                AND receiptItemId IN (SELECT id FROM ReceiptItem WHERE receiptId = ? AND matchedSpId = ?)`,
+            [receiptId, lineSp],
+        );
+        await conn.query(
+            `UPDATE Price SET priceVerified = 0
+              WHERE isFallback = 0
+                AND receiptItemId IS NULL AND receiptId = ? AND storeProductId = ?`,
+            [receiptId, lineSp],
         );
     }
 
