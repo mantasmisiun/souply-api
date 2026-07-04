@@ -89,6 +89,19 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));
 app.use(resolveLocale);
 
+// SLOW-REQUEST DIAGNOSTIC (receipt-342 post-swipe hang): any request taking >3s logs its
+// route + duration. The stall class here is DB lock contention (a vote's FOR UPDATE vs the
+// autosave PUT touching the same ReceiptItem rows) — when it recurs, this names the exact
+// endpoint + timing instead of a silent client spinner. Log-only, no behavior change.
+app.use((req, res, next) => {
+    const t0 = Date.now();
+    res.on('finish', () => {
+        const ms = Date.now() - t0;
+        if (ms > 3000) console.warn(`[SLOW] ${req.method} ${req.originalUrl} took ${ms}ms (status ${res.statusCode})`);
+    });
+    next();
+});
+
 // Client version gate — reads X-Client-Platform/Version and 426s a build strictly below the
 // hard floor (or flags a soft nudge via header). FAIL-OPEN + exempts version-check/health,
 // so it can never brick existing installs. Runs before the routers so every /api path is
