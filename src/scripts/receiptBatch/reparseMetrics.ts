@@ -38,11 +38,15 @@ const parseArgs = (argv: string[]): CliArgs => {
     return { baseline, jsonOnly };
 };
 
-// wordsDump line → the parser's IkiLine shape.
+// wordsDump line → the parser's IkiLine shape. The `c` corner ys (tilt/shear geometry) MUST be
+// forwarded when present: the device pipeline feeds them to the parser, and without them the row
+// clustering can diverge from the real on-device parse (receipt-310: the harness reported phantom
+// failures the app never produced).
 const toIkiLines = (wordsDump: any[]): IkiLine[] =>
     wordsDump.map((d) => ({
         text: d.t,
         xLeft: d.x[0], xRight: d.x[1], yTop: d.y[0], yBottom: d.y[1],
+        ...(d.c ? { yLeftTop: d.c[0], yRightTop: d.c[1], yLeftBottom: d.c[2], yRightBottom: d.c[3] } : {}),
         words: (d.w || []).map((w: any) => ({ text: w[0], xLeft: w[1], xRight: w[2], yTop: w[3], yBottom: w[4] })),
     }));
 
