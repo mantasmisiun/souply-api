@@ -7,7 +7,12 @@ export type FailReason =
     | 'chain_unrecognized'
     | 'store_unrecognized'
     | 'parse_failed'
-    | 'mask_failed';
+    | 'mask_failed'
+    // The client bail flow has always SENT these two, but the enum rejected them —
+    // every no-products / doubled-scan bail 400'd silently and left no log row.
+    // Requires sql/failed_receipt_log_reasons.sql on each environment.
+    | 'no_products'
+    | 'doubled_scan';
 
 export interface LogFailureInput {
     userId: string | null;

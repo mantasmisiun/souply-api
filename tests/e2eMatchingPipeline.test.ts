@@ -16,7 +16,12 @@ import { jest } from '@jest/globals';
 
 const mockGetAsOfDatePrices = jest.fn<any>();
 jest.unstable_mockModule('../src/models/priceModel.js', () => ({
+    // Fishing selectivity pre-check — selective by default so fishing paths run in tests.
+    countPriceRowsNearValue: jest.fn<any>().mockResolvedValue(0),
     getAsOfDatePricesForCandidates: mockGetAsOfDatePrices,
+    // Round-2.5 fishing pool — empty by default so these suites keep exercising
+    // ONLY the confirm/disambiguate logic; fishing has its own suite.
+    getChainSpsByRegularPrice: jest.fn<any>().mockResolvedValue([]),
 }));
 
 const { findBestProductMatches } = await import('../src/utils/productMatcher.js');
@@ -210,6 +215,19 @@ const FIXTURES: Fixture[] = [
         asOfPrices: {},
         resolveSource: 'created',
         expect: { topMatchId: 99001, band: 'S2', bandNot: 'S1' },
+    },
+    {
+        id: 'salmon-promoless-stale-no-confirm',
+        desc: 'Receipt-237 salmon: a promo-less April fallback row at the same 16.99 regular must NOT price-confirm a line that visibly paid a discount (9.99/kg effective) — before the promo-consistency gate it promoted that stale SP and laundered priceVerified into a 0.83 near-S1 score. Regular-only fail-open keeps the name pick, unverified, S2.',
+        chainId: 3, receiptDate: '2026-06-11',
+        ocr: { name: 'ATLATINES LA\u0160ISOSs BE GAL', amount: null, unit: 'kg', isWeighable: false, price: 16.99, pricePerUnit: 16.99, promoPrice: 9.99 },
+        candidates: [
+            { id: 58876, name: 'At\u0161aldytos skrostos atlantin\u0117s la\u0161i\u0161os 4/6', isWeighable: false },
+            { id: 58972, name: 'Skrostos atv\u0117sintos atlantin\u0117s la\u0161i\u0161os su galva', isWeighable: false },
+        ],
+        asOfPrices: { '58876': { price: 16.99 } },
+        resolveSource: 'none',
+        expect: { topMatchId: 58876, priceVerified: false, band: 'S2', bandNot: 'S1' },
     },
     {
         id: 'reject-boundary-just-inside',

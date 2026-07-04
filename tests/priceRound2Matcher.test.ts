@@ -10,7 +10,12 @@ import { jest } from '@jest/globals';
 
 const mockGetAsOfDatePrices = jest.fn<any>();
 jest.unstable_mockModule('../src/models/priceModel.js', () => ({
+    // Fishing selectivity pre-check — selective by default so fishing paths run in tests.
+    countPriceRowsNearValue: jest.fn<any>().mockResolvedValue(0),
     getAsOfDatePricesForCandidates: mockGetAsOfDatePrices,
+    // Round-2.5 fishing pool — empty by default so these suites keep exercising
+    // ONLY the confirm/disambiguate logic; fishing has its own suite.
+    getChainSpsByRegularPrice: jest.fn<any>().mockResolvedValue([]),
 }));
 
 const { applyPriceRound2Matching } = await import('../src/services/priceRound2Matcher.js');

@@ -1,6 +1,7 @@
 import { type SeqLine } from './mandatoryQueueBuilder.js';
 import { getResolvedLineIdxSet, markLineAsked } from '../models/receiptLineResolutionModel.js';
 import { getReceiptItemLines } from '../models/receiptItemModel.js';
+import { getSpProposalDisplayById } from '../models/storeProductModel.js';
 import { RECOGNITION } from '../../../shared/recognitionConfig.js';
 
 /**
@@ -45,6 +46,13 @@ export interface ReceiptResolveCard {
     region: ReceiptBandRegion | null;
     matched: { spId: number; name: string | null; imageUrl: string | null };
     needsHuman: number;
+    /**
+     * PROPOSED card: the line is UNLINKED (no storeProductId) and `matched` shows the
+     * best altMatches candidate as a PROPOSAL, not an existing link. The client must
+     * echo `matched.spId` back as `proposedSpId` in the vote body — identical then
+     * LINKS the SP (+ vocabulary alias), different records the rejected combo.
+     */
+    proposed?: boolean;
 }
 
 export interface ReceiptResolveResult {
@@ -88,6 +96,9 @@ export async function buildReceiptResolveCards(
     interface Trail { idx: number; ocr: string; sp: number | null; name: string | null; band: string; score: number | null; needsHuman: number; verdict: string }
     const trail: Trail[] = [];
     const seqLines: SeqLine[] = [];
+    // lineIdx → the PROPOSED candidate for an unlinked line (best altMatch, same-chain
+    // verified). The card map below renders it in `matched` with proposed=true.
+    const proposals = new Map<number, { spId: number; name: string | null; imageUrl: string | null }>();
     for (let i = 0; i < products.length; i++) {
         const line = products[i];
         const sp = Number(line?.storeProductId);
@@ -100,12 +111,47 @@ export async function buildReceiptResolveCards(
             sp: Number.isFinite(sp) && sp > 0 ? sp : null, name, band,
             score: Number.isFinite(s) ? s : null, needsHuman, verdict: '',
         };
-        if (!Number.isFinite(sp) || sp <= 0) { t.verdict = 'SKIP no-match (line linked to no SP)'; trail.push(t); continue; }
-        // Card B compares against a MATCHED product — an orphan line (no matchedName, a
-        // freshly-created SP) has nothing to show on the match side; it belongs to
-        // orphan-rescue, not "is this right?".
-        if (!name || !name.trim()) { t.verdict = 'SKIP orphan-no-matchedName (a minted orphan → goes to orphan-rescue, not Card-B)'; trail.push(t); continue; }
-        if (band !== 'S2' && band !== 'S3') { t.verdict = `SKIP band-confident (${band} = matcher is sure, no human needed)`; trail.push(t); continue; }
+        const linked = Number.isFinite(sp) && sp > 0;
+        if (!linked) {
+            // UNLINKED line — the old dead end ("no link → no card → the same failure
+            // repeats forever"). When Round-1/2.5 left candidates in altMatches, card
+            // the BEST one as a PROPOSAL instead: identical links it (+ vocabulary
+            // alias), different blacklists the combo. Price-anchored (viaPrice) entries
+            // get the fishing bonus so an exact-regular-price rescue outranks a stale
+            // name-only tie. Cross-chain candidates never propose (linking must stay
+            // same-chain — the chain-price invariant).
+            if (band !== 'S2' && band !== 'S3') {
+                t.verdict = `SKIP unlinked band-${band} (not in surfaceBands)`; trail.push(t); continue;
+            }
+            const alts = Array.isArray(line?.altMatches) ? line.altMatches : [];
+            const ranked = alts
+                .filter((am: any) => Number.isFinite(Number(am?.storeProductId)) && Number(am?.storeProductId) > 0)
+                .map((am: any) => ({
+                    am,
+                    rank: (Number.isFinite(am?.confidence) ? Number(am.confidence) : 0)
+                        + (am?.viaPrice ? RECOGNITION.price.fishPriceBonus : 0),
+                }))
+                .sort((a: any, b: any) => b.rank - a.rank);
+            let proposal: { spId: number; name: string | null; imageUrl: string | null } | null = null;
+            for (const { am } of ranked) {
+                const spId = Number(am.storeProductId);
+                const disp = await getSpProposalDisplayById(spId, conn);
+                if (!disp) continue;                                    // deleted SP
+                if (Number.isFinite(chainId) && disp.chainId !== chainId) continue; // cross-chain → never propose
+                proposal = { spId, name: disp.name ?? am.name ?? null, imageUrl: disp.imageUrl };
+                break;
+            }
+            if (!proposal) { t.verdict = 'SKIP no-match (line linked to no SP, no proposable candidate)'; trail.push(t); continue; }
+            proposals.set(i, proposal);
+            t.sp = proposal.spId;
+            t.name = proposal.name;
+        } else {
+            // Card B compares against a MATCHED product — an orphan line (no matchedName, a
+            // freshly-created SP) has nothing to show on the match side; it belongs to
+            // orphan-rescue, not "is this right?".
+            if (!name || !name.trim()) { t.verdict = 'SKIP orphan-no-matchedName (a minted orphan → goes to orphan-rescue, not Card-B)'; trail.push(t); continue; }
+            if (band !== 'S2' && band !== 'S3') { t.verdict = `SKIP band-confident (${band} = matcher is sure, no human needed)`; trail.push(t); continue; }
+        }
         const qty = Number.isFinite(line.quantity) ? Number(line.quantity) : 1;
         const unitPrice = line.promoPrice != null && line.promoPrice < line.price ? Number(line.promoPrice) : Number(line.price);
         const lineTotalEur = Number.isFinite(unitPrice) ? Math.max(0, unitPrice) * (qty > 0 ? qty : 1) : 0;
@@ -125,7 +171,9 @@ export async function buildReceiptResolveCards(
         if (t.verdict) continue; // already a SKIP decided above
         if (resolved.has(t.idx)) t.verdict = 'SKIP already-resolved (you voted on it before)';
         else if (t.needsHuman <= 0) t.verdict = 'SKIP needsHuman=0 (uncertain but low value to ask)';
-        else if (pickedSet.has(t.idx)) t.verdict = 'CARDED (uncertain match — asks you to confirm / reject)';
+        else if (pickedSet.has(t.idx)) t.verdict = proposals.has(t.idx)
+            ? 'CARDED-PROPOSED (unlinked line — asks you to confirm the best candidate)'
+            : 'CARDED (uncertain match — asks you to confirm / reject)';
         else t.verdict = 'SKIP over card limit (deprioritized this session)';
     }
 
@@ -145,6 +193,7 @@ export async function buildReceiptResolveCards(
             reg && Number.isFinite(Number(reg.yTop)) && Number.isFinite(Number(reg.yBottom))
                 ? (reg as ReceiptBandRegion)
                 : null;
+        const proposal = proposals.get(l.lineIdx);
         return {
             cardKind: 'receipt' as const,
             cardId: `rcpt:${receiptId}:${l.lineIdx}`,
@@ -154,12 +203,15 @@ export async function buildReceiptResolveCards(
                 cropUrl: `/api/receipts/${receiptId}/lines/${l.lineIdx}/crop`,
             },
             region,
-            matched: {
-                spId: Number(line.storeProductId),
-                name: line.matchedName ?? null,
-                imageUrl: line.storeProductImageUrl ?? null,
-            },
+            matched: proposal
+                ? { spId: proposal.spId, name: proposal.name, imageUrl: proposal.imageUrl }
+                : {
+                    spId: Number(line.storeProductId),
+                    name: line.matchedName ?? null,
+                    imageUrl: line.storeProductImageUrl ?? null,
+                },
             needsHuman: Number(line.needsHuman) || 0,
+            ...(proposal ? { proposed: true } : {}),
         };
     });
     return { cards, image };

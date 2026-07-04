@@ -10,12 +10,14 @@ import { buildSlot2Queue } from '../services/slot2QueueBuilder.js';
 import { buildSlot3Queue } from '../services/slot3QueueBuilder.js';
 import { castSlot2Vote } from '../services/slot2VoteService.js';
 import { castDirectSpPairVote } from '../services/directSpPairVoteService.js';
+import { withDeadlockRetry } from '../utils/withDeadlockRetry.js';
 import type { SwipeVote } from '../services/swipeVoteService.js';
 import { getUserPointsProfile } from '../services/userPointsService.js';
 import { refillUserOrphansIfMissing } from '../services/orphanRefillService.js';
 import type { Locale } from '../middleware/locale.js';
 import { capVoluntaryQueue } from '../../../shared/swipeQueueCap.js';
 import { buildReceiptResolveCards } from '../services/receiptResolveQueueService.js';
+import { buildSlot2cBackfill } from '../services/slot2cBackfillService.js';
 import { RECOGNITION } from '../../../shared/recognitionConfig.js';
 
 const VALID_VOTES: SwipeVote[] = ['identical', 'similar', 'different'];
@@ -178,7 +180,7 @@ async function logReceiptPipeline(receiptId: number): Promise<void> {
  * the voluntary-count endpoint build the queue through ONE code path — the count
  * and the served queue can never drift. Returns the cards + pre-gate slot counts.
  */
-async function buildSwipeQueueItems(
+export async function buildSwipeQueueItems(
     userId: string,
     receiptIdParam: number | undefined,
     relatedTo: number | undefined,
@@ -403,7 +405,11 @@ export const submitDirectVote = async (
             return;
         }
 
-        const result = await castDirectSpPairVote({
+        // Deadlock-retried: the vote txn's demotion (SELECT … FOR UPDATE on ReceiptItem)
+        // can deadlock against a concurrent autosave's replaceReceiptItems — the whole
+        // vote transaction is rolled back by MySQL, so the only correct recovery is to
+        // re-run the entire vote (receipt-232's lost third-card vote).
+        const result = await withDeadlockRetry(() => castDirectSpPairVote({
             userId,
             spIdA: Number(spIdA),
             spIdB: Number(spIdB),
@@ -412,7 +418,7 @@ export const submitDirectVote = async (
             // Optional — present when the card came from a receipt's swipe queue;
             // lets a 'different' vote demote the rejected line back to OCR.
             receiptId: Number.isFinite(receiptId) ? Number(receiptId) : null,
-        });
+        }), { label: `direct vote ${spIdA}-${spIdB}` });
 
         const { level } = await getUserPointsProfile(userId);
         res.json({ ...result, level });
@@ -471,6 +477,52 @@ export const submitSlot2Vote = async (
 
         const { level } = await getUserPointsProfile(userId);
         res.json({ ...result, level });
+    } catch (error) {
+        next(error);
+    }
+};
+
+/**
+ * GET /api/users/:userId/receipts/:receiptId/orphan-backfill?k=N
+ *
+ * Slot 2c — receipt-scoped orphan BACKFILL for the mandatory session. The client
+ * calls this ONLY when the receipt's own pool (Card-B + slots) left free mandatory
+ * slots; the response fills them with orphan-rescue cards RELATED to the receipt
+ * (its category family + chain; name+price composite; highest pair wins). Cards
+ * are ordinary slot-2 cards — the existing slot2 vote endpoint + no-repeat ledger
+ * handle them unchanged. Serves fewer than k (or none) when nothing clears the
+ * floor: an honest short session beats junk.
+ */
+export const getOrphanBackfill = async (
+    req: Request,
+    res: Response,
+    next: NextFunction,
+) => {
+    try {
+        const userId = typeof req.params.userId === 'string' ? req.params.userId.trim() : '';
+        const receiptId = Number(req.params.receiptId);
+        const k = Math.min(3, Math.max(1, Number(req.query.k) || 1));
+        if (!userId || !Number.isFinite(receiptId) || receiptId <= 0) {
+            res.status(400).json({ error: 'userId and receiptId are required' });
+            return;
+        }
+        // Ownership: the receipt must belong to the (token-pinned) user.
+        const [own]: any = await pool.query('SELECT userId FROM Receipt WHERE id = ?', [receiptId]);
+        if (!own?.[0] || String(own[0].userId) !== userId) {
+            res.status(404).json({ error: 'Receipt not found' });
+            return;
+        }
+        const items = await buildSlot2cBackfill(userId, receiptId, k, req.locale);
+        res.json({
+            items: items.map((item) => ({
+                cardId: item.cardId,
+                slot: 2 as const,
+                score: item.score,
+                left: { spId: item.orphanSpId, ...item.orphan },
+                right: { spId: item.candidateSpId, ...item.candidate },
+                slot2Meta: { sameChain: item.sameChain, conflictDetected: item.conflictDetected },
+            })),
+        });
     } catch (error) {
         next(error);
     }

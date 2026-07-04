@@ -2,6 +2,7 @@ import type { Connection } from 'mysql2/promise';
 import { computeItemConfidence } from './itemConfidence.js';
 import { demoteReceiptLineDirect } from './receiptLineDemotionService.js';
 import { setReceiptLinePriceVerified } from '../models/receiptLineIssueModel.js';
+import { getSpProposalDisplayById } from '../models/storeProductModel.js';
 import { recordAliasVote, fetchSpCategoryLabels, type AliasVoteOutcome } from '../models/storeProductAliasModel.js';
 import { syncReceiptItemMatchState, itemToLine } from '../models/receiptItemModel.js';
 import { RECOGNITION } from '../../../shared/recognitionConfig.js';
@@ -32,6 +33,11 @@ export async function castReceiptLineVote(
     vote: ReceiptLineVote,
     conn: Connection,
     userId?: string,
+    // PROPOSED-card path (unlinked line whose card showed the best altMatches
+    // candidate): the client echoes the card's SP id back here. Validated below
+    // against the line's STORED candidates + the receipt's chain — never trusted
+    // raw. identical → LINK it; different/similar → alias verdict only.
+    proposedSpId?: number | null,
 ): Promise<any | null> {
     // Read the line from its ReceiptItem row (the source of truth) FOR UPDATE — the confirm
     // below is a single-row UPDATE, not a whole-blob rewrite. The chain comes from the
@@ -49,15 +55,46 @@ export async function castReceiptLineVote(
     const sp = line ? Number(line.storeProductId) : NaN;
     const ocrName = line && typeof line.name === 'string' ? line.name : '';
 
+    // ── PROPOSED-card validation: only for an UNLINKED line, only an SP that is in the
+    //    line's stored altMatches, only same-chain (the chain-price invariant). A failed
+    //    validation degrades to the plain unlinked behavior — never an error.
+    let proposal: { spId: number; name: string | null; imageUrl: string | null; confidence: number | null;
+                    categoryId: number | null; categoryName: string | null; categoryL2Name: string | null } | null = null;
+    if (proposedSpId != null && line && !(Number.isFinite(sp) && sp > 0)) {
+        const alt = (Array.isArray(line.altMatches) ? line.altMatches : [])
+            .find((am: any) => Number(am?.storeProductId) === proposedSpId);
+        if (!alt) {
+            console.log(`        proposal → REJECTED sp=${proposedSpId} (not among this line's stored candidates)`);
+        } else {
+            const disp = await getSpProposalDisplayById(proposedSpId, conn);
+            if (!disp || (Number.isFinite(chainId) && disp.chainId !== chainId)) {
+                console.log(`        proposal → REJECTED sp=${proposedSpId} (${!disp ? 'SP no longer exists' : 'cross-chain'})`);
+            } else {
+                proposal = {
+                    spId: proposedSpId,
+                    name: disp.name ?? (typeof alt.name === 'string' ? alt.name : null),
+                    imageUrl: disp.imageUrl,
+                    confidence: Number.isFinite(alt?.confidence) ? Number(alt.confidence) : null,
+                    categoryId: Number.isFinite(Number(alt?.categoryId)) ? Number(alt.categoryId) : null,
+                    categoryName: typeof alt?.categoryName === 'string' ? alt.categoryName : null,
+                    categoryL2Name: typeof alt?.categoryL2Name === 'string' ? alt.categoryL2Name : null,
+                };
+            }
+        }
+    }
+    // The SP this vote is ABOUT — the linked one, or the validated proposal (alias
+    // learning below attributes the verdict to it either way).
+    const effSp = Number.isFinite(sp) && sp > 0 ? sp : (proposal?.spId ?? NaN);
+
     // ── [VOCAB] header — one coherent block per swipe.
-    console.log(`[VOCAB] r${receiptId}/L${lineIdx} ${vote.toUpperCase()}  sp=${Number.isFinite(sp) ? sp : '—'} chain=${Number.isFinite(chainId) ? chainId : '—'} ocr=${JSON.stringify(ocrName)}`);
+    console.log(`[VOCAB] r${receiptId}/L${lineIdx} ${vote.toUpperCase()}  sp=${Number.isFinite(effSp) ? effSp : '—'}${proposal ? ' (proposed)' : ''} chain=${Number.isFinite(chainId) ? chainId : '—'} ocr=${JSON.stringify(ocrName)}`);
 
     // ── VOCABULARY (Issue H): record the user's verdict as a chain-scoped alias vote,
     //    logging exactly why it did (or didn't) learn / update the vocabulary.
     let aliasOutcome: AliasVoteOutcome | null = null;
     if (!userId) {
         console.log('        alias → skipped (no userId sent — the client must include it in the vote body)');
-    } else if (!(Number.isFinite(chainId) && Number.isFinite(sp) && sp > 0 && ocrName.trim())) {
+    } else if (!(Number.isFinite(chainId) && Number.isFinite(effSp) && effSp > 0 && ocrName.trim())) {
         console.log('        alias → skipped (no chain / SP / OCR text on this line)');
     } else {
         const matchConf = Number(line.matchConfidence);
@@ -67,7 +104,7 @@ export async function castReceiptLineVote(
             console.log(`        alias → skipped (matcher already matched confidently, conf=${matchConf.toFixed(2)} ≥ ${RECOGNITION.match.autoApplyThreshold} — nothing to learn)`);
         } else {
             try {
-                aliasOutcome = await recordAliasVote({ chainId, storeProductId: sp, rawName: ocrName, userId, vote, receiptId }, conn);
+                aliasOutcome = await recordAliasVote({ chainId, storeProductId: effSp, rawName: ocrName, userId, vote, receiptId }, conn);
             } catch (e) {
                 console.warn('[vocab] alias capture failed (non-fatal):', (e as Error)?.message ?? e);
             }
@@ -75,7 +112,7 @@ export async function castReceiptLineVote(
                 const tallies = `votes id/sim/diff=${aliasOutcome.identicalUsers}/${aliasOutcome.similarUsers}/${aliasOutcome.differentUsers}`;
                 const st = aliasOutcome.status.toUpperCase();
                 if (aliasOutcome.status === 'similarity') {
-                    const cat = await fetchSpCategoryLabels(sp, conn);
+                    const cat = await fetchSpCategoryLabels(effSp, conn);
                     console.log(`        alias → #${aliasOutcome.aliasId} status=${st}  category-link L2=${JSON.stringify(cat.l2)} L3=${JSON.stringify(cat.l3)}  ${tallies}`);
                 } else if (aliasOutcome.status === 'canonical') {
                     console.log(`        alias → #${aliasOutcome.aliasId} status=${st} (now used as a match target for everyone)  ${tallies}`);
@@ -92,6 +129,14 @@ export async function castReceiptLineVote(
 
     // ── Apply the vote's effect to the receipt line.
     if (vote === 'different' || vote === 'similar') {
+        if (proposal) {
+            // PROPOSED card rejected: the line was never linked, so there is nothing to
+            // demote — the alias verdict above (rejected combo / similarity link) is the
+            // whole effect, and the resolution ledger stops the re-nag. The NEXT scan's
+            // matcher sees the blacklisted combo suppressed and the runner-up proposes.
+            console.log(`        line  → PROPOSAL ${vote.toUpperCase()} — line stays unlinked; alias verdict recorded`);
+            return line;
+        }
         // 'different' = wrong product; 'similar' = a same-category SUBSTITUTE (a
         // DIFFERENT product). Neither is THIS exact SP, so demote to a runner-up /
         // fresh orphan / OCR. The same-category link for 'similar' lives in the alias
@@ -105,29 +150,66 @@ export async function castReceiptLineVote(
         return demoted;
     }
 
-    // 'identical' → confirm the product + trust the price (user-confirmed → S1).
+    // ── 'identical' on a PROPOSED card: LINK the validated candidate. A name confirm
+    //    by the user, NOT price evidence — priceVerified stays false (Round-2 already
+    //    declined to price-confirm this line; a swipe must not launder it).
+    if (proposal) {
+        line.storeProductId = proposal.spId;
+        line.matchConfirmed = true;
+        line.matchedName = proposal.name;
+        line.storeProductImageUrl = proposal.imageUrl;
+        line.variantUncertain = false;
+        line.priceVerified = false;
+        if (proposal.categoryId != null) {
+            line.categoryId = proposal.categoryId;
+            line.categoryName = proposal.categoryName;
+            line.categoryL2Name = proposal.categoryL2Name;
+        }
+        if (proposal.confidence != null) line.matchConfidence = proposal.confidence;
+        line.itemConfidence = computeItemConfidence({
+            nameConf: proposal.confidence,
+            nameText: ocrName,
+            priceVerified: false,
+            viaPromo: false,
+            gapToRunnerUp: 0,
+            source: 'reused',
+            priceImplausible: false,
+            userConfirmed: true,
+        });
+        await syncReceiptItemMatchState(receiptId, lineIdx, line, conn);
+        console.log(`        line  → LINKED proposed SP ${proposal.spId} ${JSON.stringify(proposal.name ?? '')} (user confirm; price stays unverified), itemConfidence ${line.itemConfidence?.band ?? '?'}`);
+        return line;
+    }
+
+    // 'identical' → confirm the product; trust the price ONLY when Round-2 didn't
+    // reject it. The card asks "is your line this product?" — a yes confirms the
+    // IDENTITY, not the printed number. A priceImplausible line (receipt-232: the
+    // deposit's 0,10 clustered onto the water, rejected against the known €1.49
+    // regular) must stay price-unverified, or the confirm would launder a wrong
+    // price into "verified" and let it into reference pricing.
     if (!line || !Number.isFinite(sp) || sp <= 0) {
         console.log('        line  → no match to confirm');
         return null;
     }
+    const priceRejected = !!line.priceImplausible;
     line.matchConfirmed = true;
-    line.priceVerified = true;
+    line.priceVerified = !priceRejected;
     line.variantUncertain = false;
     line.itemConfidence = computeItemConfidence({
         nameConf: Number.isFinite(line.matchConfidence) ? Number(line.matchConfidence) : null,
         nameText: ocrName,
-        priceVerified: true,
+        priceVerified: !priceRejected,
         viaPromo: false,
         gapToRunnerUp: 0,
         source: 'reused',
-        priceImplausible: false,
+        priceImplausible: priceRejected,
         userConfirmed: true,
     });
 
     // Confirm the line as a single-row ReceiptItem UPDATE (P2 Step C — the blob no longer
     // carries products[]). This is the authoritative write, so a failure must surface.
     await syncReceiptItemMatchState(receiptId, lineIdx, line, conn);
-    await setReceiptLinePriceVerified(receiptId, sp, true, conn);
-    console.log(`        line  → CONFIRMED — kept SP ${sp}, price-verified, itemConfidence S1`);
+    if (!priceRejected) await setReceiptLinePriceVerified(receiptId, sp, true, conn);
+    console.log(`        line  → CONFIRMED — kept SP ${sp}, ${priceRejected ? 'price stays UNVERIFIED (Round-2 rejected)' : 'price-verified'}, itemConfidence ${line.itemConfidence?.band ?? '?'}`);
     return line;
 }

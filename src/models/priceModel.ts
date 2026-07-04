@@ -371,3 +371,117 @@ export const getAsOfDatePricesForCandidates = async (
     }
     return result;
 };
+/**
+ * Round-2.5 RESCUE FISHING pool: same-chain SPs whose REGULAR price matches the
+ * receipt line's printed regular within tolerance, in a ±window around the
+ * receipt date (BOTH directions — scrapes are weekly and SPs get minted/renamed
+ * continuously, so a just-minted SP's first price row may postdate an older
+ * receipt; the regular price is a stable identity anchor either way, unlike
+ * promos which churn weekly). Excludes this receipt's own rows and any SP ids
+ * the caller already has (Round-1 altMatches). Carries the same category/name
+ * fields the Round-1 candidates carry so a fished entry can sit in altMatches
+ * verbatim. Capped — an ultra-common price point (e.g. 0.99) must not flood the
+ * relaxed re-scoring downstream.
+ */
+export const getChainSpsByRegularPrice = async (
+    chainId: number,
+    regular: number,
+    tolerance: number,
+    aroundDate: Date,
+    windowDays: number,
+    excludeReceiptId: number,
+    excludeSpIds: number[],
+    limit: number,
+    // When the receipt line visibly paid a DISCOUNT, only rows that carry a promo
+    // qualify as anchors — the discount is real-world evidence the product was on
+    // promotion, and at a common price point (16.99: books, gin, toys…) it narrows
+    // the pool by an order of magnitude.
+    requirePromo = false,
+    conn?: Connection,
+): Promise<Array<{
+    storeProductId: number; productId: number; categoryId: number | null;
+    categoryName: string | null; categoryL2Name: string | null; name: string;
+    brandName: string | null; amount: number | null; unit: string | null;
+    isWeighable: boolean; isCatalog: boolean; imageUrl: string | null;
+}>> => {
+    const db = conn || pool;
+    const lo = new Date(aroundDate.getTime() - windowDays * 86400_000);
+    const hi = new Date(aroundDate.getTime() + windowDays * 86400_000);
+    const excl = excludeSpIds.length ? excludeSpIds : [0];
+    // Inner pick: one row per SP with its closest price distance, CLOSEST-first so the
+    // LIMIT keeps the best anchors when a price point is common (no arbitrary truncation).
+    const [rows]: any = await db.query(
+        `SELECT sp.id AS storeProductId, sp.productId, sp.storeProductName AS name,
+                sp.brandName, sp.amount, sp.unit, sp.isWeighable, sp.imageUrl,
+                p.categoryId, c.name AS categoryName,
+                CASE
+                  WHEN c.parentCategoryId IS NULL  THEN NULL
+                  WHEN c2.parentCategoryId IS NULL THEN c.name
+                  ELSE c2.name
+                END AS categoryL2Name,
+                EXISTS(SELECT 1 FROM Price pr2 WHERE pr2.storeProductId = sp.id AND pr2.receiptId IS NULL) AS isCatalog,
+                picked.priceDist
+           FROM (
+                SELECT pr.storeProductId AS spId, MIN(ABS(pr.price - ?)) AS priceDist
+                  FROM Price pr USE INDEX (idx_price_value)
+                  JOIN StoreProduct spf ON spf.id = pr.storeProductId
+                 WHERE spf.chainId = ?
+                   AND pr.price BETWEEN ? AND ?
+                   AND pr.date BETWEEN ? AND ?
+                   AND (pr.receiptId IS NULL OR pr.receiptId <> ?)
+                   AND pr.storeProductId NOT IN (?)
+                   AND (? = 0 OR pr.promoPrice IS NOT NULL)
+                 GROUP BY pr.storeProductId
+                 ORDER BY priceDist ASC, pr.storeProductId ASC
+                 LIMIT ?
+           ) picked
+           JOIN StoreProduct sp ON sp.id = picked.spId
+           JOIN Product p ON p.id = sp.productId
+           LEFT JOIN Category c  ON c.id = p.categoryId
+           LEFT JOIN Category c2 ON c2.id = c.parentCategoryId
+          ORDER BY picked.priceDist ASC, sp.id ASC`,
+        [regular, chainId, regular - tolerance, regular + tolerance, lo, hi, excludeReceiptId, excl, requirePromo ? 1 : 0, limit],
+    );
+    return rows.map((r: any) => ({
+        storeProductId: Number(r.storeProductId),
+        productId: Number(r.productId),
+        categoryId: r.categoryId != null ? Number(r.categoryId) : null,
+        categoryName: r.categoryName ?? null,
+        categoryL2Name: r.categoryL2Name ?? null,
+        name: String(r.name),
+        brandName: r.brandName ?? null,
+        amount: r.amount !== null ? parseFloat(r.amount) : null,
+        unit: r.unit ?? null,
+        isWeighable: !!r.isWeighable,
+        isCatalog: !!r.isCatalog,
+        imageUrl: r.imageUrl ?? null,
+    }));
+};
+
+/**
+ * Bounded count of Price rows in a value+date range (the Round-2.5 fishing anchor).
+ * Costs ~30-90ms as a pure index-range count capped at `cap`+1 — the caller skips
+ * fishing entirely when the anchor is NON-SELECTIVE (a super-common price point like
+ * 1.99 matches 500k+ rows: the unhinted pool query measured 12s there and, more to
+ * the point, a price everyone shares carries no identity signal to fish on).
+ */
+export const countPriceRowsNearValue = async (
+    regular: number,
+    tolerance: number,
+    aroundDate: Date,
+    windowDays: number,
+    cap: number,
+    conn?: Connection,
+): Promise<number> => {
+    const db = conn || pool;
+    const lo = new Date(aroundDate.getTime() - windowDays * 86400_000);
+    const hi = new Date(aroundDate.getTime() + windowDays * 86400_000);
+    const [rows]: any = await db.query(
+        `SELECT COUNT(*) AS n FROM (
+            SELECT 1 FROM Price USE INDEX (idx_price_value)
+             WHERE price BETWEEN ? AND ? AND date BETWEEN ? AND ? LIMIT ?
+        ) t`,
+        [regular - tolerance, regular + tolerance, lo, hi, cap + 1],
+    );
+    return Number(rows?.[0]?.n ?? 0);
+};

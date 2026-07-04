@@ -1,13 +1,14 @@
 import { Request, Response, NextFunction } from "express";
 import sharp from "sharp";
 import pool from "../config/db.js";
-import { createReceipt, getReceiptsByUserId, getReceiptById, deleteReceipt, getReceiptItemsWithDetails, updateReceiptFilePath, getReceiptByReceiptNoAndUser, completeMandatorySwipes } from "../models/receiptModel.js";
+import { createReceipt, getReceiptsByUserId, getReceiptById, deleteReceipt, getReceiptItemsWithDetails, updateReceiptFilePath, getReceiptByReceiptNoAndUser, getReceiptByAnyReceiptNoAndUser, completeMandatorySwipes } from "../models/receiptModel.js";
 import {
     getSwipeCandidatesWithDetails,
     getVerifiedStoreProductIdsForReceipt,
     getVotedPairKeysForUser,
 } from "../models/receiptSwipeCandidateModel.js";
 import { buildSwipeQueue } from "../services/swipeQueueService.js";
+import { getMandatoryQueue } from "../services/mandatoryQueueService.js";
 import { normalizeReceiptNo, normalizeReceiptNos } from "../utils/receiptMetadata.js";
 import { getReverificationPairKeysForReceipt } from "../models/userEquivalenceModel.js";
 import {
@@ -213,15 +214,33 @@ export const createReceiptFromOcr = async (req: Request, res: Response, next: Ne
         // Reject duplicates early so re-photographing the same receipt doesn't
         // create parallel records. IKI synthesizes a `{date}-{time}-{cents}-iki-receipt`
         // number specifically so this check works when the receipt format has no
-        // natural unique ID.
+        // natural unique ID. OVERLAP matching: every distinctive identifier the footer
+        // carries (receiptNos[]) is considered, not just the canonical — the paper
+        // prints its id in several forms, so a re-scan whose canonical got OCR-garbled
+        // still collides through a clean secondary id (e.g. the VMI "Kvito numeris").
+        // Short low-entropy ids ("Kvitas 3157") are excluded inside the model. The
+        // canonical-only check stays as a fallback for non-distinctive canonicals.
         const candidateReceiptNo = parsedData.footer?.receiptNo ?? null;
-        if (candidateReceiptNo) {
-            const existing = await getReceiptByReceiptNoAndUser(candidateReceiptNo, String(userId));
+        const candidateReceiptNos: string[] = Array.isArray(parsedData.footer?.receiptNos) && parsedData.footer.receiptNos.length
+            ? parsedData.footer.receiptNos
+            : (candidateReceiptNo ? [candidateReceiptNo] : []);
+        if (candidateReceiptNos.length) {
+            const existing = (await getReceiptByAnyReceiptNoAndUser(candidateReceiptNos, String(userId)))
+                ?? (candidateReceiptNo ? await getReceiptByReceiptNoAndUser(candidateReceiptNo, String(userId)) : null);
             if (existing) {
+                // Same-user duplicate. The most common real-world cause is the ABORT-THEN-RETRY
+                // case (receipt-238): the first POST exceeded the client timeout, the server
+                // committed anyway, and the retry collides here. Hand back everything the client
+                // needs to RESUME the pipeline against the existing row (photo upload + swipe
+                // phase) instead of dropping the scan: the id + how many mandatory swipes remain.
                 res.status(409).json({
                     error: 'duplicate',
                     message: 'Receipt already uploaded',
                     existingReceiptId: existing.id,
+                    mandatorySwipesPending: Math.max(
+                        0,
+                        Number(existing.mandatorySwipesRequired ?? 0) - Number(existing.mandatorySwipesCompleted ?? 0),
+                    ),
                 });
                 return;
             }
@@ -269,15 +288,19 @@ export const createReceiptFromOcr = async (req: Request, res: Response, next: Ne
                 console.warn('[defaultTemplate] generation failed:', e?.message),
             );
         } catch (err: any) {
+            // Best-effort cleanup of the orphaned Receipt row on ANY persist failure —
+            // createReceipt inserted the bare row BEFORE the (rolled-back) save
+            // transaction, so a non-duplicate failure used to LEAK one empty row per
+            // attempt (the garbled-date retry loop left 17 of them, surfacing as
+            // "malformed parsedData" entries in the Analyze list). At this point the
+            // row has no children (the transaction rolled back), so the delete is safe;
+            // non-fatal if it fails.
+            try {
+                await deleteReceipt(receiptId);
+            } catch (cleanupErr) {
+                console.warn('Failed to clean up orphan receipt', receiptId, cleanupErr);
+            }
             if (err?.code === 'ER_DUP_ENTRY' && /unique_receipt/i.test(String(err?.sqlMessage ?? ''))) {
-                // Best-effort cleanup of the orphaned Receipt row. Non-fatal
-                // if it fails — FK cascade on Price catches residual Price
-                // rows, and a stray empty Receipt row is harmless.
-                try {
-                    await deleteReceipt(receiptId);
-                } catch (cleanupErr) {
-                    console.warn('Failed to clean up orphan receipt', receiptId, cleanupErr);
-                }
                 // Cross-account: a DIFFERENT user already uploaded this
                 // physical receipt. Flag it so the client doesn't tell the
                 // current user "you already uploaded this" (they didn't) and
@@ -889,18 +912,28 @@ export const rejectReceiptLineMatch = async (req: Request, res: Response, next: 
 };
 
 /**
- * POST /api/receipts/:id/lines/:idx/vote   body: { vote: 'identical'|'similar'|'different' }
+ * POST /api/receipts/:id/lines/:idx/vote
+ *   body: { vote: 'identical'|'similar'|'different', proposedSpId?: number }
  *
  * A Card-B swipe on a receipt line: identical → confirm + price-verify; similar →
  * keep product, flag variant, price unverified; different → demote. Records the
  * line resolved in the ledger (one shot) and returns the mutated line so the app
  * patches the row in place.
+ *
+ * `proposedSpId` (PROPOSED cards only — an UNLINKED line whose card showed the best
+ * altMatches candidate): identical LINKS that SP to the line, different/similar
+ * record the alias verdict without touching the line. The id is validated server-
+ * side against the line's stored altMatches + the receipt's chain — a client can
+ * never link an arbitrary SP.
  */
 export const submitReceiptLineVote = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const receiptId = Number(req.params.id);
         const lineIdx = Number(req.params.idx);
         const vote = req.body?.vote;
+        const proposedSpId = Number.isFinite(Number(req.body?.proposedSpId)) && Number(req.body?.proposedSpId) > 0
+            ? Number(req.body.proposedSpId)
+            : null;
         // Used by the vocabulary capture (Issue H) to attribute the alias confirmation to
         // a distinct user (the K-user auto-promote). From the token subject, not the body.
         const userId = req.authUserId;
@@ -915,7 +948,7 @@ export const submitReceiptLineVote = async (req: Request, res: Response, next: N
         const conn = await (pool as any).getConnection();
         try {
             await conn.beginTransaction();
-            const line = await castReceiptLineVote(receiptId, lineIdx, vote, conn, userId);
+            const line = await castReceiptLineVote(receiptId, lineIdx, vote, conn, userId, proposedSpId);
             await markLineResolved(receiptId, lineIdx, 'user', vote, conn);
             await conn.commit();
             res.json({ ok: true, line: line ?? null });
@@ -981,6 +1014,8 @@ const VALID_FAIL_REASONS: ReadonlySet<FailReason> = new Set([
     'store_unrecognized',
     'parse_failed',
     'mask_failed',
+    'no_products',
+    'doubled_scan',
 ]);
 
 export const logAnalizeFailure = async (
@@ -1072,4 +1107,28 @@ export const logReocrTelemetry = async (req: Request, res: Response) => {
         }),
     );
     res.status(204).end();
+};
+
+/**
+ * GET /api/receipts/:id/mandatory-queue
+ *
+ * ONE-SHOT mandatory swipe session: Card-B resolve cards + receipt-anchored pair
+ * cards + relatedTo top-up + Slot-2c orphan backfill, assembled server-side (see
+ * mandatoryQueueService). Replaces the client's four sequential requests. Served
+ * from the save-time snapshot when fresh (revalidated against the vote/resolution
+ * ledgers), built live otherwise.
+ */
+export const fetchMandatoryQueue = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const receiptId = Number(req.params.id);
+        const userId = req.authUserId;
+        if (isNaN(receiptId) || !userId) {
+            res.status(400).json({ error: 'Invalid receipt id' });
+            return;
+        }
+        const { cards, image, slotCounts, fromSnapshot } = await getMandatoryQueue(userId, receiptId, req.locale);
+        res.json({ receiptId, cards, image, slotCounts, fromSnapshot });
+    } catch (error) {
+        next(error);
+    }
 };

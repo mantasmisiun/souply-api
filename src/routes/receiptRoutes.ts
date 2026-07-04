@@ -12,6 +12,7 @@ import {
     setReceiptFilePath,
     fetchReceiptComparison,
     fetchReceiptSwipeQueue,
+    fetchMandatoryQueue,
     convertPdfToImage,
     reportReceiptLineIssue,
     rejectReceiptLineMatch,
@@ -78,6 +79,8 @@ router.get('/receipts/:id', requireUser, owns, fetchReceiptById);
 router.get('/receipts/:id/image', requireUser, owns, fetchReceiptImage);
 router.get('/receipts/:id/comparison', requireUser, owns, fetchReceiptComparison);
 router.get('/receipts/:id/swipe-queue', requireUser, owns, fetchReceiptSwipeQueue);
+// One-shot mandatory session (Card-B + pairs + top-up + 2c backfill), snapshot-served.
+router.get('/receipts/:id/mandatory-queue', requireUser, owns, fetchMandatoryQueue);
 router.post('/receipts/:id/complete-swipes', requireUser, owns, markSwipesDone);
 router.post('/receipts/:id/lines/:idx/report-issue', requireUser, owns, reportReceiptLineIssue);
 router.post('/receipts/:id/lines/:idx/reject-match', requireUser, owns, rejectReceiptLineMatch);

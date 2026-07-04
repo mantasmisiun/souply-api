@@ -78,17 +78,31 @@ const collectLineSpIds = (parsed: any): number[] => {
  * The same-Product check is intentional: a 'different' vote between SPs
  * that no longer share a Product (admin moved them, time passed) no
  * longer expresses rejection of the current line's productId binding.
- * Returns the set of line SP ids to un-match.
+ *
+ * RE-VERIFICATION SUSPENSION: a vote flagged needsReverification is under
+ * an active challenge (fresh S1 receipt evidence or a global merge
+ * transition contradicted it — the pair is queued as a priority swipe
+ * card). While pending, the rejection is SUSPENDED: the line renders
+ * matched with a "reconfirm" chip instead of demoted, because two
+ * independent signals currently outweigh the one stale vote. The user's
+ * next swipe settles it: re-confirming 'different' resumes the demotion
+ * permanently (reverifiedAt stamp = never nagged again); flipping to
+ * 'same'/'identical' withdraws the rejection entirely.
+ *
+ * Returns { rejected, pending }: line SP ids to un-match, and line SP ids
+ * whose rejection is suspended pending the re-swipe.
  */
 const fetchUserRejectedLineSps = async (
     userId: string,
     lineSpIds: number[],
-): Promise<Set<number>> => {
-    const out = new Set<number>();
-    if (lineSpIds.length === 0) return out;
+): Promise<{ rejected: Set<number>; pending: Set<number> }> => {
+    const rejected = new Set<number>();
+    const pending = new Set<number>();
+    if (lineSpIds.length === 0) return { rejected, pending };
     const [rows]: any = await pool.query(
         `SELECT DISTINCT
-                CASE WHEN spA.id IN (?) THEN spA.id ELSE spB.id END AS lineSpId
+                CASE WHEN spA.id IN (?) THEN spA.id ELSE spB.id END AS lineSpId,
+                e.needsReverification AS pendingFlag
            FROM UserStoreProductEquivalence e
            JOIN StoreProduct spA ON spA.id = e.spIdA
            JOIN StoreProduct spB ON spB.id = e.spIdB
@@ -100,9 +114,13 @@ const fetchUserRejectedLineSps = async (
     );
     for (const r of rows) {
         const id = Number(r.lineSpId);
-        if (Number.isFinite(id) && id > 0) out.add(id);
+        if (!Number.isFinite(id) || id <= 0) continue;
+        (r.pendingFlag ? pending : rejected).add(id);
     }
-    return out;
+    // A line SP with BOTH a flagged and an unflagged 'different' stays rejected —
+    // one un-challenged rejection is still in force.
+    for (const id of rejected) pending.delete(id);
+    return { rejected, pending };
 };
 
 /**
@@ -271,10 +289,12 @@ export const resolveReceiptCategoriesLive = async (receipt: any, locale: Locale 
     // matched SP and another SP under the same Product are different,
     // the saved match no longer reflects their belief. Clear the match
     // fields so the line renders as "needs rematch" rather than keep
-    // showing the rejected name + image.
-    const rejectedLineSps = ownerUserId
+    // showing the rejected name + image. Votes under an ACTIVE
+    // re-verification challenge are suspended instead (pending set) —
+    // the line stays matched with a "reconfirm" chip until the re-swipe.
+    const { rejected: rejectedLineSps, pending: pendingLineSps } = ownerUserId
         ? await fetchUserRejectedLineSps(ownerUserId, collectLineSpIds(parsed))
-        : new Set<number>();
+        : { rejected: new Set<number>(), pending: new Set<number>() };
 
     // Overwrite cached categoryId / categoryName / categoryL2Name on
     // every altMatches[*] whose SP we resolved. SPs that have been
@@ -310,6 +330,10 @@ export const resolveReceiptCategoriesLive = async (receipt: any, locale: Locale 
             p.matchConfirmed = false;
             p.priceVerified = false;
             p.userRejectedMatch = true;
+        } else if (Number.isFinite(lineSpId) && pendingLineSps.has(lineSpId)) {
+            // Rejection suspended pending re-verification: keep the full match,
+            // surface the pending state so the app can show a "reconfirm" chip.
+            p.pendingReverification = true;
         }
     }
 

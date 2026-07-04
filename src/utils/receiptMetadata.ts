@@ -4,7 +4,16 @@ const BANK_KVITO_NR_RE = /Banko\s+Kvito\s+Nr\./i;
 const KVITO_NR_PREFIX_RE = /^.*?Kvito\s+Nr\.\s*/i;
 const KVITO_NUMERIS_RE = /Kvito\s+numeris\s+([A-Za-z0-9\/-]+)/i;
 const DATE_ONLY_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
-const LOCAL_DATETIME_RE = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/;
+const LOCAL_DATETIME_RE = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/;
+
+// OCR-garbled dates reach this normalizer VERBATIM ("2026-16-18" — the printed 06 read
+// with 0→1). A shape-only regex let that through to MySQL, which rejects the INSERT and
+// the client retry-loops on a deterministic 500 (receipt-242 re-scan). Any implausible
+// month/day makes the value unusable → the caller falls through to its now() fallback.
+const plausibleYmd = (y: string, m: string, d: string): boolean => {
+    const mm = Number(m), dd = Number(d), yy = Number(y);
+    return yy >= 2000 && yy <= 2100 && mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31;
+};
 
 const cleanWhitespace = (value: string): string => value.replace(/\s+/g, ' ').trim();
 
@@ -103,7 +112,7 @@ export const normalizeReceiptDateForStorage = (
         const value = receiptDate.trim();
         if (value) {
             const dateOnlyMatch = value.match(DATE_ONLY_RE);
-            if (dateOnlyMatch) {
+            if (dateOnlyMatch && plausibleYmd(dateOnlyMatch[1], dateOnlyMatch[2], dateOnlyMatch[3])) {
                 const time = typeof receiptTime === 'string' ? receiptTime.trim() : '';
                 if (time) {
                     const hhmmss = time.match(/^([01]\d|2[0-3]):([0-5]\d)(?::([0-5]\d))?$/);
@@ -112,17 +121,23 @@ export const normalizeReceiptDateForStorage = (
                         return `${value} ${hhmmss[1]}:${hhmmss[2]}:${ss}`;
                     }
                 }
-                return `${value} 00:00:00`;
+                // Time is OPTIONAL (some IKI layouts print it only in the bottom fiscal
+                // line, which a short frame loses — receipt-278). Midday, not midnight:
+                // it is the honest "unknown hour" midpoint and keeps as-of-date price
+                // lookups on the purchase DAY regardless of timezone conversions.
+                return `${value} 12:00:00`;
             }
 
             const localDateTimeMatch = value.match(LOCAL_DATETIME_RE);
-            if (localDateTimeMatch) {
-                const seconds = localDateTimeMatch[4] ?? '00';
-                return `${localDateTimeMatch[1]} ${localDateTimeMatch[2]}:${localDateTimeMatch[3]}:${seconds}`;
+            if (localDateTimeMatch && plausibleYmd(localDateTimeMatch[1], localDateTimeMatch[2], localDateTimeMatch[3])) {
+                const seconds = localDateTimeMatch[6] ?? '00';
+                return `${localDateTimeMatch[1]}-${localDateTimeMatch[2]}-${localDateTimeMatch[3]} ${localDateTimeMatch[4]}:${localDateTimeMatch[5]}:${seconds}`;
             }
 
             const parsed = new Date(value);
-            if (!Number.isNaN(parsed.getTime())) {
+            // Same plausibility clamp as above — a "1926" receipt is an OCR artifact,
+            // not history; fall through to now() rather than store nonsense.
+            if (!Number.isNaN(parsed.getTime()) && parsed.getFullYear() >= 2000 && parsed.getFullYear() <= 2100) {
                 return formatSqlDateTime(parsed);
             }
         }

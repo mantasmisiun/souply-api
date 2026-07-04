@@ -87,8 +87,29 @@ function extractNameNumbers(name: string): Set<string> {
     return out;
 }
 
-function bestTokenMatch(queryToken: string, candidateTokens: string[]): number {
+// Lithuanian noun-ending strip for the INFLECTION lane below. Receipts print genitives
+// ("atlantinių lašišų gabalai"), catalogs mostly nominatives ("atlantinės lašišos") — the
+// case endings alone cost 2-3 Levenshtein edits per token, which on OCR-garbled tokens eats
+// the whole 0.75 edit budget (receipt-237 salmon: the correct SP's tokens scored 0.700/0.625
+// and zeroed out). Suffixes are in NORMALIZED (diacritic-folded, lowercase) form, longest
+// first; ONE strip only; the stem must keep ≥4 chars so short distinct words never collapse.
+const LT_SUFFIXES = [
+    'iams', 'iais', 'iose', 'uose', 'emis', 'omis', 'umis', 'imis',
+    'ams', 'ais', 'oms', 'ems', 'ose', 'yse', 'ese', 'ius', 'ios', 'ies', 'iai', 'iui', 'iam', 'yje', 'oje', 'eje',
+    'ui', 'io', 'iu', 'os', 'es', 'us', 'ys', 'as', 'is', 'ai', 'ei',
+    'a', 'e', 'i', 'o', 'u', 'y',
+];
+function ltStem(token: string): string {
+    if (token.length < 6) return token; // stripping short tokens destroys their signal
+    for (const s of LT_SUFFIXES) {
+        if (token.length - s.length >= 4 && token.endsWith(s)) return token.slice(0, token.length - s.length);
+    }
+    return token;
+}
+
+function bestTokenMatch(queryToken: string, candidateTokens: string[], useStem = true): number {
     let best = 0;
+    const qStem = useStem ? ltStem(queryToken) : queryToken;
     for (const cand of candidateTokens) {
         if (queryToken === cand) return 1;
         if (queryToken.length <= 3 || cand.length <= 3) continue;
@@ -96,6 +117,16 @@ function bestTokenMatch(queryToken: string, candidateTokens: string[]): number {
         const maxLen = Math.max(queryToken.length, cand.length);
         const score = 1 - distance / maxLen;
         if (score > best) best = score;
+        if (!useStem) continue;
+        // INFLECTION lane: compare case-ending-stripped stems, at a slight discount so an
+        // exact-form match always outranks an inflected one on a tie. Only when a strip
+        // actually happened on either side — identical inputs take the raw lane.
+        const cStem = ltStem(cand);
+        if ((qStem !== queryToken || cStem !== cand) && qStem.length > 3 && cStem.length > 3) {
+            const sMax = Math.max(qStem.length, cStem.length);
+            const sScore = (1 - levenshtein(qStem, cStem) / sMax) * 0.98;
+            if (sScore > best) best = sScore;
+        }
     }
     return best;
 }
@@ -220,17 +251,17 @@ function distinguishingPenalty(queryTokens: string[], candidateTokens: string[])
     return Math.min(RECOGNITION.match.nounDisagreementCap, unmatched * RECOGNITION.match.nounDisagreementPenalty);
 }
 
-function scoreTokens(queryTokens: string[], candidateTokens: string[]): number {
+function scoreTokens(queryTokens: string[], candidateTokens: string[], tokenFloor?: number, useStem = true): number {
     if (queryTokens.length === 0 || candidateTokens.length === 0) return 0;
 
-    const tokenMatchThreshold = 0.75;  // tightened from 0.7
+    const tokenMatchThreshold = tokenFloor ?? 0.75;  // tightened from 0.7; relaxable ONLY for price-vetted pools
     let weightedScoreSum = 0;
     let weightSum = 0;
     let matchedTokens = 0;
 
     for (const qt of queryTokens) {
         const weight = qt.length;
-        const match = bestTokenMatch(qt, candidateTokens);
+        const match = bestTokenMatch(qt, candidateTokens, useStem);
         const effective = match >= tokenMatchThreshold ? match : 0;
         weightedScoreSum += effective * weight;
         weightSum += weight;
@@ -267,7 +298,7 @@ function scoreTokens(queryTokens: string[], candidateTokens: string[]): number {
     const candLongTokens = candidateTokens.filter(t => t.length > 3);
     if (candLongTokens.length >= queryLongCount + 1) {
         const candMatchedCount = candLongTokens.filter(
-            ct => bestTokenMatch(ct, queryTokens) >= tokenMatchThreshold
+            ct => bestTokenMatch(ct, queryTokens, useStem) >= tokenMatchThreshold
         ).length;
         if (candMatchedCount / candLongTokens.length < 0.4) return 0;
     }
@@ -372,7 +403,17 @@ function scoreNameConfidence(
     let tokenScore = scoreTokens(healedQuery, nameTokens);
     // Dock the token score when a distinguishing query noun has no counterpart
     // (apples vs potatoes share only "Fasuoti/IKI/ŪKIS"). Token lane only.
-    if (tokenScore > 0) tokenScore = Math.max(0, tokenScore - distinguishingPenalty(healedQuery, nameTokens));
+    // INFLECTION-credit guard: when a distinguishing noun DISAGREES, the stems that
+    // matched were packaging/brand words ("Fasuoti"↔"Fasuotos" stem to the same
+    // "fasuot") — that credit is exactly what the penalty exists to stop, so the
+    // token score falls back to the RAW (stem-less) lane before the dock. A clean
+    // inflected match (salmon: both content nouns stem-match) has penalty 0 and
+    // keeps the stem credit.
+    if (tokenScore > 0) {
+        const pen = distinguishingPenalty(healedQuery, nameTokens);
+        if (pen > 0) tokenScore = scoreTokens(healedQuery, nameTokens, undefined, false);
+        tokenScore = Math.max(0, tokenScore - pen);
+    }
     if (prov) prov.token = tokenScore;
     // Whole-string char rescue for OCR-split tokens; floored so incidental substring
     // overlap between unrelated words can't false-match.
@@ -402,6 +443,31 @@ function scoreNameConfidence(
         if (prov) prov.abbrev = abbrevAdd;
     }
     return confidence;
+}
+
+/**
+ * RELAXED name score for a PRICE-VETTED pool (Round-2.5 rescue fishing). Token lane
+ * only, at the relaxed `fishTokenMatchThreshold` floor — safe ONLY because the caller
+ * pre-filtered candidates by an exact regular-price match (a handful of SPs, not the
+ * 13k-candidate chain catalog the strict 0.75 floor protects against). Never used for
+ * auto-linking; the score orders altMatches / proposed swipe cards.
+ */
+export function scoreNameRelaxed(ocrName: string, candidateName: string): number {
+    const nq = normalizeProductName(ocrName);
+    const nc = normalizeProductName(candidateName);
+    if (!nq || !nc) return 0;
+    const qt = tokenize(nq);
+    const ct = tokenize(nc);
+    const healed = healQueryTokens(qt, ct);
+    let s = scoreTokens(healed, ct, RECOGNITION.price.fishTokenMatchThreshold);
+    if (s > 0) {
+        const pen = distinguishingPenalty(healed, ct);
+        // Same inflection-credit guard as the strict lane: a disagreeing content noun
+        // voids the stem credit (see scoreNameConfidence).
+        if (pen > 0) s = scoreTokens(healed, ct, RECOGNITION.price.fishTokenMatchThreshold, false);
+        s = Math.max(0, s - pen);
+    }
+    return s;
 }
 
 export function findBestProductMatches(

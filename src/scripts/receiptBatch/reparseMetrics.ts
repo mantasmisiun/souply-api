@@ -88,7 +88,10 @@ interface ReceiptResult {
     nProducts: number;
     total: number | null;
     paid: number;
-    reconDelta: number | null;  // |paid - total|
+    /** |Phase-2 footer.reconDelta| when the parser computed one (it books combo/deposit/
+     *  rounding adjustments the naive Σproducts can't see — receipt-278 balances to 0.00
+     *  while paid−total reads 1.68); falls back to |paid − total| on old parses. */
+    reconDelta: number | null;
     garbage: number;
     garbageWhy: string[];
     discounts: number;
@@ -138,7 +141,9 @@ async function main() {
 
         results.push({
             id, chain: 'IKI', gated, nProducts: products.length, total, paid,
-            reconDelta: total != null ? Math.round(Math.abs(paid - total) * 100) / 100 : null,
+            reconDelta: res.footer?.reconDelta != null
+                ? Math.round(Math.abs(res.footer.reconDelta) * 100) / 100
+                : (total != null ? Math.round(Math.abs(paid - total) * 100) / 100 : null),
             garbage: garbageWhy.length, garbageWhy,
             discounts: products.filter((p) => p.promoPrice != null).length,
             address: addr, addressOk,

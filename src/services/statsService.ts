@@ -74,6 +74,20 @@ export function computeSavingsFromPrices(
 // ---------------------------------------------------------------------------
 
 /**
+ * Receipt-level COMBO/SET-deal discount (e.g. IKI's bare "RINKINYS -1,90") captured by the
+ * parser into parsedData.footer.comboDiscount — a POSITIVE magnitude of money off the paid
+ * total that belongs to NO single product (which products form the bundle is unknown, so it
+ * is never distributed onto lines and never touches reference prices). Consumers ADD it to
+ * savings and SUBTRACT it from the visited-store basket total. Defensive: non-finite,
+ * non-positive, or absurdly large (> cap) values collapse toward 0/cap.
+ */
+export const comboDiscountOf = (parsedData: any, cap = Infinity): number => {
+    const v = Number(parsedData?.footer?.comboDiscount);
+    if (!Number.isFinite(v) || v <= 0) return 0;
+    return Math.round(Math.min(v, cap) * 100) / 100;
+};
+
+/**
  * Fetches the average latest market price for each matched receipt item,
  * then delegates to the pure computeSavingsFromPrices function.
  * Uses a batch of 3 queries regardless of item count.

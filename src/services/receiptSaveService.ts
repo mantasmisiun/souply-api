@@ -4,13 +4,13 @@ import {
     batchGetLatestPricesForReceiptItems,
 } from '../models/priceModel.js';
 import { updateReceiptDetails, updateReceiptStore, updateReceiptSavedAmount } from '../models/receiptModel.js';
-import { computeReceiptSavings } from './statsService.js';
+import { comboDiscountOf, computeReceiptSavings } from './statsService.js';
 import {
     replaceSwipeCandidates,
     type SwipeCandidate,
 } from '../models/receiptSwipeCandidateModel.js';
 import { resolveReceiptLineStoreProduct } from './receiptLineResolver.js';
-import { applyPriceRound2Matching, type Round2Result } from './priceRound2Matcher.js';
+import { applyPriceRound2Matching, fishPriceScopedCandidates, type Round2Result } from './priceRound2Matcher.js';
 import { propagateAllFallbackPrices } from './priceService.js';
 import { refillForOrphans } from '../scripts/seedOrphanSwipeCandidates.js';
 import pool from '../config/db.js';
@@ -20,9 +20,11 @@ import { initMandatorySwipeSession, MANDATORY_SWIPES_PER_RECEIPT } from './swipe
 import { RECOGNITION } from '../../../shared/recognitionConfig.js';
 import { computeItemConfidence, type ItemConfidenceInput } from './itemConfidence.js';
 import { computeNeedsHuman } from './queueRanking.js';
+import { prewarmMandatoryQueue } from './mandatoryQueueService.js';
 import { isMislabeledWeighableKg } from '../utils/productMatcher.js';
 import { getStoreProductDisplayById } from '../models/storeProductModel.js';
 import { replaceReceiptItems, updateReceiptItem } from '../models/receiptItemModel.js';
+import { flagDivergentDifferentVotes } from '../models/userEquivalenceModel.js';
 import { stripProductRawText } from '../util/receiptPII.js';
 import { countFailOpen } from './failOpenMetrics.js';
 
@@ -75,6 +77,49 @@ export interface SaveResult {
     skippedImplausible: number;
     mandatorySwipesRequired: number;
 }
+
+/**
+ * Image-dims autosave guard (band-drift class), pure for testability. `stored` is the
+ * DB row {fp, w, h} read via JSON_EXTRACT; `incomingImg` is the client blob's image
+ * object (MUTATED in place when rejected — dims restored to stored). Returns true when
+ * a fabricated dims change was rejected. Rules: stored must have valid dims; the change
+ * is rejected when the incoming filePath is missing OR equal to the stored one (same
+ * underlying image) — a genuinely NEW filePath may bring new dims.
+ */
+export const guardImageDims = (
+    stored: { fp: string | null; w: any; h: any } | undefined,
+    incomingImg: any,
+): boolean => {
+    if (!stored || !incomingImg || typeof incomingImg !== 'object') return false;
+    const w = Number(stored.w), h = Number(stored.h);
+    if (!(w > 0) || !(h > 0)) return false;
+    const sameFile = !incomingImg.filePath || !stored.fp || incomingImg.filePath === stored.fp;
+    if (!sameFile) return false;
+    if (Number(incomingImg.width) === w && Number(incomingImg.height) === h) return false;
+    incomingImg.width = w;
+    incomingImg.height = h;
+    return true;
+};
+
+/**
+ * TRIGGER A of the re-verification loop, receipt side: collect this receipt's
+ * S1-confident matched SPs and flag the user's divergent personal 'different'
+ * votes on them (same-Product pairs) for a priority re-swipe — see
+ * flagDivergentDifferentVotes for the anti-nag semantics. Runs post-commit,
+ * reads the just-written ReceiptItem rows (one indexed query), fail-open.
+ */
+const flagDivergenceFromReceipt = async (receiptId: number, userId: string): Promise<void> => {
+    const [rows]: any = await pool.query(
+        `SELECT DISTINCT matchedSpId FROM ReceiptItem
+          WHERE receiptId = ? AND matchConfirmed = 1 AND band = 'S1' AND matchedSpId IS NOT NULL`,
+        [receiptId],
+    );
+    const spIds = (rows as any[]).map((r) => Number(r.matchedSpId)).filter((v) => Number.isFinite(v) && v > 0);
+    const flagged = await flagDivergentDifferentVotes(userId, spIds);
+    if (flagged > 0) {
+        console.log(`[REVERIFY] receipt ${receiptId}: flagged ${flagged} divergent 'different' vote(s) for re-swipe`);
+    }
+};
 
 /**
  * Persist a receipt's confirmed prices.
@@ -164,11 +209,11 @@ export const persistReceiptPrices = async (
         // self-confirmation). Fail-OPEN: any error / no match leaves Round 1.
         let r2Result: Round2Result | null = null;
         if (Number.isFinite(input.chainId) && Array.isArray(parsedData?.products)) {
+            const r2Parsed = normalizedReceiptDate
+                ? new Date(normalizedReceiptDate.replace(' ', 'T'))
+                : null;
+            const r2Date = r2Parsed && !Number.isNaN(r2Parsed.getTime()) ? r2Parsed : new Date();
             try {
-                const r2Parsed = normalizedReceiptDate
-                    ? new Date(normalizedReceiptDate.replace(' ', 'T'))
-                    : null;
-                const r2Date = r2Parsed && !Number.isNaN(r2Parsed.getTime()) ? r2Parsed : new Date();
                 r2Result = await applyPriceRound2Matching(
                     parsedData.products,
                     input.chainId,
@@ -178,6 +223,21 @@ export const persistReceiptPrices = async (
                 );
             } catch (e) {
                 console.warn('[price-round2] skipped (non-fatal):', e);
+            }
+            // Round-2.5: lines STILL unlinked get price-scoped rescue candidates fished
+            // into altMatches (never auto-linked) — feeds the proposed-card swipe +
+            // vocabulary loop. Runs before the resolver/persist so the entries flow into
+            // ReceiptItem.altMatches and the swipe-candidate rows. Fail-open.
+            try {
+                await fishPriceScopedCandidates(
+                    parsedData.products,
+                    input.chainId,
+                    r2Date,
+                    receiptId,
+                    connection,
+                );
+            } catch (e) {
+                console.warn('[price-fish] skipped (non-fatal):', e);
             }
         }
         // Flag price-implausible lines so the price-write loop skips them (protect
@@ -268,11 +328,17 @@ export const persistReceiptPrices = async (
                         line.matchConfirmed = false;
                         line.matchedName = null;
                         line.storeProductImageUrl = null;
+                        // Round-2 may have price-verified the SP it promoted; unlinking keeps
+                        // NO SP, so the flag must go too — a dangling priceVerified feeds the
+                        // +0.15 itemConfidence confirmer for a product the line isn't linked
+                        // to (receipt-237 salmon: unmatched line scored 0.828, nearly S1).
+                        line.priceVerified = false;
                         if (input.products[i]) {
                             input.products[i].storeProductId = null;
                             input.products[i].matchConfirmed = false;
                             input.products[i].matchedName = null;
                             input.products[i].storeProductImageUrl = null;
+                            input.products[i].priceVerified = false;
                         }
                         continue;
                     }
@@ -323,11 +389,13 @@ export const persistReceiptPrices = async (
                     line.matchConfirmed = false;
                     line.matchedName = null;
                     line.storeProductImageUrl = null;
+                    line.priceVerified = false; // same dangling-flag guard as the unmatched path
                     if (input.products[i]) {
                         input.products[i].storeProductId = null;
                         input.products[i].matchConfirmed = false;
                         input.products[i].matchedName = null;
                         input.products[i].storeProductImageUrl = null;
+                        input.products[i].priceVerified = false;
                     }
                 }
             }
@@ -694,7 +762,13 @@ export const persistReceiptPrices = async (
                 price: p.promoPrice != null && p.promoPrice > 0 && p.promoPrice < p.price ? p.promoPrice : p.price,
                 quantity: p.quantity || 1,
             }));
-        const savedAmount = await computeReceiptSavings(matchedItems, connection);
+        // A receipt-level combo/set-deal discount (footer.comboDiscount, e.g. IKI's bare
+        // "RINKINYS -1,90") means the user paid that much less than the line prices imply —
+        // savings vs the market average shift up by exactly it. Capped at the lines' paid
+        // sum so an OCR-garbled value can't explode the figure.
+        const lineSum = input.products.reduce((s, p) => s + (p.price > 0 ? p.price * (p.quantity || 1) : 0), 0);
+        const combo = comboDiscountOf(parsedData, lineSum);
+        const savedAmount = Math.round((await computeReceiptSavings(matchedItems, connection) + combo) * 100) / 100;
         await updateReceiptSavedAmount(receiptId, savedAmount, connection);
 
         await connection.commit();
@@ -708,6 +782,23 @@ export const persistReceiptPrices = async (
                     `[persistReceiptPrices] points award failed for receipt ${receiptId}:`,
                     e,
                 ),
+            );
+        }
+        // TRIGGER A (re-verification, receipt evidence — fire-and-forget, fail-open):
+        // a fresh S1-confident match contradicting the user's old personal 'different'
+        // (same-Product pair) flags that vote for a priority re-swipe instead of
+        // silently demoting the line's display forever. Post-commit: a flag failure
+        // must never fail a save.
+        flagDivergenceFromReceipt(receiptId, userId).catch((e) =>
+            console.warn(`[persistReceiptPrices] reverification flagging failed for receipt ${receiptId}:`, e),
+        );
+        // PREWARM the mandatory swipe queue (fire-and-forget): matching already ran in
+        // this save, so the card set is knowable NOW — by the time the user reaches the
+        // swipe screen the GET serves the snapshot instead of a multi-second live build.
+        // Initial save only (the autosave PUT re-sends the same products).
+        if (isInitialSave) {
+            prewarmMandatoryQueue(userId, receiptId).catch((e) =>
+                console.warn(`[persistReceiptPrices] mandatory-queue prewarm failed for receipt ${receiptId}:`, e),
             );
         }
     } catch (error) {
@@ -871,6 +962,30 @@ export const applyReceiptAutosave = async (
                 parsedData.footer.receiptNos = normalizedReceiptNos;
             }
         }
+
+        // ── Image-dims guard (band-drift class) ──
+        // The OCR coordinate-space dims are written ONCE at initial save and never
+        // legitimately change for the same image file. An autosave arriving with the
+        // same (or missing) filePath but DIFFERENT width/height is a fabricated client
+        // snapshot — e.g. built during loadExistingReceipt's null-imageDims window from
+        // geometry extents (receipt-230: 914x3402 fabricated vs 925x3699 real → every
+        // band drifted down ×1.087 on the next open). Keep the stored dims; only a NEW
+        // filePath (genuine re-upload) may bring new dims.
+        try {
+            const [imgRows]: any = await connection.query(
+                `SELECT JSON_UNQUOTE(JSON_EXTRACT(parsedData, '$.image.filePath')) AS fp,
+                        JSON_EXTRACT(parsedData, '$.image.width')  AS w,
+                        JSON_EXTRACT(parsedData, '$.image.height') AS h
+                   FROM Receipt WHERE id = ?`,
+                [receiptId],
+            );
+            const stored = imgRows?.[0];
+            if (guardImageDims(stored, parsedData?.image)) {
+                console.warn(
+                    `[applyReceiptAutosave] receipt ${receiptId}: rejected client image-dims change — kept stored ${stored.w}x${stored.h}`,
+                );
+            }
+        } catch { /* guard is fail-open — a malformed blob must not block the save */ }
 
         // ── Blob: header/footer only (products live in ReceiptItem; rawText stripped) ──
         await updateReceiptDetails(
@@ -1055,10 +1170,20 @@ export const applyReceiptAutosave = async (
                     quantity: Number(r.quantity) || 1,
                 };
             });
-        const savedAmount = await computeReceiptSavings(matchedItems, connection);
+        // Same combo/set-deal adjustment as the initial save (footer.comboDiscount rides
+        // the incoming blob), capped at the merged rows' paid sum.
+        const mergedSum = (merged as any[]).reduce(
+            (s, r) => s + (Number(r.price) > 0 ? Number(r.price) * (Number(r.quantity) || 1) : 0), 0);
+        const combo = comboDiscountOf(parsedData, mergedSum);
+        const savedAmount = Math.round((await computeReceiptSavings(matchedItems, connection) + combo) * 100) / 100;
         await updateReceiptSavedAmount(receiptId, savedAmount, connection);
 
         await connection.commit();
+        // TRIGGER A — same as the initial-save path: an edit/rematch can newly produce
+        // an S1 match that contradicts an old personal 'different'. Fail-open.
+        flagDivergenceFromReceipt(receiptId, userId).catch((e) =>
+            console.warn(`[applyReceiptAutosave] reverification flagging failed for receipt ${receiptId}:`, e),
+        );
         return result;
     } catch (error) {
         await connection.rollback();

@@ -61,6 +61,12 @@ async function fetchSlot3ReceiptRows(userId: string, receiptId?: number, locale:
     if (!(anchorRows as any[]).length) return [];
 
     const chainIds = [...new Set((anchorRows as any[]).map((r: any) => Number(r.chainId)))];
+    // The pairing below only ever compares within a (chainId, categoryId) group the
+    // anchors occupy — so scope the candidate WINDOW to the anchor categories instead
+    // of scanning the whole chain catalog (53k SPs windowed per request was the
+    // measured ~1.2s hot spot; a category-scoped scan is a few hundred rows via
+    // Product.idx_category_score).
+    const anchorCatIds = [...new Set((anchorRows as any[]).map((r: any) => Number(r.categoryId)))];
 
     const [candidateRows]: any = await pool.query(
         `SELECT spId, chainId, productId, productName, displayName, brandName, imageUrl, categoryId
@@ -80,9 +86,10 @@ async function fetchSlot3ReceiptRows(userId: string, receiptId?: number, locale:
                   AND p.mergedIntoId IS NULL
                   AND p.categoryId  != 688
                 WHERE sp.chainId IN (?)
+                  AND p.categoryId IN (?)
            ) ranked
           WHERE rn <= ?`,
-        [chainIds, MAX_CANDIDATES_PER_GROUP],
+        [chainIds, anchorCatIds, MAX_CANDIDATES_PER_GROUP],
     );
 
     const chainMeta = new Map<number, { chainName: string; chainLogoUrl: string | null }>();
@@ -177,9 +184,13 @@ async function fetchSlot3ReceiptRows(userId: string, receiptId?: number, locale:
  * the given chain IDs. Capped at MAX_GLOBAL_PER_GROUP per group to bound JS
  * comparison work.
  */
-async function fetchSlot3GlobalRows(chainIds: number[], locale: Locale = 'lt'): Promise<RawSlot3Row[]> {
-    swipeLog(`[Slot3] fetchSlot3GlobalRows chainIds=${chainIds.join(',')}`);
+async function fetchSlot3GlobalRows(chainIds: number[], locale: Locale = 'lt', categoryIds?: number[]): Promise<RawSlot3Row[]> {
+    swipeLog(`[Slot3] fetchSlot3GlobalRows chainIds=${chainIds.join(',')} cats=${categoryIds?.length ?? 'all'}`);
     if (!chainIds.length) return [];
+    // Receipt context → the overflow only needs pairs the RELATEDNESS gate would keep
+    // anyway (the receipt's categories), so scope the window the same way the
+    // receipt-anchored pass does. No context (voluntary/global) → full scan as before.
+    const catFilter = categoryIds && categoryIds.length ? 'AND p.categoryId IN (?)' : '';
     const [rows]: any = await pool.query(
         `SELECT chainId, categoryId, productId, productName,
                 spId, displayName, brandName, imageUrl,
@@ -209,9 +220,12 @@ async function fetchSlot3GlobalRows(chainIds: number[], locale: Locale = 'lt'): 
                  JOIN Category   c  ON c.id  = p.categoryId
                  LEFT JOIN CategoryTranslation ct ON ct.categoryId = c.id AND ct.locale = ?
                 WHERE sp.chainId IN (?)
+                  ${catFilter}
            ) ranked
           WHERE rn <= ?`,
-        [locale, chainIds, MAX_GLOBAL_PER_GROUP],
+        categoryIds && categoryIds.length
+            ? [locale, chainIds, categoryIds, MAX_GLOBAL_PER_GROUP]
+            : [locale, chainIds, MAX_GLOBAL_PER_GROUP],
     );
 
     const groups = new Map<string, any[]>();
@@ -288,9 +302,27 @@ async function fetchSlot3GlobalRows(chainIds: number[], locale: Locale = 'lt'): 
  * 0.75 name-similarity floor. The categorised side comes from a SEPARATE 688-EXCLUDED pool, so
  * it NEVER emits a useless 688-vs-688 pair. Both products are unmerged (mergedIntoId IS NULL).
  */
+// Chain-shaped (user/receipt-independent) result cache. The uncategorised pass windows
+// the whole chain catalog + runs ~150k name-sims (~600ms measured) yet its inputs change
+// only when scrapes land — a short TTL makes every repeat queue GET free, and the
+// save-time snapshot prefetch warms it before the user ever reaches the swipe screen.
+const UNCAT_CACHE_TTL_MS = 5 * 60_000;
+const uncatCache = new Map<string, { at: number; rows: RawSlot3Row[] }>();
+
+/** Test seam. */
+export function _clearSlot3UncatCache(): void {
+    uncatCache.clear();
+}
+
 export async function fetchSlot3UncategorisedRows(chainIds: number[], locale: Locale = 'lt'): Promise<RawSlot3Row[]> {
     swipeLog(`[Slot3] fetchSlot3UncategorisedRows chainIds=${chainIds.join(',')}`);
     if (!chainIds.length) return [];
+    const cacheKey = `${[...chainIds].sort((a, b) => a - b).join(',')}|${locale}`;
+    const hit = uncatCache.get(cacheKey);
+    if (hit && Date.now() - hit.at < UNCAT_CACHE_TTL_MS) {
+        swipeLog(`[Slot3] uncategorised cache HIT (${hit.rows.length} rows)`);
+        return hit.rows;
+    }
 
     // 688-with-PHOTO anchors, freshest first, capped per chain.
     const [anchorRows]: any = await pool.query(
@@ -375,6 +407,7 @@ export async function fetchSlot3UncategorisedRows(chainIds: number[], locale: Lo
     for (const r of result) {
         swipeLog(`[Slot3]   uncategorised pair spId=${r.spIdA} "${r.left.name}" vs spId=${r.spIdB} "${r.right.name}" chain=${r.left.chainName} score=${r.score.toFixed(3)}`);
     }
+    uncatCache.set(cacheKey, { at: Date.now(), rows: result });
     return result;
 }
 
@@ -416,8 +449,13 @@ export async function fetchSlot3Rows(userId: string, receiptId?: number, locale:
 
     let globalRows: RawSlot3Row[] = [];
     let uncategorisedRows: RawSlot3Row[] = [];
+    // Anchor categories from the receipt rows (both sides share the group category)
+    // scope the global overflow when receipt context exists.
+    const anchorCats = receiptRows.length > 0
+        ? [...new Set(receiptRows.flatMap((r) => [r.left.categoryId, r.right.categoryId]).filter((c) => Number.isFinite(c) && c > 0))]
+        : undefined;
     if (chainIds.length > 0) {
-        globalRows = await fetchSlot3GlobalRows(chainIds, locale);
+        globalRows = await fetchSlot3GlobalRows(chainIds, locale, anchorCats);
         // Uncategorised (688-with-photo) → categorisation pairs. Priority between the
         // receipt-anchored pairs and the broad global overflow.
         uncategorisedRows = await fetchSlot3UncategorisedRows(chainIds, locale);

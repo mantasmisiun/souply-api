@@ -100,6 +100,33 @@ describe('POST /api/receipts', () => {
         expect(price.priceVerified).toBe(1);
         expect(price.isFallback).toBe(0);
     });
+
+    it('a garbled OCR date ("2026-16-18") saves with a fallback date instead of 500-looping', async () => {
+        // Receipt-242 re-scan class: the printed 06 read with 0→1 gave an impossible month.
+        // Pre-fix this reached MySQL verbatim → deterministic 500 → the client retry loop
+        // leaked one bare Receipt row per attempt. Post-fix the normalizer rejects the
+        // value and falls back to now() — the save must land.
+        const res = await asUser(app, testUserId)
+            .post('/api/receipts')
+            .send({
+                userId: testUserId,
+                filePath: 'garbled-date.jpg',
+                fileType: 'image/jpeg',
+                parsedData: {
+                    header: { storeId: 1, chainId: 1 },
+                    footer: { receiptNo: 'TEST-GARBLED-DATE', date: '2026-16-18', time: '11:47' },
+                    products: [{
+                        storeProductId: 10, matchConfirmed: true, priceVerified: true,
+                        price: 1.29, promoPrice: null, quantity: 1, unit: 'pcs',
+                    }],
+                },
+            });
+        expect(res.status).toBe(201);
+        const [rows]: any = await pool.query('SELECT receiptDate FROM Receipt WHERE id = ?', [res.body.id]);
+        expect(rows).toHaveLength(1);
+        expect(rows[0].receiptDate).toBeTruthy(); // fallback datetime, never the impossible value
+        expect(String(rows[0].receiptDate)).not.toContain('2026-16-18');
+    });
 });
 
 describe('PATCH /api/receipts/:id/regions — receiptNos column stays in lockstep with a re-parse', () => {

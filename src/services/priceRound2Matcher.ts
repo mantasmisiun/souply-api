@@ -1,6 +1,7 @@
 import pool from '../config/db.js';
-import { getAsOfDatePricesForCandidates } from '../models/priceModel.js';
+import { getAsOfDatePricesForCandidates, getChainSpsByRegularPrice, countPriceRowsNearValue } from '../models/priceModel.js';
 import { RECOGNITION } from '../../../shared/recognitionConfig.js';
+import { scoreNameRelaxed } from '../utils/productMatcher.js';
 
 type Connection = typeof pool | any;
 
@@ -133,14 +134,21 @@ export const applyPriceRound2Matching = async (
         // also carries the discounted price so a promo can CONFIRM.
         const weighed = (!!line?.isWeighable || line?.unit === 'kg') && Number(line?.pricePerUnit) > 0;
         const regObs = weighed ? Number(line.pricePerUnit) : Number(line?.price);
+        const promoObs = Number(line?.promoPrice) > 0 ? Number(line.promoPrice) : null;
         const observed: number[] = [];
         if (weighed) {
             observed.push(Number(line.pricePerUnit));
+            // Weighed promo is €/kg too (weighed-item representation) — include it so an
+            // active DB promo can confirm a discounted weighed line, same as packaged ones.
+            if (promoObs != null) observed.push(promoObs);
         } else {
             if (Number(line?.price) > 0) observed.push(Number(line.price));
-            if (Number(line?.promoPrice) > 0) observed.push(Number(line.promoPrice));
+            if (promoObs != null) observed.push(promoObs);
         }
         if (observed.length === 0) continue;
+        // The line VISIBLY paid a discount (promo below its own printed regular). Used by the
+        // promo-consistency gate below.
+        const lineDiscounted = promoObs != null && regObs > 0 && promoObs < regObs - 0.005;
 
         const prev = Number.isFinite(line?.storeProductId) ? Number(line.storeProductId) : null;
         const prevAlt = prev != null ? alt.find((am: any) => Number(am?.storeProductId) === prev) : null;
@@ -171,7 +179,15 @@ export const applyPriceRound2Matching = async (
             // discount that matches a wildly-different regular is a coincidence, and
             // the regular price is the identity anchor (per the discount-vs-regular
             // rule). So a 5×-off regular can never be rescued by a matching promo.
-            if ((regMatch || promoMatch) && regInBand) {
+            //
+            // PROMO-CONSISTENCY: a line that visibly paid a DISCOUNT can only be
+            // confirmed by a candidate whose price row shows an ACTIVE promo — a
+            // promo-less (often stale/fallback) row that happens to share the regular
+            // is a coincidence, not a confirmation (receipt-237 salmon: an April
+            // fallback row at the same 16.99 regular "confirmed" a discounted line,
+            // promoted the wrong SP and laundered priceVerified). Undiscounted lines
+            // keep confirming on the regular alone.
+            if ((regMatch || promoMatch) && regInBand && (!lineDiscounted || promoActive)) {
                 matchers.push({ am, spId, conf, viaPromo: !regMatch && promoMatch });
             }
         }
@@ -238,4 +254,108 @@ export const applyPriceRound2Matching = async (
         res.perfect.set(i, { spId: chosen.spId, viaPromo: chosen.viaPromo, conf: chosen.conf, from: prev });
     }
     return res;
+};
+
+/**
+ * Round-2.5 — PRICE-SCOPED RESCUE FISHING for lines that are still UNLINKED after
+ * Rounds 1 (name) and 2 (price rerank). Round 2 can only rerank what Round 1 found;
+ * when the CORRECT SP never entered the candidate list (Lithuanian inflection + OCR
+ * garble pushing its tokens under the strict floor — receipt-237 salmon), the line
+ * dead-ends. This pass inverts the search: fish same-chain SPs whose REGULAR price
+ * (the stable identity anchor; promos churn weekly) matches the line's printed
+ * regular (€/kg for weighed) within tolerance and a ±window around the receipt
+ * date, then re-score names at the relaxed floor WITHIN that small price-vetted
+ * pool only. Survivors are APPENDED to `line.altMatches` (flagged `viaPrice`) —
+ * never auto-linked — so the proposed-card swipe can ask the user; one confirm
+ * teaches the vocabulary alias and the next receipt matches directly.
+ *
+ * Mutates `parsedProducts[i].altMatches` in place. Fail-open per line. Must run
+ * AFTER applyPriceRound2Matching (so a Round-2 promotion wins first) and BEFORE
+ * the resolver / swipe-candidate + ReceiptItem writes (so fished entries persist).
+ */
+export const fishPriceScopedCandidates = async (
+    parsedProducts: any[],
+    chainId: number,
+    receiptDate: Date,
+    receiptId: number,
+    conn?: Connection,
+): Promise<number> => {
+    if (!Number.isFinite(chainId) || !Array.isArray(parsedProducts)) return 0;
+    const F = RECOGNITION.price;
+    let fished = 0;
+    // Fishing runs INSIDE the save request — a hard time budget caps the whole pass
+    // (receipt-238: two slow pool queries pushed the save past the client timeout).
+    const startedAt = Date.now();
+    for (const line of parsedProducts) {
+        if (!line || (Number.isFinite(line.storeProductId) && Number(line.storeProductId) > 0)) continue;
+        if (!line?.name || typeof line.name !== 'string' || !line.name.trim()) continue;
+        if (Date.now() - startedAt > F.fishTimeBudgetMs) {
+            console.log(`[price-fish] time budget (${F.fishTimeBudgetMs}ms) exhausted — skipping remaining unmatched lines`);
+            break;
+        }
+        const weighed = (!!line?.isWeighable || line?.unit === 'kg') && Number(line?.pricePerUnit) > 0;
+        const regObs = weighed ? Number(line.pricePerUnit) : Number(line?.price);
+        if (!(regObs > 0)) continue;
+        const promoObs = Number(line?.promoPrice) > 0 ? Number(line.promoPrice) : null;
+        const lineDiscounted = promoObs != null && promoObs < regObs - 0.005;
+        try {
+            const existing = Array.isArray(line.altMatches) ? line.altMatches : [];
+            const excludeIds = existing
+                .map((am: any) => Number(am?.storeProductId))
+                .filter((n: number) => Number.isFinite(n) && n > 0);
+            // SELECTIVITY gate: a super-common price point (1.99 matches 500k+ Price
+            // rows in the window) carries no identity signal — and its pool query is
+            // the expensive kind. Bounded index-range count (~30-90ms) decides.
+            const nearRows = await countPriceRowsNearValue(
+                regObs, F.fishPriceTolAbs, receiptDate, F.fishWindowDays,
+                F.fishSelectivityMaxRows, conn,
+            );
+            if (nearRows > F.fishSelectivityMaxRows) {
+                console.log(`[price-fish] "${line.name}" reg=${regObs.toFixed(2)} → SKIP (non-selective anchor: >${F.fishSelectivityMaxRows} price rows share it)`);
+                continue;
+            }
+            // Tight ABSOLUTE anchor (not the Round-2 1% relative confirm tolerance):
+            // regulars print to the cent, and at common price points a relative band
+            // floods the pool with unrelated products. A DISCOUNTED line additionally
+            // requires promo-bearing anchor rows — real-world evidence the product was
+            // on promotion, which cuts a common price point down by an order of magnitude.
+            const pool = await getChainSpsByRegularPrice(
+                chainId, regObs, F.fishPriceTolAbs, receiptDate, F.fishWindowDays,
+                receiptId, excludeIds, F.fishPoolMax, lineDiscounted, conn,
+            );
+            if (pool.length === 0) continue;
+            const scored = pool
+                .map((c) => ({ c, score: scoreNameRelaxed(line.name, c.name) }))
+                .filter((s) => s.score >= F.fishMinNameScore)
+                .sort((a, b) => b.score - a.score)
+                .slice(0, F.fishMaxPerLine);
+            if (scored.length === 0) continue;
+            line.altMatches = [
+                ...existing,
+                ...scored.map(({ c, score }) => ({
+                    storeProductId: c.storeProductId,
+                    productId: c.productId,
+                    categoryId: c.categoryId,
+                    categoryName: c.categoryName,
+                    categoryL2Name: c.categoryL2Name,
+                    name: c.name,
+                    brandName: c.brandName,
+                    amount: c.amount,
+                    unit: c.unit,
+                    isWeighable: c.isWeighable,
+                    confidence: Math.round(score * 100) / 100,
+                    isCatalog: c.isCatalog,
+                    viaPrice: true,
+                })),
+            ];
+            fished++;
+            console.log(
+                `[price-fish] "${line.name}" reg=${regObs.toFixed(2)} → +${scored.length}: `
+                + scored.map((s) => `sp=${s.c.storeProductId} "${s.c.name}" name≈${s.score.toFixed(2)}`).join(' | '),
+            );
+        } catch (e) {
+            console.warn('[price-fish] line skipped (non-fatal):', (e as Error)?.message ?? e);
+        }
+    }
+    return fished;
 };

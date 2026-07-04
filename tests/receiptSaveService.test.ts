@@ -22,7 +22,18 @@ jest.unstable_mockModule('../src/config/db.js', () => ({
 const mockCreatePrice = jest.fn<any>();
 const mockBatchGetBaselinePriceAverages = jest.fn<any>();
 const mockBatchGetLatestPricesForReceiptItems = jest.fn<any>();
+// The save flow fire-and-forgets a mandatory-queue prewarm post-commit — stub the whole
+// service so its transitive imports (swipe-queue controller graph) stay out of this suite.
+const mockPrewarmMandatoryQueue = jest.fn<any>();
+jest.unstable_mockModule('../src/services/mandatoryQueueService.js', () => ({
+    prewarmMandatoryQueue: mockPrewarmMandatoryQueue,
+    getMandatoryQueue: jest.fn<any>(),
+    _clearMandatoryQueueSnapshots: jest.fn<any>(),
+}));
+
 jest.unstable_mockModule('../src/models/priceModel.js', () => ({
+    // Fishing selectivity pre-check — selective by default so fishing paths run in tests.
+    countPriceRowsNearValue: jest.fn<any>().mockResolvedValue(0),
     createPrice: mockCreatePrice,
     batchGetBaselinePriceAverages: mockBatchGetBaselinePriceAverages,
     batchGetLatestPricesForReceiptItems: mockBatchGetLatestPricesForReceiptItems,
@@ -30,6 +41,7 @@ jest.unstable_mockModule('../src/models/priceModel.js', () => ({
     getPriceHistoryForStoreProduct: jest.fn(),
     getLatestPricesAcrossStores: jest.fn(),
     getActivePromoPrices: jest.fn(),
+    getChainSpsByRegularPrice: jest.fn<any>().mockResolvedValue([]), // Round-2.5 fishing pool — empty here
     updatePriceById: jest.fn(),
     getPriceByStoreProductAndStore: jest.fn(),
     updateFallbackPrice: jest.fn(),
@@ -66,6 +78,13 @@ jest.unstable_mockModule('../src/services/statsService.js', () => ({
     computeReceiptSavings: mockComputeReceiptSavings,
     getUserStats: jest.fn(),
     computeSavingsFromPrices: jest.fn(),
+    // Real implementation (pure) — savedAmount now adds the receipt-level combo/set-deal
+    // discount; the mock must expose it or the module import fails.
+    comboDiscountOf: (parsedData: any, cap = Infinity) => {
+        const v = Number(parsedData?.footer?.comboDiscount);
+        if (!Number.isFinite(v) || v <= 0) return 0;
+        return Math.round(Math.min(v, cap) * 100) / 100;
+    },
 }));
 
 // ---------------------------------------------------------------------------
@@ -168,6 +187,7 @@ beforeEach(() => {
     mockReplaceSwipeCandidates.mockResolvedValue(undefined);
     mockInitMandatorySwipeSession.mockResolvedValue(undefined);
     mockAwardReceiptPoints.mockResolvedValue(undefined);
+    mockPrewarmMandatoryQueue.mockResolvedValue(undefined);
     mockComputeReceiptSavings.mockResolvedValue(0);
     mockCreatePrice.mockResolvedValue(1);
     mockPropagateAllFallbackPrices.mockResolvedValue(undefined);

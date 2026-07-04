@@ -2,6 +2,7 @@ import { Router } from 'express';
 import {
     getSwipeQueue,
     getVoluntaryQueueCount,
+    getOrphanBackfill,
     submitDirectVote,
     submitSlot2Vote,
 } from '../controllers/swipeQueueController.js';
@@ -16,6 +17,9 @@ const router = Router();
 // still read params.userId, now guaranteed to equal the token subject.
 router.get('/users/:userId/swipe-queue', requireUser, requireSelfUserParam, getSwipeQueue);
 router.get('/users/:userId/voluntary-queue-count', requireUser, requireSelfUserParam, getVoluntaryQueueCount);
+// Slot 2c: receipt-scoped orphan backfill for FREE mandatory slots (< 3 cards).
+// Receipt ownership is checked inside (the receipt must belong to the token user).
+router.get('/users/:userId/receipts/:receiptId/orphan-backfill', requireUser, requireSelfUserParam, getOrphanBackfill);
 router.post('/users/:userId/swipe-vote', requireUser, requireSelfUserParam, submitDirectVote);
 router.post('/users/:userId/swipe-vote/slot2', requireUser, requireSelfUserParam, submitSlot2Vote);
 // H3 pending-alias (vocabulary) cards + votes.

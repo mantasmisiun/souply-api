@@ -446,6 +446,18 @@ export const getReceiptComparison = async (
 
     const currentBasket = baskets.get(currentStore.id)!;
 
+    // Receipt-level combo/set-deal discount (footer.comboDiscount, e.g. IKI's bare
+    // "RINKINYS -1,90"): the VISITED store's real paid total is that much lower than the
+    // line sum. Applied to the visited basket ONLY — whether another chain runs the same
+    // set deal is unknown, so alternatives stay conservative (mirrors the promo-imputation
+    // reasoning above). Without this the visited chain looks ~comboDiscount more expensive
+    // than reality (receipt-229: 4.03 vs true 2.13 → "IKI most expensive").
+    const comboRaw = Number(parsedData?.footer?.comboDiscount);
+    const comboDiscount = Number.isFinite(comboRaw) && comboRaw > 0
+        ? Math.min(round2(comboRaw), currentBasket.total)
+        : 0;
+    if (comboDiscount > 0) currentBasket.total = round2(currentBasket.total - comboDiscount);
+
     const alternatives: ComparisonChainResult[] = alternativeStores.map((altStore) => {
         const b = baskets.get(altStore.storeId)!;
         return {
@@ -480,6 +492,9 @@ export const getReceiptComparison = async (
             knownItems: currentBasket.knownItems,
             imputedItems: currentBasket.imputedItems,
             flatItems: currentBasket.flatItems,
+            // Additive: the applied combo/set-deal discount, so the UI can annotate the row
+            // ("įsk. rinkinio nuolaidą −1,90 €"). Absent/0 on receipts without one.
+            comboDiscount: comboDiscount > 0 ? comboDiscount : undefined,
             chainLogoUrl: currentStore.logoUrl || null,
         },
         alternatives,

@@ -344,7 +344,10 @@ export const getReverificationPairKeysForReceipt = async (
 
 /**
  * Clear the needsReverification flag for a specific SP pair after the user
- * has re-voted on it.
+ * has re-voted on it. Also stamps `reverifiedAt` — "this vote survived a
+ * challenge" — so the receipt-evidence trigger (flagDivergentDifferentVotes)
+ * never nags the same decision again; only a global merge transition
+ * (which clears the stamp) can issue a fresh challenge.
  */
 export const clearReverification = async (
     userId: string,
@@ -356,10 +359,46 @@ export const clearReverification = async (
     const { spIdA, spIdB } = orderPair(spA, spB);
     await db.query(
         `UPDATE UserStoreProductEquivalence
-            SET needsReverification = 0
+            SET needsReverification = 0, reverifiedAt = NOW()
           WHERE userId = ? AND spIdA = ? AND spIdB = ?`,
         [userId, spIdA, spIdB],
     );
+};
+
+/**
+ * TRIGGER A of the re-verification loop (receipt evidence): a fresh confident
+ * receipt match to one of `spIds` contradicts this user's personal 'different'
+ * vote against a same-Product sibling — the exact vote that would otherwise
+ * demote the line's display forever (see fetchUserRejectedLineSps). Flag it so
+ * the pair is re-served as a priority swipe card (the queue already bypasses
+ * the no-repeat filter for flagged pairs and sorts them first).
+ *
+ * Anti-nag: rows already flagged, or already re-verified once (reverifiedAt
+ * stamped by clearReverification), are skipped — receipt evidence challenges
+ * each decision at most ONCE. Only a global merge transition clears the stamp
+ * and re-opens the question. Returns the number of votes flagged.
+ */
+export const flagDivergentDifferentVotes = async (
+    userId: string,
+    spIds: number[],
+    conn?: Connection,
+): Promise<number> => {
+    if (spIds.length === 0) return 0;
+    const db = conn ?? pool;
+    const [res]: any = await db.query(
+        `UPDATE UserStoreProductEquivalence e
+           JOIN StoreProduct spA ON spA.id = e.spIdA
+           JOIN StoreProduct spB ON spB.id = e.spIdB
+            SET e.needsReverification = 1
+          WHERE e.userId = ?
+            AND e.verdict = 'different'
+            AND e.needsReverification = 0
+            AND e.reverifiedAt IS NULL
+            AND spA.productId = spB.productId
+            AND (e.spIdA IN (?) OR e.spIdB IN (?))`,
+        [userId, spIds, spIds],
+    );
+    return Number(res?.affectedRows ?? 0);
 };
 
 export const deleteEquivalence = async (userId: string, spA: number, spB: number): Promise<void> => {

@@ -128,6 +128,46 @@ export const getReceiptByReceiptNoAndUser = async (receiptNo: string, userId: st
     return rows[0] || null;
 };
 
+/**
+ * A receipt id is DISTINCTIVE enough to witness a duplicate on its own: the full slashed
+ * form ("168/645/104148") or any id with ≥6 digits (the VMI "Kvito numeris 104148", the
+ * synthetic date-time-total id). Short bare ids are excluded — a 4-digit per-register
+ * "Kvitas 3157" recurs across days on the same register and would false-positive.
+ */
+export const isDistinctiveReceiptNo = (id: string): boolean =>
+    id.includes('/') || id.replace(/\D/g, '').length >= 6;
+
+/**
+ * Overlap-based same-user duplicate check: a re-scan of the SAME physical receipt is a
+ * duplicate when ANY distinctive identifier is shared — the canonical column OR any entry
+ * of the stored receiptNos arrays. The paper prints its id in several forms (IKI:
+ * "Kvito Nr. 168/645/104148" + VMI "Kvito numeris 104148", plus a segment-corroboration
+ * witness when the two disagree); all are stable on the same paper, so one clean read on
+ * each side catches the duplicate even when the canonical id OCR-garbled differently in
+ * the two scans — the exact case canonical-only matching let through.
+ */
+export const getReceiptByAnyReceiptNoAndUser = async (
+    receiptNos: string[],
+    userId: string,
+    excludeReceiptId?: number,
+) => {
+    const ids = [...new Set(receiptNos.filter((v) => typeof v === 'string' && v.trim() && isDistinctiveReceiptNo(v)))];
+    if (ids.length === 0) return null;
+    // Canonical-column match for any id, plus JSON_CONTAINS against the stored array per id
+    // (portable — no JSON_OVERLAPS dependency on older MariaDB).
+    const jsonClauses = ids.map(() => 'JSON_CONTAINS(receiptNos, JSON_QUOTE(?))').join(' OR ');
+    const [rows]: any = await pool.query(
+        `SELECT * FROM Receipt
+         WHERE userId = ?
+           AND processingStatus IN ("completed", "failed")
+           AND (receiptNoCanonical IN (?) OR ${jsonClauses})
+           ${excludeReceiptId ? 'AND id != ?' : ''}
+         LIMIT 1`,
+        excludeReceiptId ? [userId, ids, ...ids, excludeReceiptId] : [userId, ids, ...ids],
+    );
+    return rows[0] || null;
+};
+
 export const getReceiptItemsWithDetails = async (receiptId: number, locale: Locale = 'lt') => {
     // Read from ReceiptItem (ReceiptItem migration): EVERY line, matched or not — the old
     // INNER JOIN Price dropped unmatched lines, which under the no-mint policy is most of the

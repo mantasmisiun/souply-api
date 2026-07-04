@@ -16,7 +16,7 @@
  */
 import pool from '../config/db.js';
 import { getReceiptById, updateReceiptSavedAmount } from '../models/receiptModel.js';
-import { computeReceiptSavings } from '../services/statsService.js';
+import { comboDiscountOf, computeReceiptSavings } from '../services/statsService.js';
 
 async function main() {
     const args = process.argv.slice(2);
@@ -38,8 +38,12 @@ async function main() {
                 price: Number(p.price),
                 quantity: Number(p.quantity) || 1,
             }));
-        const next = await computeReceiptSavings(items);
-        console.log(`receipt ${id}: savedAmount ${r.savedAmount} → ${next}${write ? '  (updated)' : '  (dry-run)'}`);
+        // Same combo/set-deal adjustment as the save paths (footer.comboDiscount).
+        const lineSum = (parsed?.products ?? []).reduce(
+            (s: number, p: any) => s + (Number(p.price) > 0 ? Number(p.price) * (Number(p.quantity) || 1) : 0), 0);
+        const combo = comboDiscountOf(parsed, lineSum);
+        const next = Math.round((await computeReceiptSavings(items) + combo) * 100) / 100;
+        console.log(`receipt ${id}: savedAmount ${r.savedAmount} → ${next}${combo ? ` (incl. combo +${combo})` : ''}${write ? '  (updated)' : '  (dry-run)'}`);
         if (write) await updateReceiptSavedAmount(id, next);
     }
 

@@ -118,11 +118,17 @@ export const castDirectSpPairVote = async (
 
             // Receipt-line demotion: a 'different' vote that rejects a line's primary
             // match identity drops the wrong SP so the Items tab shows OCR again.
-            // Fail-open — a parse/IO hiccup here must never fail the vote.
+            // Fail-open for ordinary parse/IO hiccups — BUT a deadlock must RETHROW:
+            // MySQL rolls back the WHOLE transaction on ER_LOCK_DEADLOCK, so swallowing
+            // it here made the code "commit" an already-rolled-back txn — the VOTE
+            // itself was silently lost while the client saw ok (receipt-232: the third
+            // card hung through the lock wait, then the vote evaporated). The caller
+            // retries the whole vote via withDeadlockRetry.
             if (input.vote === 'different' && input.receiptId != null) {
                 try {
                     await demoteRejectedReceiptLine(Number(input.receiptId), pair.spIdA, pair.spIdB, connection);
-                } catch (e) {
+                } catch (e: any) {
+                    if (e?.code === 'ER_LOCK_DEADLOCK' || e?.errno === 1213) throw e;
                     console.warn(`[directSpPairVoteService] line demotion failed for receipt ${input.receiptId}:`, e);
                 }
             }

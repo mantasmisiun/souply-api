@@ -60,6 +60,24 @@ export const getStoreProductDisplayById = async (
     return { name: rows[0].storeProductName ?? null, imageUrl: rows[0].imageUrl ?? null };
 };
 
+/**
+ * Proposal display fetch for the S2-unlinked Card-B path: name/image for the card
+ * face + chainId so the queue builder can refuse to propose a cross-chain SP
+ * (voting identical must link same-chain only — the chain-price invariant).
+ */
+export const getSpProposalDisplayById = async (
+    spId: number,
+    conn?: Connection,
+): Promise<{ name: string | null; imageUrl: string | null; chainId: number } | null> => {
+    const db = conn || pool;
+    const [rows]: any = await db.query(
+        'SELECT storeProductName, imageUrl, chainId FROM StoreProduct WHERE id = ? LIMIT 1',
+        [spId],
+    );
+    if (!rows[0]) return null;
+    return { name: rows[0].storeProductName ?? null, imageUrl: rows[0].imageUrl ?? null, chainId: Number(rows[0].chainId) };
+};
+
 export const createStoreProduct = async (
     productId: number,
     chainId: number,

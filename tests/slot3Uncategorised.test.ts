@@ -8,7 +8,10 @@ jest.unstable_mockModule('../src/utils/swipeLogger.js', () => ({
     swipeLog: () => {}, resetSwipeLog: () => {},
 }));
 
-const { fetchSlot3UncategorisedRows } = await import('../src/models/slot3CandidateModel.js');
+const { fetchSlot3UncategorisedRows, _clearSlot3UncatCache } = await import('../src/models/slot3CandidateModel.js');
+
+// The pass caches per (chainIds, locale) — clear between tests so canned rows don't leak.
+beforeEach(() => _clearSlot3UncatCache());
 
 const anchor = (spId: number, productId: number, name: string) =>
     ({ spId, chainId: 3, productId, productName: name, displayName: name, brandName: null, imageUrl: 'photo.jpg' });

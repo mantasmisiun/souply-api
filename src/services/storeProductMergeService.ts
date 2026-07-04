@@ -52,6 +52,25 @@ export const promoteMergeByProductIds = async (
         `UPDATE Product SET mergedIntoId = ? WHERE id = ?`,
         [winner.id, loser.id]
     );
+
+    // TRIGGER B (global divergence, join direction): the community just joined these
+    // products — every user still holding a personal 'different' on an SP pair across
+    // them now diverges from the global model. Flag their vote for re-verification
+    // (priority swipe card, no-repeat bypassed) and CLEAR the reverifiedAt stamp: a
+    // global transition is genuinely new information, so even a previously-reconfirmed
+    // vote earns one fresh challenge. Mirrors the reversal-direction trigger in
+    // demoteMergeByProductIds (which flags 'same' voters).
+    await db.query(
+        `UPDATE UserStoreProductEquivalence e
+           JOIN StoreProduct sp1 ON sp1.id = e.spIdA
+           JOIN StoreProduct sp2 ON sp2.id = e.spIdB
+            SET e.needsReverification = 1, e.reverifiedAt = NULL
+          WHERE e.verdict = 'different'
+            AND sp1.productId IN (?, ?)
+            AND sp2.productId IN (?, ?)`,
+        [winner.id, loser.id, winner.id, loser.id]
+    );
+
     return {
         action: 'promoted',
         winnerProductId: winner.id,
@@ -147,14 +166,16 @@ export const demoteMergeByProductIds = async (
         [loserId]
     );
 
-    // Flag personal equivalences on this product pair for re-verification.
-    // Users who previously voted these products as identical should reconfirm
-    // on their next purchase — the community has reversed the merge.
+    // TRIGGER B (global divergence, split direction): users who previously voted
+    // these products as identical should reconfirm on their next purchase — the
+    // community has reversed the merge. reverifiedAt is cleared for the same reason
+    // as the join-direction trigger above: a global transition re-opens the question
+    // even for a previously-reconfirmed vote.
     await db.query(
         `UPDATE UserStoreProductEquivalence e
            JOIN StoreProduct sp1 ON sp1.id = e.spIdA
            JOIN StoreProduct sp2 ON sp2.id = e.spIdB
-            SET e.needsReverification = 1
+            SET e.needsReverification = 1, e.reverifiedAt = NULL
           WHERE e.verdict = 'same'
             AND sp1.productId IN (?, ?)
             AND sp2.productId IN (?, ?)`,
