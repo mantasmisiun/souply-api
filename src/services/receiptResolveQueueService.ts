@@ -53,6 +53,9 @@ export interface ReceiptResolveCard {
      * LINKS the SP (+ vocabulary alias), different records the rejected combo.
      */
     proposed?: boolean;
+    /** Set on a CROSS-CHAIN rescue proposal — the candidate lives in this chain;
+     *  an identical swipe mints a provisional SP in the receipt's chain. */
+    sourceChainId?: number;
 }
 
 export interface ReceiptResolveResult {
@@ -98,7 +101,7 @@ export async function buildReceiptResolveCards(
     const seqLines: SeqLine[] = [];
     // lineIdx → the PROPOSED candidate for an unlinked line (best altMatch, same-chain
     // verified). The card map below renders it in `matched` with proposed=true.
-    const proposals = new Map<number, { spId: number; name: string | null; imageUrl: string | null }>();
+    const proposals = new Map<number, { spId: number; name: string | null; imageUrl: string | null; sourceChainId?: number }>();
     for (let i = 0; i < products.length; i++) {
         const line = products[i];
         const sp = Number(line?.storeProductId);
@@ -118,8 +121,11 @@ export async function buildReceiptResolveCards(
             // the BEST one as a PROPOSAL instead: identical links it (+ vocabulary
             // alias), different blacklists the combo. Price-anchored (viaPrice) entries
             // get the fishing bonus so an exact-regular-price rescue outranks a stale
-            // name-only tie. Cross-chain candidates never propose (linking must stay
-            // same-chain — the chain-price invariant).
+            // name-only tie. SAME-CHAIN candidates take priority; when none qualifies,
+            // a CROSS-CHAIN candidate may propose (the rescue card): the card shows the
+            // source chain's badge, the paid price must sit within the ±40% band of that
+            // chain's latest price, and an 'identical' MINTS a provisional same-chain SP
+            // (crossChainMintService) — linking itself always stays same-chain.
             if (band !== 'S2' && band !== 'S3') {
                 t.verdict = `SKIP unlinked band-${band} (not in surfaceBands)`; trail.push(t); continue;
             }
@@ -132,15 +138,38 @@ export async function buildReceiptResolveCards(
                         + (am?.viaPrice ? RECOGNITION.price.fishPriceBonus : 0),
                 }))
                 .sort((a: any, b: any) => b.rank - a.rank);
-            let proposal: { spId: number; name: string | null; imageUrl: string | null } | null = null;
+            let proposal: { spId: number; name: string | null; imageUrl: string | null; sourceChainId?: number } | null = null;
+            let crossFallback: { spId: number; name: string | null; imageUrl: string | null; sourceChainId?: number } | null = null;
+            const linePaid = line?.promoPrice != null && Number(line.promoPrice) > 0
+                ? Number(line.promoPrice)
+                : (Number.isFinite(Number(line?.price)) && Number(line.price) > 0 ? Number(line.price) : null);
             for (const { am } of ranked) {
                 const spId = Number(am.storeProductId);
                 const disp = await getSpProposalDisplayById(spId, conn);
                 if (!disp) continue;                                    // deleted SP
-                if (Number.isFinite(chainId) && disp.chainId !== chainId) continue; // cross-chain → never propose
+                if (Number.isFinite(chainId) && disp.chainId !== chainId) {
+                    // CROSS-CHAIN rescue candidate — remember the best one that passes the
+                    // paid-vs-candidate-chain price band; used only if no same-chain wins.
+                    if (crossFallback) continue;
+                    if (linePaid != null) {
+                        const [pr]: any = await conn.query(
+                            `SELECT price FROM Price WHERE storeProductId = ? ORDER BY date DESC, id DESC LIMIT 1`,
+                            [spId],
+                        );
+                        const cand = pr?.[0] ? Number(pr[0].price) : null;
+                        if (cand != null && cand > 0) {
+                            const ratio = linePaid / cand;
+                            if (ratio < RECOGNITION.crossChainMint.cardPriceBandLow ||
+                                ratio > RECOGNITION.crossChainMint.cardPriceBandHigh) continue;
+                        }
+                    }
+                    crossFallback = { spId, name: disp.name ?? am.name ?? null, imageUrl: disp.imageUrl, sourceChainId: disp.chainId };
+                    continue;
+                }
                 proposal = { spId, name: disp.name ?? am.name ?? null, imageUrl: disp.imageUrl };
                 break;
             }
+            if (!proposal && crossFallback) proposal = crossFallback;
             if (!proposal) { t.verdict = 'SKIP no-match (line linked to no SP, no proposable candidate)'; trail.push(t); continue; }
             proposals.set(i, proposal);
             t.sp = proposal.spId;
@@ -212,6 +241,9 @@ export async function buildReceiptResolveCards(
                 },
             needsHuman: Number(line.needsHuman) || 0,
             ...(proposal ? { proposed: true } : {}),
+            // Cross-chain rescue card: the client shows the source chain's badge so the
+            // user knowingly confirms "same product as this <chain> item".
+            ...(proposal?.sourceChainId != null ? { sourceChainId: proposal.sourceChainId } : {}),
         };
     });
     return { cards, image };

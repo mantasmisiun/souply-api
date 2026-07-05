@@ -29,6 +29,7 @@ const poolRow = (spId: number, productId: number, name: string, o: Record<string
 
 function wireDb(candidates: any[], orphans: any[], prices: Array<{ storeProductId: number; price: number }> = []) {
     mockQuery.mockImplementation(async (sql: string) => {
+        if (/FROM ReceiptItem/.test(sql)) return [[]]; // seed query — no receipt-orphan seeds here
         if (/categoryId IN/.test(sql)) return [candidates];
         if (/categoryId = 688/.test(sql)) return [orphans];
         if (/FROM Price WHERE storeProductId IN/.test(sql)) return [prices];

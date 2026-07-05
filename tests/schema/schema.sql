@@ -662,6 +662,9 @@ CREATE TABLE `StoreProduct` (
   `unit` varchar(20) DEFAULT NULL,
   `isWeighable` tinyint(1) NOT NULL DEFAULT 0,
   `imageUrl` varchar(500) DEFAULT NULL,
+  `provisional` tinyint(1) NOT NULL DEFAULT 0,
+  `provisionalOwnerUserId` char(36) DEFAULT NULL,
+  `mintedFromSpId` int(11) DEFAULT NULL,
   PRIMARY KEY (`id`),
   KEY `productId` (`productId`),
   KEY `idx_sp_chainId` (`chainId`),
@@ -788,3 +791,40 @@ CREATE TABLE `UserStoreProductEquivalence` (
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*M!100616 SET NOTE_VERBOSITY=@OLD_NOTE_VERBOSITY */;
 
+
+-- Vocabulary (Issue H) tables — added for crossChainRescue integration tests
+CREATE TABLE IF NOT EXISTS `StoreProductReceiptAlias` (
+  `id` int(10) unsigned NOT NULL AUTO_INCREMENT,
+  `chainId` int(11) NOT NULL,
+  `storeProductId` int(11) NOT NULL,
+  `normalizedAlias` varchar(255) NOT NULL,
+  `rawSample` varchar(255) DEFAULT NULL,
+  `occurrences` int(10) unsigned NOT NULL DEFAULT 1,
+  `identicalUsers` int(10) unsigned NOT NULL DEFAULT 0,
+  `similarUsers` int(10) unsigned NOT NULL DEFAULT 0,
+  `differentUsers` int(10) unsigned NOT NULL DEFAULT 0,
+  `status` enum('pending','canonical','similarity','rejected') NOT NULL DEFAULT 'pending',
+  `adminVerdict` enum('confirmed','rejected') DEFAULT NULL,
+  `sampleReceiptId` int(11) DEFAULT NULL,
+  `firstSeenAt` datetime NOT NULL DEFAULT current_timestamp(),
+  `lastSeenAt` datetime NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_alias` (`chainId`,`storeProductId`,`normalizedAlias`),
+  KEY `idx_match` (`chainId`,`status`,`normalizedAlias`),
+  KEY `idx_curation` (`status`,`chainId`,`lastSeenAt`),
+  KEY `idx_sp` (`storeProductId`,`status`),
+  CONSTRAINT `fk_alias_sp` FOREIGN KEY (`storeProductId`) REFERENCES `StoreProduct` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB AUTO_INCREMENT=87 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+CREATE TABLE IF NOT EXISTS `StoreProductReceiptAliasVote` (
+  `id` int(10) unsigned NOT NULL AUTO_INCREMENT,
+  `aliasId` int(10) unsigned NOT NULL,
+  `userId` varchar(64) NOT NULL,
+  `vote` enum('identical','similar','different') NOT NULL,
+  `receiptId` int(11) DEFAULT NULL,
+  `createdAt` datetime NOT NULL DEFAULT current_timestamp(),
+  `updatedAt` datetime NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_alias_user` (`aliasId`,`userId`),
+  KEY `idx_user` (`userId`),
+  CONSTRAINT `fk_aliasvote_alias` FOREIGN KEY (`aliasId`) REFERENCES `StoreProductReceiptAlias` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB AUTO_INCREMENT=88 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

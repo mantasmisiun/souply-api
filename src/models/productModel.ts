@@ -401,7 +401,8 @@ const DISCOUNT_AMOUNT_EXPR = `
 async function attachRealDiscounts(enriched: any[], productIds: number[]): Promise<any[]> {
     if (productIds.length === 0) return enriched;
     const [sps]: any = await pool.query(
-        `SELECT id, productId, chainId, unit, amount FROM StoreProduct WHERE productId IN (?)`,
+        `SELECT id, productId, chainId, unit, amount FROM StoreProduct
+          WHERE productId IN (?) AND provisional = 0`,
         [productIds],
     );
     if (!sps.length) return enriched;
@@ -547,7 +548,7 @@ export const refreshDiscountedSummary = async (): Promise<void> => {
             MAX(ROUND((1 - d.promoPrice / d.price) * 100)) AS bestDiscountPct
          FROM Product p
          LEFT JOIN Category c ON c.id = p.categoryId
-         LEFT JOIN StoreProduct sp ON sp.productId = p.id
+         LEFT JOIN StoreProduct sp ON sp.productId = p.id AND sp.provisional = 0
          LEFT JOIN (
              SELECT productId, JSON_ARRAYAGG(imageUrl) AS imageUrls
              FROM StoreProduct

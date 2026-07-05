@@ -110,8 +110,9 @@ export const getStoreProductsByProductId = async (productId: number, userId?: st
         `SELECT StoreProduct.*, StoreChain.name AS chainName, StoreChain.logoUrl
          FROM StoreProduct
          JOIN StoreChain ON StoreProduct.chainId = StoreChain.id
-         WHERE StoreProduct.productId IN (?)`,
-        [productIds]
+         WHERE StoreProduct.productId IN (?)
+           AND (StoreProduct.provisional = 0 OR StoreProduct.provisionalOwnerUserId = ?)`,
+        [productIds, userId ?? '']
     );
     return rows;
 };
@@ -283,7 +284,8 @@ export const getStoreProductsByChainWithProductData = async (chainId: number, lo
          LEFT JOIN Category c2 ON c2.id = c.parentCategoryId
          LEFT JOIN CategoryTranslation ct  ON ct.categoryId  = c.id  AND ct.locale  = ?
          LEFT JOIN CategoryTranslation ct2 ON ct2.categoryId = c2.id AND ct2.locale = ?
-         WHERE sp.chainId = ?`,
+         WHERE sp.chainId = ?
+           AND sp.provisional = 0`,
         [locale, locale, chainId]
     );
     // Attach learned receipt-name aliases (Issue H vocabulary): canonical (extra match
@@ -337,10 +339,10 @@ export const getStoreProductsCrossChainWithProductData = async (excludeChainId: 
          JOIN (
              SELECT productId, MIN(id) AS repId
              FROM StoreProduct
-             WHERE chainId <> ?
+             WHERE chainId <> ? AND provisional = 0
              GROUP BY productId
          ) rep ON rep.repId = sp.id
-         WHERE sp.chainId <> ?`,
+         WHERE sp.chainId <> ? AND sp.provisional = 0`,
         [locale, locale, excludeChainId, excludeChainId]
     );
     return rows.map((r: any) => ({

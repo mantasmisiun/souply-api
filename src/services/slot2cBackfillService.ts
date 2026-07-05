@@ -2,6 +2,7 @@ import pool from '../config/db.js';
 import { getReceiptRelatednessScope } from './receiptRelatednessService.js';
 import { fetchVotedPairKeys } from '../models/votedPairsModel.js';
 import { buildSlot2Queue, type RawSlot2Row, type Slot2QueueItem } from './slot2QueueBuilder.js';
+import { weightedLevenshtein } from '../utils/ocrConfusions.js';
 import type { Locale } from '../middleware/locale.js';
 
 /**
@@ -257,6 +258,23 @@ export async function buildSlot2cBackfill(
     if (catIds.length === 0) return [];
     const receiptChainId = [...scope.chainIds][0] ?? 0;
 
+    // SEEDS: the receipt's OWN lines that linked to an orphan (688) SP. The user just
+    // bought these — the single best moment to pair the orphan against a categorised
+    // counterpart. Seeds outrank the pooled orphans in both paths below, and their
+    // scoring gets the receipt-grade lanes (vocabulary aliases + confusion-weighted).
+    // Runs after the scope gate: with no categorised match there is no candidate pool
+    // to pair a seed against, so the query would be wasted.
+    const [seedRows]: any = await pool.query(
+        `SELECT DISTINCT ri.matchedSpId AS spId
+           FROM ReceiptItem ri
+           JOIN StoreProduct sp ON sp.id = ri.matchedSpId
+           JOIN Product p ON p.id = sp.productId AND p.categoryId = 688 AND p.mergedIntoId IS NULL
+          WHERE ri.receiptId = ? AND ri.matchedSpId IS NOT NULL`,
+        [receiptId],
+    );
+    const seedSpIds = new Set<number>((seedRows as any[]).map((r) => Number(r.spId)));
+    if (seedSpIds.size > 0) console.log(`[Slot2c] r${receiptId}: ${seedSpIds.size} receipt-orphan seed(s): ${[...seedSpIds].join(',')}`);
+
     // FAST PATH: nightly-precomputed OSC pairs filtered by the receipt's category
     // family. Only when they can't fill k does the live fishing pass below run.
     try {
@@ -268,8 +286,12 @@ export async function buildSlot2cBackfill(
                 const prev = bestPerOrphanPre.get(row.orphanSpId);
                 if (!prev || row.composite > prev.composite) bestPerOrphanPre.set(row.orphanSpId, row);
             }
-            const items = buildSlot2Queue([...bestPerOrphanPre.values()], votedPre).slice(0, Math.max(0, k));
-            if (items.length >= k) {
+            // Receipt-orphan SEEDS jump the queue (stable within each group by composite).
+            const preRanked = [...bestPerOrphanPre.values()].sort((a, b) =>
+                Number(seedSpIds.has(b.orphanSpId)) - Number(seedSpIds.has(a.orphanSpId)) || b.composite - a.composite);
+            const seedsCovered = [...seedSpIds].every((id) => bestPerOrphanPre.has(id));
+            const items = buildSlot2Queue(preRanked, votedPre).slice(0, Math.max(0, k));
+            if (items.length >= k && seedsCovered) {
                 console.log(`[Slot2c] r${receiptId}: PRECOMPUTED path served ${items.length}/${k} (pool ${pre.length})`);
                 return items;
             }
@@ -303,9 +325,9 @@ export async function buildSlot2cBackfill(
            ${rowJoins}
           WHERE p.categoryId = 688
             AND p.mergedIntoId IS NULL
-          ORDER BY (sp.chainId = ?) DESC, p.id DESC
+          ORDER BY (sp.id IN (?)) DESC, (sp.chainId = ?) DESC, p.id DESC
           LIMIT ?`,
-        [locale, receiptChainId, SLOT2C_ORPHAN_POOL],
+        [locale, seedSpIds.size ? [...seedSpIds] : [0], receiptChainId, SLOT2C_ORPHAN_POOL],
     );
     const allIds = [...(candRows as any[]), ...(orphRows as any[])].map((r) => Number(r.spId));
     const prices = await fetchLatestPrices(allIds);
@@ -317,13 +339,40 @@ export async function buildSlot2cBackfill(
     }
 
     // Composite scoring: trigram block → Levenshtein name lane → price corroboration.
+    // Receipt-orphan SEEDS get the receipt-grade lanes on top: the orphan's learned
+    // vocabulary aliases as extra match keys and the OCR-confusion-weighted distance —
+    // the same tricks the line matcher uses, applied at the SP-pair level. Bounded to
+    // the seeds so the 250×250 pool loop stays cheap.
+    const seedAliases = new Map<number, string[]>();
+    if (seedSpIds.size > 0) {
+        const [aliasRows]: any = await pool.query(
+            `SELECT storeProductId, normalizedAlias FROM StoreProductReceiptAlias
+              WHERE storeProductId IN (?)`,
+            [[...seedSpIds]],
+        );
+        for (const r of aliasRows as any[]) {
+            const id = Number(r.storeProductId);
+            if (!seedAliases.has(id)) seedAliases.set(id, []);
+            seedAliases.get(id)!.push(normalizeName(String(r.normalizedAlias ?? '')));
+        }
+    }
+    const weightedSim = (a: string, b: string): number =>
+        a && b ? 1 - weightedLevenshtein(a, b) / Math.max(a.length, b.length) : 0;
     const votedPairKeys = await fetchVotedPairKeys(userId);
     const best = new Map<string, RawSlot2Row & { composite: number }>();
     for (const o of orphans) {
+        const isSeed = seedSpIds.has(o.spId);
         for (const c of candidates) {
             if (o.productId === c.productId || o.spId === c.spId) continue;
-            if (trigramJaccard(o.tris, c.tris) < SLOT2C_TRIGRAM_BLOCK) continue;
-            const nameScore = levenshteinRatio(o.norm, c.norm);
+            if (!isSeed && trigramJaccard(o.tris, c.tris) < SLOT2C_TRIGRAM_BLOCK) continue;
+            let nameScore = levenshteinRatio(o.norm, c.norm);
+            if (isSeed) {
+                nameScore = Math.max(nameScore, weightedSim(o.norm, c.norm));
+                for (const alias of seedAliases.get(o.spId) ?? []) {
+                    if (!alias) continue;
+                    nameScore = Math.max(nameScore, levenshteinRatio(alias, c.norm), weightedSim(alias, c.norm));
+                }
+            }
             if (nameScore < SLOT2C_MIN_NAME) continue;
             const priceAgrees = o.latestPrice != null && c.latestPrice != null
                 && Math.abs(o.latestPrice - c.latestPrice) <= Math.max(0.05, 0.03 * Math.max(o.latestPrice, c.latestPrice));
@@ -353,7 +402,12 @@ export async function buildSlot2cBackfill(
         const prev = bestPerOrphan.get(row.orphanSpId);
         if (!prev || row.composite > prev.composite) bestPerOrphan.set(row.orphanSpId, row);
     }
-    const items = buildSlot2Queue([...bestPerOrphan.values()], votedPairKeys).slice(0, Math.max(0, k));
+    // Seeds outrank pooled orphans regardless of the queue's own score sort.
+    const built = buildSlot2Queue([...bestPerOrphan.values()], votedPairKeys);
+    const items = [
+        ...built.filter((i) => seedSpIds.has(i.orphanSpId)),
+        ...built.filter((i) => !seedSpIds.has(i.orphanSpId)),
+    ].slice(0, Math.max(0, k));
     console.log(
         `[Slot2c] r${receiptId}: cats=${catIds.length} orphans=${orphans.length} candidates=${candidates.length} `
         + `pairs=${best.size} → served ${items.length}/${k}`

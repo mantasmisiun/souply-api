@@ -3,6 +3,7 @@ import { computeItemConfidence } from './itemConfidence.js';
 import { demoteReceiptLineDirect } from './receiptLineDemotionService.js';
 import { setReceiptLinePriceVerified } from '../models/receiptLineIssueModel.js';
 import { getSpProposalDisplayById } from '../models/storeProductModel.js';
+import { mintProvisionalSp, checkAndPromoteProvisionalSp, recordTwinPairVote } from './crossChainMintService.js';
 import { recordAliasVote, fetchSpCategoryLabels, type AliasVoteOutcome } from '../models/storeProductAliasModel.js';
 import { syncReceiptItemMatchState, itemToLine } from '../models/receiptItemModel.js';
 import { RECOGNITION } from '../../../shared/recognitionConfig.js';
@@ -56,10 +57,13 @@ export async function castReceiptLineVote(
     const ocrName = line && typeof line.name === 'string' ? line.name : '';
 
     // ── PROPOSED-card validation: only for an UNLINKED line, only an SP that is in the
-    //    line's stored altMatches, only same-chain (the chain-price invariant). A failed
-    //    validation degrades to the plain unlinked behavior — never an error.
+    //    line's stored altMatches. Same-chain candidates propose directly. A CROSS-CHAIN
+    //    candidate (the rescue card) is accepted too — an 'identical' on it MINTS a
+    //    provisional SP in the receipt's chain (crossChainMintService) and the link/alias
+    //    target becomes the MINTED SP, keeping the chain-price invariant intact.
     let proposal: { spId: number; name: string | null; imageUrl: string | null; confidence: number | null;
-                    categoryId: number | null; categoryName: string | null; categoryL2Name: string | null } | null = null;
+                    categoryId: number | null; categoryName: string | null; categoryL2Name: string | null;
+                    crossChainSourceSpId?: number } | null = null;
     if (proposedSpId != null && line && !(Number.isFinite(sp) && sp > 0)) {
         const alt = (Array.isArray(line.altMatches) ? line.altMatches : [])
             .find((am: any) => Number(am?.storeProductId) === proposedSpId);
@@ -67,9 +71,10 @@ export async function castReceiptLineVote(
             console.log(`        proposal → REJECTED sp=${proposedSpId} (not among this line's stored candidates)`);
         } else {
             const disp = await getSpProposalDisplayById(proposedSpId, conn);
-            if (!disp || (Number.isFinite(chainId) && disp.chainId !== chainId)) {
-                console.log(`        proposal → REJECTED sp=${proposedSpId} (${!disp ? 'SP no longer exists' : 'cross-chain'})`);
+            if (!disp) {
+                console.log(`        proposal → REJECTED sp=${proposedSpId} (SP no longer exists)`);
             } else {
+                const isCross = Number.isFinite(chainId) && disp.chainId !== chainId;
                 proposal = {
                     spId: proposedSpId,
                     name: disp.name ?? (typeof alt.name === 'string' ? alt.name : null),
@@ -78,12 +83,36 @@ export async function castReceiptLineVote(
                     categoryId: Number.isFinite(Number(alt?.categoryId)) ? Number(alt.categoryId) : null,
                     categoryName: typeof alt?.categoryName === 'string' ? alt.categoryName : null,
                     categoryL2Name: typeof alt?.categoryL2Name === 'string' ? alt.categoryL2Name : null,
+                    ...(isCross ? { crossChainSourceSpId: proposedSpId } : {}),
                 };
             }
         }
     }
+    // CROSS-CHAIN 'identical': mint (or converge on) the receipt-chain SP FIRST, so the
+    // link below and the vocabulary both target the minted SP — never the foreign one.
+    if (proposal?.crossChainSourceSpId != null && vote === 'identical' && Number.isFinite(chainId)) {
+        const minted = await mintProvisionalSp(chainId, proposal.crossChainSourceSpId, userId ?? '', conn);
+        if (!minted) {
+            console.log(`        proposal → REJECTED sp=${proposal.crossChainSourceSpId} (cross-chain mint failed)`);
+            proposal = null;
+        } else {
+            console.log(`        mint  → ${minted.reused ? 'REUSED' : 'MINTED'} ${minted.provisional ? 'provisional ' : ''}SP ${minted.storeProductId} in chain ${chainId} (from cross-chain SP ${proposal.crossChainSourceSpId})`);
+            // NAME-twin reuse: the identical doubles as a PAIR VOTE (twin ↔ source) —
+            // personal edge now, community merge (incl. 688 absorb) at the standard
+            // threshold. Fail-soft: a ledger hiccup must not fail the link the user made.
+            if (minted.twin && userId) {
+                try {
+                    await recordTwinPairVote(userId, minted.twin, minted.storeProductId, receiptId, conn);
+                } catch (e) {
+                    console.warn('[MINT] twin pair vote failed (non-fatal):', (e as Error)?.message ?? e);
+                }
+            }
+            proposal = { ...proposal, spId: minted.storeProductId };
+        }
+    }
     // The SP this vote is ABOUT — the linked one, or the validated proposal (alias
-    // learning below attributes the verdict to it either way).
+    // learning below attributes the verdict to it either way; for a cross-chain
+    // 'identical' that is the freshly minted same-chain SP).
     const effSp = Number.isFinite(sp) && sp > 0 ? sp : (proposal?.spId ?? NaN);
 
     // ── [VOCAB] header — one coherent block per swipe.
@@ -178,6 +207,11 @@ export async function castReceiptLineVote(
         });
         await syncReceiptItemMatchState(receiptId, lineIdx, line, conn);
         console.log(`        line  → LINKED proposed SP ${proposal.spId} ${JSON.stringify(proposal.name ?? '')} (user confirm; price stays unverified), itemConfidence ${line.itemConfidence?.band ?? '?'}`);
+        // Provisional SP (cross-chain mint): this confirm may be the corroborating one —
+        // run the clustered-promotion check (no-op for regular SPs).
+        try { await checkAndPromoteProvisionalSp(proposal.spId, conn); } catch (e) {
+            console.warn('[MINT] promotion check failed (non-fatal):', (e as Error)?.message ?? e);
+        }
         return line;
     }
 
@@ -211,5 +245,8 @@ export async function castReceiptLineVote(
     await syncReceiptItemMatchState(receiptId, lineIdx, line, conn);
     if (!priceRejected) await setReceiptLinePriceVerified(receiptId, sp, true, conn);
     console.log(`        line  → CONFIRMED — kept SP ${sp}, ${priceRejected ? 'price stays UNVERIFIED (Round-2 rejected)' : 'price-verified'}, itemConfidence ${line.itemConfidence?.band ?? '?'}`);
+    try { await checkAndPromoteProvisionalSp(sp, conn); } catch (e) {
+        console.warn('[MINT] promotion check failed (non-fatal):', (e as Error)?.message ?? e);
+    }
     return line;
 }
