@@ -279,6 +279,8 @@ CREATE TABLE `DiscountedProductSummary` (
   `unit` varchar(8) DEFAULT 'g',
   `hasWeighable` tinyint(1) DEFAULT 0,
   `bestDiscountPct` int(11) NOT NULL,
+  `realDiscountPct` int(11) DEFAULT NULL,
+  `cheapestChainId` int(11) DEFAULT NULL,
   `canonicalUnit` varchar(8) DEFAULT NULL,
   `canonicalStep` double DEFAULT NULL,
   `canonicalFamily` varchar(16) DEFAULT NULL,

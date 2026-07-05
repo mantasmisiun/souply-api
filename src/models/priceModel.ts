@@ -190,11 +190,12 @@ export const getPriceHistoryForStoreProductAllStores = async (storeProductId: nu
                 p.date,
                 CAST(p.price AS DECIMAL(10,4))      AS price,
                 CAST(p.promoPrice AS DECIMAL(10,4)) AS promoPrice,
+                p.promoEnd,
                 p.isFallback,
                 p.priceVerified
            FROM Price p
           WHERE p.storeProductId = ?
-          GROUP BY p.date, p.price, p.promoPrice, p.isFallback, p.priceVerified, p.storeProductId
+          GROUP BY p.date, p.price, p.promoPrice, p.promoEnd, p.isFallback, p.priceVerified, p.storeProductId
           ORDER BY p.date ASC`,
         [storeProductId]
     );

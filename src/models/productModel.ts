@@ -378,6 +378,154 @@ const DISCOUNT_AMOUNT_EXPR = `
 `;
 
 /**
+ * Cross-store "real discount" (Discounts badge v2).
+ *
+ * Per product: each chain participates with its cheapest latest EFFECTIVE unit
+ * price (active promo if present, else the latest regular). With ≥2 comparable
+ * chains, realDiscountPct = round((avg − min) / avg × 100) over the chains'
+ * unit prices and cheapestChainId = the chain holding the minimum — the badge
+ * then says "cheapest at <chain>, X% below the market average" instead of the
+ * gameable own-store promo percent (an inflated regular price buys a big badge).
+ *
+ * Comparability: kg/l/g/ml normalize onto the same 1000-base the summary's
+ * minAmount uses (kg ≈ l — the app's canonical transitional rule); any other
+ * unit compares only against the SAME unit string, per amount (amount 1 when
+ * absent). Mixed bases, missing amounts on mass/volume rows, or a single
+ * participating chain → NULLs (the badge falls back to bestDiscountPct).
+ *
+ * A computed pct that rounds to 0 DELISTS the row: every chain sells at the
+ * same effective unit price, so the promo buys nothing real. Deliberate
+ * consequence embraced by design: the cheapest chain may hold NO promo — a
+ * fake promo elsewhere then advertises the honest store.
+ */
+async function attachRealDiscounts(enriched: any[], productIds: number[]): Promise<any[]> {
+    if (productIds.length === 0) return enriched;
+    const [sps]: any = await pool.query(
+        `SELECT id, productId, chainId, unit, amount FROM StoreProduct WHERE productId IN (?)`,
+        [productIds],
+    );
+    if (!sps.length) return enriched;
+    const spIds = sps.map((r: any) => Number(r.id));
+
+    // Latest price row per SP (regular fallback) + latest ACTIVE promo per SP —
+    // the same MAX(id) convention the summary's promo join uses.
+    const [latestAny]: any = await pool.query(
+        `SELECT pr.storeProductId, pr.price
+           FROM Price pr
+           JOIN (SELECT storeProductId, MAX(id) AS maxId FROM Price
+                  WHERE storeProductId IN (?) GROUP BY storeProductId) m ON m.maxId = pr.id`,
+        [spIds],
+    );
+    const [latestPromo]: any = await pool.query(
+        `SELECT pr.storeProductId, pr.promoPrice
+           FROM Price pr
+           JOIN (SELECT storeProductId, MAX(id) AS maxId FROM Price
+                  WHERE storeProductId IN (?) AND promoPrice IS NOT NULL AND promoEnd > NOW()
+                  GROUP BY storeProductId) m ON m.maxId = pr.id
+          WHERE pr.promoPrice > 0 AND pr.promoPrice < pr.price`,
+        [spIds],
+    );
+    const regBySp = new Map<number, number>();
+    for (const r of latestAny) regBySp.set(Number(r.storeProductId), Number(r.price));
+    const promoBySp = new Map<number, number>();
+    for (const r of latestPromo) promoBySp.set(Number(r.storeProductId), Number(r.promoPrice));
+
+    // Unit basis: { kind, qty } — prices compare only within one kind. Scraped
+    // unit/amount pairs carry TYPOS the math must not trust blindly (real dev-data
+    // hits: "ml, 0.330" = litres mislabelled ml → an 800× skew and a 100% badge):
+    // no product is under 1 g/ml or over 100 kg/l, so amounts outside physical
+    // bounds are unit slips — repaired onto the intended magnitude. Count units
+    // keep a null-amount marker so a pack-size-known offer is never compared
+    // against a pack-size-unknown one (8-pack vs "1").
+    const basisOf = (unit: string | null, amount: number | null): { kind: string; qty: number } | null => {
+        const u = (unit ?? '').trim().toLowerCase();
+        const a = amount != null && Number(amount) > 0 ? Number(amount) : null;
+        if (u === 'kg' || u === 'l') {
+            if (a == null) return null;
+            return { kind: 'base1000', qty: a > 100 ? a : a * 1000 };
+        }
+        if (u === 'g' || u === 'ml') {
+            if (a == null) return null;
+            return { kind: 'base1000', qty: a < 1 ? a * 1000 : a };
+        }
+        if (!u) return null;
+        // Count units REQUIRE a scraped amount too: a NULL amount can hide a multipack
+        // (8-pack batteries read as "1"), so the offer sits out until it gains one —
+        // same rule as mass/volume (receipt of user decision: čiobreliai/trešnės cases).
+        return a != null ? { kind: `u:${u}`, qty: a } : null;
+    };
+
+    // productId → chainId → cheapest effective unit price (kind-tagged). pricedChains
+    // additionally counts every chain that HAS a live price, participating or not —
+    // the delist-at-0% rule below only trusts a COMPLETE comparison.
+    const perProduct = new Map<number, Map<number, { kind: string; unitPrice: number }>>();
+    const pricedChains = new Map<number, Set<number>>();
+    const mixedKind = new Set<number>();
+    for (const sp of sps) {
+        const spId = Number(sp.id);
+        const eff = promoBySp.get(spId) ?? regBySp.get(spId);
+        if (eff == null || !(eff > 0)) continue;
+        const pid = Number(sp.productId);
+        const chainId = Number(sp.chainId);
+        let priced = pricedChains.get(pid);
+        if (!priced) { priced = new Set(); pricedChains.set(pid, priced); }
+        priced.add(chainId);
+        const basis = basisOf(sp.unit, sp.amount);
+        if (!basis) continue;
+        const unitPrice = eff / basis.qty;
+        let chains = perProduct.get(pid);
+        if (!chains) { chains = new Map(); perProduct.set(pid, chains); }
+        const prev = chains.get(chainId);
+        if (prev && prev.kind !== basis.kind) { mixedKind.add(pid); continue; }
+        if (!prev || unitPrice < prev.unitPrice) chains.set(chainId, { kind: basis.kind, unitPrice });
+    }
+
+    const out: any[] = [];
+    for (const r of enriched) {
+        const pid = Number(r.id);
+        const chains = perProduct.get(pid);
+        let realDiscountPct: number | null = null;
+        let cheapestChainId: number | null = null;
+        if (chains && chains.size >= 2 && !mixedKind.has(pid)) {
+            const entries = [...chains.entries()];
+            const kinds = new Set(entries.map(([, v]) => v.kind));
+            if (kinds.size === 1) {
+                let min = Infinity, max = 0, minChain = -1, sum = 0;
+                for (const [chainId, v] of entries) {
+                    sum += v.unitPrice;
+                    if (v.unitPrice > max) max = v.unitPrice;
+                    if (v.unitPrice < min || (v.unitPrice === min && chainId < minChain)) {
+                        min = v.unitPrice; minChain = chainId;
+                    }
+                }
+                // SANITY RATIO: the same grocery product never legitimately costs 5×
+                // more per unit at another chain — a wider spread is residual dirty
+                // data (mislabelled amount the bounds repair couldn't catch). Fall
+                // back to the classic badge rather than advertise a fantasy number.
+                if (max <= min * 5) {
+                    const avg = sum / entries.length;
+                    const pct = Math.round(((avg - min) / avg) * 100);
+                    // 0% = every chain equal, the promo buys nothing → delist — but ONLY
+                    // when every priced chain actually took part. If a chain sat out
+                    // (no amount/unit yet), the tie is computed on partial information
+                    // and the product keeps the classic 🔥 badge instead of vanishing
+                    // (the excluded chain may hold the page-qualifying promo).
+                    const complete = (pricedChains.get(pid)?.size ?? 0) === entries.length;
+                    if (pct <= 0) {
+                        if (complete) continue;       // trusted tie → delist
+                    } else {
+                        realDiscountPct = pct;
+                        cheapestChainId = minChain;
+                    }
+                }
+            }
+        }
+        out.push({ ...r, realDiscountPct, cheapestChainId });
+    }
+    return out;
+}
+
+/**
  * Recompute the DiscountedProductSummary table from current Product + Price state.
  * Runs the heavy aggregation query once and writes the result into a flat,
  * pre-joined table so the request-time endpoint becomes a simple indexed read.
@@ -436,7 +584,8 @@ export const refreshDiscountedSummary = async (): Promise<void> => {
 
     const productIds = rows.map((r: any) => Number(r.id));
     const canonicals = await loadCanonicalsForProducts(productIds);
-    const enriched = attachCanonicalFields(rows, canonicals);
+    let enriched = attachCanonicalFields(rows, canonicals);
+    enriched = await attachRealDiscounts(enriched, productIds);
 
     const conn = await pool.getConnection();
     try {
@@ -455,6 +604,8 @@ export const refreshDiscountedSummary = async (): Promise<void> => {
                 r.unit ?? 'g',
                 r.hasWeighable ?? 0,
                 r.bestDiscountPct,
+                r.realDiscountPct ?? null,
+                r.cheapestChainId ?? null,
                 r.canonicalUnit,
                 r.canonicalStep,
                 r.canonicalFamily,
@@ -463,6 +614,7 @@ export const refreshDiscountedSummary = async (): Promise<void> => {
                 `INSERT INTO DiscountedProductSummary
                  (productId, name, categoryId, l2CategoryId, imageUrls, chainLogos,
                   minAmount, maxAmount, unit, hasWeighable, bestDiscountPct,
+                  realDiscountPct, cheapestChainId,
                   canonicalUnit, canonicalStep, canonicalFamily)
                  VALUES ?`,
                 [values],
@@ -517,10 +669,11 @@ export const getDiscountedProducts = async (opts: {
     const [rows]: any = await pool.query(
         `SELECT productId AS id, name, categoryId, l2CategoryId,
                 imageUrls, chainLogos, minAmount, maxAmount, unit, hasWeighable,
-                bestDiscountPct, canonicalUnit, canonicalStep, canonicalFamily
+                bestDiscountPct, realDiscountPct, cheapestChainId,
+                canonicalUnit, canonicalStep, canonicalFamily
            FROM DiscountedProductSummary
            ${where}
-           ORDER BY bestDiscountPct DESC
+           ORDER BY COALESCE(realDiscountPct, bestDiscountPct) DESC
            ${limitClause}`,
         params,
     );
