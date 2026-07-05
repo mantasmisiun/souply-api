@@ -83,6 +83,14 @@ export function computeItemConfidence(input: ItemConfidenceInput): ItemConfidenc
     if (input.source === 'skipped_unpriced') {
         vetoes.push({ reason: 'skippedUnpriced', cap: C.vetoCaps.skippedUnpriced });
     }
+    // NO SP linked (NO-MINT: cross-chain-only match, or nothing at all) — the name
+    // lane's score describes a candidate we deliberately did NOT link, so the line
+    // may never present as a confident match. Capping into S3 keeps it inside
+    // surfaceBands, where the unlinked-proposal card (incl. the cross-chain rescue)
+    // can pick it up instead of stranding it (the r399 SAMSONO case).
+    if (input.source === 'unmatched') {
+        vetoes.push({ reason: 'unmatchedLine', cap: C.vetoCaps.unmatchedLine });
+    }
     // A user-rejected line (swiped 'different') can never read as a confirmed match —
     // a single personal vote is authoritative (the 1-vote split rule).
     if (input.userRejected) vetoes.push({ reason: 'userRejected', cap: C.vetoCaps.userRejected });

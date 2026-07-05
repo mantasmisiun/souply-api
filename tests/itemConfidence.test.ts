@@ -40,6 +40,21 @@ describe('computeItemConfidence', () => {
         expect(r.score).toBeLessThan(RECOGNITION.display.bandS1);
     });
 
+    it('unmatched (NO-MINT, e.g. cross-chain-only 0.97 name) → capped into S3, never S1', () => {
+        // The r399 SAMSONO stranded state: high name confidence but nothing linked.
+        // Must land in surfaceBands (S2/S3) so the unlinked-proposal/rescue card sees it.
+        const r = mk({ nameConf: 0.97, source: 'unmatched', gapToRunnerUp: 0.05 });
+        expect(r.band).toBe('S3');
+        expect(r.score).toBeLessThanOrEqual(RECOGNITION.confidence.vetoCaps.unmatchedLine);
+        expect(r.vetoes.map(v => v.reason)).toContain('unmatchedLine');
+    });
+
+    it('unmatched + userConfirmed (identical on the rescue card) → S1 override still wins', () => {
+        const r = mk({ nameConf: 0.97, source: 'unmatched', userConfirmed: true });
+        expect(r.band).toBe('S1');
+        expect(r.score).toBe(1);
+    });
+
     it('skipped_unpriced (price≤0 garbled) → heavy veto, S3', () => {
         const r = mk({ nameConf: 0.7, source: 'skipped_unpriced' });
         expect(r.band).toBe('S3');
