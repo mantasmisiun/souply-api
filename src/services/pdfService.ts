@@ -2,6 +2,7 @@ import { spawnSync } from 'child_process';
 import { promises as fs } from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import sharp from 'sharp';
 
 /**
  * Convert every page of a PDF buffer to a PNG buffer. Returns one
@@ -44,6 +45,87 @@ export class PdfTooLargeError extends Error {
     }
 }
 
+/**
+ * IMAGE-WRAPPER PDFs (Rimi app-share e-receipts): the PDF contains NO fonts
+ * and exactly one raster image per page (346×780px JPEG @72ppi on every Rimi
+ * share). Rasterizing such a page at 300 dpi is pure interpolation — pdftoppm
+ * resamples 346 real pixels to 1442px, the device OCR upscale resamples AGAIN
+ * to 2000px, and the double-blurred glyphs are what fuses printed rows and
+ * garbles digits. Instead: extract the embedded image LOSSLESSLY and do ONE
+ * high-quality upscale with light denoise + sharpen + contrast normalisation.
+ * Vector PDFs (Maxima e-receipts — real embedded fonts) are untouched: for
+ * them rasterization is the right tool and already crisp.
+ */
+const ENHANCE_TARGET_WIDTH = 2000;
+const ENHANCE_MAX_UPSCALE = 6;
+const WRAPPER_MAX_SAMPLES_PX = 40_000_000; // sharp OOM guard
+
+const tryExtractWrapperImages = async (
+    tmpPdf: string,
+    tmpDir: string,
+    pageCount: number,
+    pdfInfoStdout: string,
+    spawnOpts: Parameters<typeof spawnSync>[2],
+): Promise<Buffer[] | null> => {
+    // Wrapper signature 1: zero fonts — nothing but images on every page.
+    const fonts = spawnSync('pdffonts', [tmpPdf], spawnOpts as any);
+    if (fonts.status !== 0) return null;
+    const fontRows = String(fonts.stdout).trim().split('\n').slice(2).filter((l) => l.trim());
+    if (fontRows.length > 0) return null;
+
+    // Wrapper signature 2: exactly one image per page, image dims ≈ page dims
+    // in the SAME orientation (a rotated/cropped CTM would need the renderer).
+    const list = spawnSync('pdfimages', ['-list', tmpPdf], spawnOpts as any);
+    if (list.status !== 0) return null;
+    const rows = String(list.stdout).trim().split('\n').slice(2)
+        .map((l) => l.trim().split(/\s+/))
+        .filter((c) => c.length >= 5);
+    if (rows.length !== pageCount) return null;
+    const sizeMatch = pdfInfoStdout.match(/^Page size:\s*([\d.]+)\s*x\s*([\d.]+)\s*pts/m);
+    if (!sizeMatch) return null;
+    const pageW = parseFloat(sizeMatch[1]);
+    const pageH = parseFloat(sizeMatch[2]);
+    for (const c of rows) {
+        const w = parseInt(c[3], 10);
+        const h = parseInt(c[4], 10);
+        if (!Number.isFinite(w) || !Number.isFinite(h)) return null;
+        if (w * h > WRAPPER_MAX_SAMPLES_PX) return null;
+        if (Math.abs(w - pageW) / pageW > 0.02 || Math.abs(h - pageH) / pageH > 0.02) return null;
+    }
+
+    // Extract the raw samples (no resampling, no re-encode) in document order.
+    const imgPrefix = path.join(tmpDir, 'img');
+    const ext = spawnSync('pdfimages', ['-png', tmpPdf, imgPrefix], spawnOpts as any);
+    if (ext.status !== 0) return null;
+
+    const pages: Buffer[] = [];
+    for (let i = 0; i < pageCount; i++) {
+        const file = `${imgPrefix}-${String(i).padStart(3, '0')}.png`;
+        const raw = await fs.readFile(file);
+        const meta = await sharp(raw).metadata();
+        const w = meta.width ?? 0;
+        if (w <= 0) return null;
+        if (w >= ENHANCE_TARGET_WIDTH) {
+            // Big enough already — pass through losslessly.
+            pages.push(raw);
+            continue;
+        }
+        const target = Math.min(ENHANCE_TARGET_WIDTH, Math.round(w * ENHANCE_MAX_UPSCALE));
+        // greyscale kills JPEG chroma noise; median(3) the luma speckle the
+        // sharpen would otherwise amplify; one LANCZOS resize; then edge
+        // contrast back. Order matters: denoise BEFORE upscale+sharpen.
+        pages.push(await sharp(raw)
+            .greyscale()
+            .median(3)
+            .resize({ width: target, kernel: 'lanczos3' })
+            .sharpen({ sigma: 1.2 })
+            .normalise()
+            .png()
+            .toBuffer());
+    }
+    return pages;
+};
+
 export const convertPdfBufferToImagePages = async (
     pdfBuffer: Buffer,
     opts: { density?: number } = {}
@@ -85,6 +167,13 @@ export const convertPdfBufferToImagePages = async (
                 throw new PdfTooLargeError(`PDF page ${w}x${h}pt exceeds ${MAX_PAGE_PT}pt cap`);
             }
         }
+
+        // Image-wrapper PDFs: extract + enhance the embedded raster instead
+        // of double-interpolating it. Falls through to pdftoppm on ANY doubt.
+        try {
+            const wrapper = await tryExtractWrapperImages(tmpPdf, tmpDir, pageCount, info.stdout, spawnOpts);
+            if (wrapper) return wrapper;
+        } catch { /* fall through to the renderer */ }
 
         if (pageCount === 1) {
             const r = spawnSync(
