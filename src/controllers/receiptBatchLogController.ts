@@ -75,6 +75,12 @@ export const logBatchReceipt = async (req: Request, res: Response, next: NextFun
                     )
                     .join('\n')
             );
+            // Full-geometry copy (x + y + text) — raw.txt drops the x-coords,
+            // which makes an OFF-DEVICE 1:1 reproduction of a device parse
+            // impossible (the banders read column positions). With this file a
+            // failing batch receipt can be replayed/fixture-ised without
+            // pasting Metro logs around.
+            writeLog(logDir, 'rawLines.json', rawLines);
         }
         writeLog(logDir, 'parsedData.json', parsedData);
 
