@@ -48,7 +48,10 @@ export const convertPdfBufferToImagePages = async (
     pdfBuffer: Buffer,
     opts: { density?: number } = {}
 ): Promise<Buffer[]> => {
-    const density = opts.density ?? 200;
+    // 300 dpi: at 200 the thin right-column price digits on Maxima e-receipts
+    // sat at ML Kit's glyph floor and were silently dropped (kvitas_2025-11-05
+    // product 1 lost its price row). Same bump as the dev batch stager.
+    const density = opts.density ?? 300;
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pdf-rasterize-'));
     const tmpPdf = path.join(tmpDir, 'input.pdf');
     const outPrefix = path.join(tmpDir, 'p');

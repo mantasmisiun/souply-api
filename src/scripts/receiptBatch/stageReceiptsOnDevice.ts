@@ -1,7 +1,7 @@
 /**
  * Stage receipt PDFs for the phone-side batch screen:
  *   1. Walks souply-api/receipts/<chain>/*.pdf
- *   2. Runs `pdftoppm -r 200 -png` per file → one PNG per page, named
+ *   2. Runs `pdftoppm -r 300 -png` per file (300 dpi: 200 left thin price digits at MLKit's glyph floor — dropped rows) → one PNG per page, named
  *      <basename>.png (or <basename>-N.png for multi-page) under
  *      souply-api/receipts/_batch_staging/<chain>/.
  *   3. Writes a manifest.json alongside so the phone knows what to
@@ -90,11 +90,11 @@ const convertPdf = (pdfPath: string, outDir: string, baseName: string): string[]
 
     const outPrefix = path.join(outDir, baseName);
     if (pages === 1) {
-        const r = run('pdftoppm', ['-r', '200', '-png', '-singlefile', pdfPath, outPrefix]);
+        const r = run('pdftoppm', ['-r', '300', '-png', '-singlefile', pdfPath, outPrefix]);
         if (r.status !== 0) throw new Error(`pdftoppm failed for ${pdfPath}`);
         return [`${baseName}.png`];
     } else {
-        const r = run('pdftoppm', ['-r', '200', '-png', pdfPath, outPrefix]);
+        const r = run('pdftoppm', ['-r', '300', '-png', pdfPath, outPrefix]);
         if (r.status !== 0) throw new Error(`pdftoppm failed for ${pdfPath}`);
         // pdftoppm pads with enough zeros to represent pages (e.g. 10
         // pages → "-01", "-02", …). We regenerate the expected names
