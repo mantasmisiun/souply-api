@@ -4,6 +4,7 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import * as path from 'path';
+import * as fsSync from 'fs';
 import pool from './config/db.js';
 import storeRoutes from './routes/storeRoutes.js';
 import productRoutes from './routes/productRoutes.js';
@@ -178,6 +179,67 @@ if (!IS_PRODUCTION) {
     // cross-stack module dir from souply-api/.
     const TRUTH_DIR = path.resolve(process.cwd(), '../shared/receipts');
     app.use('/receipts-truth', express.static(TRUTH_DIR, { fallthrough: false }));
+
+    // Item-truth writer: the batch DETAIL screen checkmarks products/footer
+    // and posts the whole updated v2 truth file here. Written into
+    // shared/receipts/<chain>/<base>.truth.json (git-versioned approvals,
+    // served back by the /receipts-truth static route). truth=null deletes.
+    app.post('/receipts-truth-set', express.json({ limit: '4mb' }), (req, res) => {
+        try {
+            const { chain, file, truth } = req.body as { chain?: string; file?: string; truth?: any };
+            if (!chain || !file || !/^[a-z]+$/.test(chain)) {
+                res.status(400).json({ error: 'chain and file required' });
+                return;
+            }
+            const base = path.basename(file).replace(/\.(pdf|png|jpg|jpeg)$/i, '');
+            const dir = path.resolve(process.cwd(), '../shared/receipts', chain);
+            const dest = path.join(dir, `${base}.truth.json`);
+            if (truth === null) {
+                fsSync.rmSync(dest, { force: true });
+                console.log(`[truth-set] removed ${dest}`);
+                res.json({ ok: true, removed: true });
+                return;
+            }
+            if (!truth || truth.version !== 2 || !Array.isArray(truth.products)) {
+                res.status(400).json({ error: 'truth must be a version-2 item-truth file (or null to delete)' });
+                return;
+            }
+            fsSync.mkdirSync(dir, { recursive: true });
+            fsSync.writeFileSync(dest, JSON.stringify(truth, null, 2) + '\n');
+            console.log(`[truth-set] wrote ${dest} (${truth.products.length} product(s), footer=${truth.footer ? 'yes' : 'no'})`);
+            res.json({ ok: true });
+        } catch (e: any) {
+            res.status(500).json({ error: e?.message ?? 'write failed' });
+        }
+    });
+
+    // Debug drop-box: the batch screen posts the ON-DEVICE-converted page
+    // image here so the converted pixels can be inspected on the dev machine
+    // (the native Core Image chain can't be observed any other way). Writes
+    // to receipts/_logs/<chain>/<file>/device-converted-p<N>.png.
+    app.post('/receipts-batch-debug', express.json({ limit: '64mb' }), (req, res) => {
+        try {
+            const { chain, file, page, pngBase64, meta } = req.body as {
+                chain?: string; file?: string; page?: number; pngBase64?: string; meta?: any;
+            };
+            if (!chain || !file || !pngBase64 || !/^[a-z]+$/.test(chain)) {
+                res.status(400).json({ error: 'chain, file, pngBase64 required' });
+                return;
+            }
+            const safeFile = path.basename(file);
+            const dir = path.resolve(process.cwd(), 'receipts/_logs', chain, safeFile);
+            fsSync.mkdirSync(dir, { recursive: true });
+            const dest = path.join(dir, `device-converted-p${page ?? 1}.png`);
+            fsSync.writeFileSync(dest, Buffer.from(pngBase64, 'base64'));
+            if (meta !== undefined) {
+                fsSync.writeFileSync(path.join(dir, 'meta.json'), JSON.stringify(meta, null, 2) + '\n');
+            }
+            console.log(`[batch-debug] wrote ${dest}${meta !== undefined ? ' (+meta)' : ''}`);
+            res.json({ ok: true });
+        } catch (e: any) {
+            res.status(500).json({ error: e?.message ?? 'write failed' });
+        }
+    });
 }
 
 app.get('/health', async (req, res) => {

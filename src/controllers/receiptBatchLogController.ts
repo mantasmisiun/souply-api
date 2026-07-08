@@ -16,8 +16,9 @@
 import { Request, Response, NextFunction } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
-import { createReceipt } from '../models/receiptModel.js';
+import { createReceipt, deleteReceipt, getReceiptByReceiptNoAndUser } from '../models/receiptModel.js';
 import { persistReceiptPrices } from '../services/receiptSaveService.js';
+import { deleteReceiptWithData } from '../services/receiptDeletionService.js';
 
 const LOGS_ROOT = path.resolve(
     path.dirname(new URL(import.meta.url).pathname),
@@ -99,8 +100,13 @@ export const logBatchReceipt = async (req: Request, res: Response, next: NextFun
         const totalOcr = parsedData?.footer?.total ?? null;
         const sumLines = Array.isArray(parsedData?.products)
             ? parsedData.products.reduce(
-                  (acc: number, p: any) =>
-                      acc + (Number(p.promoPrice ?? p.price) || 0),
+                  (acc: number, p: any) => {
+                      // Prices are per-unit NORMALIZED — multiply the quantity
+                      // back or multi-buy/weighed rows understate the sum.
+                      const unit = Number(p.promoPrice ?? p.price) || 0;
+                      const qty = Number(p.quantity) > 0 ? Number(p.quantity) : 1;
+                      return acc + unit * qty;
+                  },
                   0
               )
             : 0;
@@ -114,32 +120,60 @@ export const logBatchReceipt = async (req: Request, res: Response, next: NextFun
                 return;
             }
             const chainIdNum: number = chainId;
-            const newReceiptId: number = await createReceipt(
-                userId!,
-                storeId,
-                `batch:${chain}/${filename}`,
-                'image/png'
-            );
-            receiptId = newReceiptId;
-            persistResult = await persistReceiptPrices(newReceiptId, userId!, parsedData, {
-                chainId: chainIdNum,
-                storeId,
-                receiptNo,
-                date: parsedData?.footer?.date ?? null,
-                products: (parsedData?.products ?? []).map((p: any) => ({
-                    storeProductId: p.storeProductId ?? null,
-                    matchConfirmed: !!p.matchConfirmed,
-                    // Force false for batch to suppress fallback propagation
-                    // fan-out. The user hasn't eyeballed these matches, so
-                    // we shouldn't stamp prices into every store in the
-                    // chain on speculation — same guard as the dev script.
-                    priceVerified: false,
-                    price: p.price,
-                    promoPrice: p.promoPrice ?? null,
-                    quantity: p.quantity,
-                    unit: p.unit,
-                })),
-            });
+            const doPersist = async (): Promise<{ id: number; result: any }> => {
+                const newReceiptId: number = await createReceipt(
+                    userId!,
+                    storeId,
+                    `batch:${chain}/${filename}`,
+                    'image/png'
+                );
+                try {
+                    const result = await persistReceiptPrices(newReceiptId, userId!, parsedData, {
+                        chainId: chainIdNum,
+                        storeId,
+                        receiptNo,
+                        date: parsedData?.footer?.date ?? null,
+                        products: (parsedData?.products ?? []).map((p: any) => ({
+                            storeProductId: p.storeProductId ?? null,
+                            matchConfirmed: !!p.matchConfirmed,
+                            // Force false for batch to suppress fallback propagation
+                            // fan-out. The user hasn't eyeballed these matches, so
+                            // we shouldn't stamp prices into every store in the
+                            // chain on speculation — same guard as the dev script.
+                            priceVerified: false,
+                            price: p.price,
+                            promoPrice: p.promoPrice ?? null,
+                            quantity: p.quantity,
+                            unit: p.unit,
+                        })),
+                    });
+                    return { id: newReceiptId, result };
+                } catch (err) {
+                    // The persist transaction rolled back — the bare Receipt row
+                    // would linger as a "malformed" Analyze entry. Same cleanup
+                    // as receiptController's upload path.
+                    await deleteReceipt(newReceiptId).catch(() => {});
+                    throw err;
+                }
+            };
+            // BATCH RERUN = REPLACE: re-running a staged receipt hits the
+            // unique_receipt dedup key of its previous persist. This is a dev
+            // harness — cascade-delete the prior copy and persist fresh, so
+            // repeated batch runs never require manual DB cleanup.
+            let persisted: { id: number; result: any };
+            try {
+                persisted = await doPersist();
+            } catch (err: any) {
+                const isDup = err?.code === 'ER_DUP_ENTRY' && /unique_receipt/i.test(String(err?.sqlMessage ?? ''));
+                if (!isDup || !receiptNo) throw err;
+                const existing = await getReceiptByReceiptNoAndUser(String(receiptNo), userId!);
+                if (!existing) throw err; // duplicate belongs to another user — don't touch it
+                const wiped = await deleteReceiptWithData(existing.id);
+                console.log(`[batch-log] ${filename}: replaced prior receipt ${existing.id} (prices=${wiped.prices})`);
+                persisted = await doPersist();
+            }
+            receiptId = persisted.id;
+            persistResult = persisted.result;
             writeLog(logDir, 'persistResult.json', { receiptId, ...persistResult });
         }
 
@@ -298,13 +332,25 @@ export const finalizeBatchReport = async (req: Request, res: Response, next: Nex
                 // Footer total is NET (after every per-item discount).
                 // p.price is GROSS (before discount); p.promoPrice is
                 // the after-discount price when the parser caught the
-                // savings row. Sum the effective paid price so the
-                // reconcile check tracks the actual receipt total.
+                // savings row. Prices are per-unit NORMALIZED, so the
+                // quantity must be multiplied back — without it every
+                // multi-buy/weighed receipt reads as a "total mismatch"
+                // (the old report flagged all 27 rimi receipts).
                 const sumLines = products.reduce(
-                    (acc: number, p: any) =>
-                        acc + (Number(p.promoPrice ?? p.price) || 0),
+                    (acc: number, p: any) => {
+                        const unit = Number(p.promoPrice ?? p.price) || 0;
+                        const qty = Number(p.quantity) > 0 ? Number(p.quantity) : 1;
+                        return acc + unit * qty;
+                    },
                     0
                 );
+                // Parser self-verification wins when present (IKI/Rimi emit
+                // footer.reconciled/reconDelta — exact printed-arithmetic
+                // checks incl. receipt-level adjustments the naive sum can't
+                // see). The naive ±tolerance check stays as the fallback for
+                // chains without receipt-level recon.
+                const parserRecon: boolean | null | undefined = pd?.footer?.reconciled;
+                const parserDelta: number | null | undefined = pd?.footer?.reconDelta;
 
                 // Metrics rollup.
                 metrics.totalProducts += productCount;
@@ -320,18 +366,22 @@ export const finalizeBatchReport = async (req: Request, res: Response, next: Nex
                     if (conf >= 0.7) metrics.productsConf70++;
                     if (conf >= 0.9) metrics.productsConf90++;
                 }
-                if (typeof totalOcr === 'number') {
+                const reconciled = typeof parserRecon === 'boolean'
+                    ? parserRecon
+                    : typeof totalOcr === 'number' && Math.abs(totalOcr - sumLines) <= RECONCILE_TOLERANCE_EUR;
+                if (typeof totalOcr === 'number' || typeof parserRecon === 'boolean') {
                     metrics.reconcileEligible++;
-                    if (Math.abs(totalOcr - sumLines) <= RECONCILE_TOLERANCE_EUR) {
-                        metrics.reconcileCount++;
-                    }
+                    if (reconciled) metrics.reconcileCount++;
                 }
 
                 tableRows.push(
-                    `| ${name} | ${productCount} | ${matched} | ${productCount - matched} | ${totalOcr ?? '-'} | ${sumLines.toFixed(2)} |`
+                    `| ${name} | ${productCount} | ${matched} | ${productCount - matched} | ${totalOcr ?? '-'} | ${sumLines.toFixed(2)} | ${typeof parserRecon === 'boolean' ? (parserRecon ? '✓' : `✗ Δ${parserDelta ?? '?'}`) : '—'} |`
                 );
                 const flags: string[] = [];
-                if (
+                if (parserRecon === false) {
+                    flags.push(`parser recon Δ=${parserDelta ?? '?'} (OCR=${totalOcr}, sum=${sumLines.toFixed(2)})`);
+                } else if (
+                    parserRecon == null &&
                     typeof totalOcr === 'number' &&
                     Math.abs(totalOcr - sumLines) > RECONCILE_TOLERANCE_EUR
                 ) {
@@ -398,8 +448,8 @@ export const finalizeBatchReport = async (req: Request, res: Response, next: Nex
 
         rows.push('');
         rows.push('## Per-file');
-        rows.push('| File | Products | w/ candidates | Unmatched | Total OCR | Sum lines |');
-        rows.push('|---|---:|---:|---:|---:|---:|');
+        rows.push('| File | Products | w/ candidates | Unmatched | Total OCR | Sum lines | Recon |');
+        rows.push('|---|---:|---:|---:|---:|---:|---:|');
         rows.push(...tableRows);
 
         if (reviewable.length > 0) {
