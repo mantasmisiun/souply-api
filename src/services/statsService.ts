@@ -163,12 +163,20 @@ export const getUserStats = async (userId: string, locale: Locale = 'lt') => {
     const chainMiniLogoMap: Record<string, string | null> = {};
     const categoryMap: Record<string, number> = {};
     const monthMap: Record<string, number> = {};
+    // month (`YYYY-MM`) → chainName → spend, for the per-month store breakdown
+    // (the profile Stores donut is scoped to a selectable month).
+    const storeMonthMap: Record<string, Record<string, number>> = {};
+    // month (`YYYY-MM`) → L2 categoryName → spend, for the per-month category
+    // breakdown (the profile Categories donut is scoped to a selectable month).
+    const categoryMonthMap: Record<string, Record<string, number>> = {};
     // spId → { productId, [{price, qty}] } — filled during the receipt loop
     // so both category aggregation and savings computation share one SP query.
     const spCategoryMap = new Map<number, string>();
     const spToProductId = new Map<number, number>();
-    // spId → [{price, qty}] collected from all receipt items with a matched SP.
-    const spPriceList = new Map<number, Array<{ price: number; qty: number }>>();
+    // spId → [{price, qty, month}] collected from all receipt items with a
+    // matched SP. `month` (local `YYYY-MM`, null when the receipt has no date)
+    // lets savings be bucketed per calendar month for the this-month figure.
+    const spPriceList = new Map<number, Array<{ price: number; qty: number; month: string | null }>>();
     // productId → the user's personal orphan rescue (Nepriskirta → real category
     // via their own "same" votes). Empty when there are no matched SPs.
     let rescueByProduct = new Map<number, { categoryId: number | null; leafName: string | null; l2Name: string | null }>();
@@ -298,14 +306,20 @@ export const getUserStats = async (userId: string, locale: Locale = 'lt') => {
                 }
                 if (catName) {
                     categoryMap[catName] = (categoryMap[catName] ?? 0) + itemTotal;
+                    if (month) {
+                        const cm = (categoryMonthMap[month] ??= {});
+                        cm[catName] = (cm[catName] ?? 0) + itemTotal;
+                    }
                 }
                 if (month) {
                     monthMap[month] = (monthMap[month] ?? 0) + itemTotal;
+                    const sm = (storeMonthMap[month] ??= {});
+                    sm[chainName] = (sm[chainName] ?? 0) + itemTotal;
                 }
                 // Accumulate for savings — only matched SPs with a known productId.
                 if (spId && unitPrice > 0 && spToProductId.has(spId)) {
                     const list = spPriceList.get(spId) ?? [];
-                    list.push({ price: unitPrice, qty });
+                    list.push({ price: unitPrice, qty, month });
                     spPriceList.set(spId, list);
                 }
             }
@@ -320,6 +334,10 @@ export const getUserStats = async (userId: string, locale: Locale = 'lt') => {
     // prices (isFallback=1, receiptId IS NULL). Excludes within-chain
     // propagated fallbacks (isFallback=1, receiptId IS NOT NULL).
     let totalSavings = 0;
+    // Savings bucketed by receipt month (`YYYY-MM`) so the profile card can
+    // show the current-month figure and its change vs last month. Same
+    // avg-vs-paid formula as the all-time total — only the grouping differs.
+    const monthSavingsMap: Record<string, number> = {};
     if (spPriceList.size > 0) {
         // spPriceList only contains spIds that are in spToProductId (guarded above).
         const productIds = [...new Set(
@@ -356,13 +374,29 @@ export const getUserStats = async (userId: string, locale: Locale = 'lt') => {
                 if (!productId) continue;
                 const avg = productAvgPrice.get(productId);
                 if (!avg || avg <= 0) continue;
-                for (const { price, qty } of purchases) {
-                    totalSavings += (avg - price) * qty;
+                for (const { price, qty, month } of purchases) {
+                    const saved = (avg - price) * qty;
+                    totalSavings += saved;
+                    if (month) monthSavingsMap[month] = (monthSavingsMap[month] ?? 0) + saved;
                 }
             }
         }
     }
     totalSavings = Math.round(totalSavings * 100) / 100;
+
+    // This-month savings + change vs last month. Local calendar months (same
+    // convention as Pass 2's `month` keys), NOT toISOString(). savingsChangePct
+    // is null when last month has no savings baseline to compare against.
+    const nowM = new Date();
+    const thisMonthKey = `${nowM.getFullYear()}-${String(nowM.getMonth() + 1).padStart(2, '0')}`;
+    const lastM = new Date(nowM.getFullYear(), nowM.getMonth() - 1, 1);
+    const lastMonthKey = `${lastM.getFullYear()}-${String(lastM.getMonth() + 1).padStart(2, '0')}`;
+    const savingsThisMonth = Math.round((monthSavingsMap[thisMonthKey] ?? 0) * 100) / 100;
+    // Last month's figure is returned raw so the client can show a €-delta
+    // "vs last month" chip. A percentage change was intentionally dropped: it's
+    // unstable for a signed savings metric (sign flips + tiny denominators make
+    // e.g. a 14-cent baseline read as "-101%"). A € delta is always honest.
+    const savingsLastMonth = Math.round((monthSavingsMap[lastMonthKey] ?? 0) * 100) / 100;
 
     const storeBreakdown = Object.entries(storeMap)
         .map(([chainName, total]) => ({
@@ -372,6 +406,21 @@ export const getUserStats = async (userId: string, locale: Locale = 'lt') => {
             miniLogoUrl: chainMiniLogoMap[chainName] ?? null,
         }))
         .sort((a, b) => b.total - a.total);
+
+    // Same store breakdown, but bucketed per calendar month so the profile
+    // Stores donut can page through months. Each month's slices are sorted
+    // desc; the client derives per-store percentages from these totals.
+    const storeBreakdownByMonth: Record<string, typeof storeBreakdown> = {};
+    for (const [month, chains] of Object.entries(storeMonthMap)) {
+        storeBreakdownByMonth[month] = Object.entries(chains)
+            .map(([chainName, total]) => ({
+                chainName,
+                total: Math.round(total * 100) / 100,
+                color: getChainColor(chainName),
+                miniLogoUrl: chainMiniLogoMap[chainName] ?? null,
+            }))
+            .sort((a, b) => b.total - a.total);
+    }
 
     const TOP_CATEGORIES = 5;
     const sortedCategories = Object.entries(categoryMap)
@@ -391,6 +440,17 @@ export const getUserStats = async (userId: string, locale: Locale = 'lt') => {
         ...item,
         color: CATEGORY_COLORS[(TOP_CATEGORIES + i) % CATEGORY_COLORS.length],
     }));
+
+    // Full per-month category breakdown (NOT truncated to top-N — the client
+    // applies its own top-N/"Kitos" split so it can toggle 5↔10). Sorted desc
+    // with a stable color per position; the client derives percentages.
+    const categoryBreakdownByMonth: Record<string, Array<{ categoryName: string; total: number; color: string }>> = {};
+    for (const [month, cats] of Object.entries(categoryMonthMap)) {
+        categoryBreakdownByMonth[month] = Object.entries(cats)
+            .map(([categoryName, total]) => ({ categoryName, total: Math.round(total * 100) / 100 }))
+            .sort((a, b) => b.total - a.total)
+            .map((item, i) => ({ ...item, color: CATEGORY_COLORS[i % CATEGORY_COLORS.length] }));
+    }
 
     // Full monthly series from the earliest month with data (or 6 months ago,
     // whichever is earlier) up to the current month, zero-filled. The client
@@ -420,5 +480,9 @@ export const getUserStats = async (userId: string, locale: Locale = 'lt') => {
         if (mm > 12) { mm = 1; yy++; }
     }
 
-    return { storeBreakdown, categoryBreakdown, kitaBreakdown, monthlySpending, totalSavings };
+    return {
+        storeBreakdown, storeBreakdownByMonth, categoryBreakdown, kitaBreakdown,
+        categoryBreakdownByMonth, monthlySpending, totalSavings, savingsThisMonth,
+        savingsLastMonth,
+    };
 };
