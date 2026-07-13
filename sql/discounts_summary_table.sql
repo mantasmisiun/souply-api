@@ -20,6 +20,8 @@ CREATE TABLE IF NOT EXISTS DiscountedProductSummary (
     unit            VARCHAR(8) DEFAULT 'g',
     hasWeighable    TINYINT(1) DEFAULT 0,
     bestDiscountPct INT NOT NULL,
+    realDiscountPct INT NULL,
+    cheapestChainId INT NULL,
     canonicalUnit   VARCHAR(8),
     canonicalStep   DOUBLE,
     canonicalFamily VARCHAR(16),

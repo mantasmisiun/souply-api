@@ -1,4 +1,4 @@
-# STAGING souply-api → :3002 → souply_staging (api.souply.manofoto.dpdns.org).
+# STAGING souply-api → :3002 → souply_staging (souply-api.manofoto.dpdns.org).
 #
 # Built from the `staging` worktree on OMV. Image tag: souply-api:staging.
 # Independent of prod — staging can run ahead of main. Build context is the

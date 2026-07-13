@@ -1,5 +1,7 @@
 import pool from '../config/db.js';
-import { resolveReceiptLineStoreProduct } from '../services/receiptLineResolver.js';
+import { getUnassignedCategoryId } from '../services/receiptLineResolver.js';
+import { createProduct } from './productModel.js';
+import { createStoreProduct, findExactMatchingStoreProduct } from './storeProductModel.js';
 import { logAdminAction } from '../services/adminActionLog.js';
 
 export interface SourceReceiptInfo {
@@ -127,22 +129,17 @@ export async function applyReceiptSplit(opts: {
             [opts.bottom.price, opts.bottom.promoPrice ?? null, opts.priceId],
         );
 
-        // ── Create new (top) via matching pipeline ─────────────────────
-        const resolveResult = await resolveReceiptLineStoreProduct(
-            Number(chainId),
-            {
-                storeProductId: null,
-                name: opts.top.name,
-                brandName: null,
-                amount: opts.top.amount,
-                unit: opts.top.unit,
-                isWeighable: false,
-                imageUrl: null,
-                price: opts.top.price,
-                altMatchProductId: null,
-            },
-            conn,
-        );
+        // ── Create (or reuse) the new (top) catalog SP DIRECTLY ─────────
+        // Admin curation is a legitimate SP-creation path (unlike receipt processing, which
+        // no longer mints — see the ReceiptItem no-mint policy). Dedup on exact name+size,
+        // else create a fresh uncategorised catalog SP.
+        let topSpId = await findExactMatchingStoreProduct(Number(chainId), opts.top.name, opts.top.amount, opts.top.unit, conn);
+        const topWasCreated = !topSpId;
+        if (!topSpId) {
+            const catId = await getUnassignedCategoryId(conn);
+            const prodId = await createProduct(catId, null, opts.top.name, conn);
+            topSpId = await createStoreProduct(prodId, Number(chainId), opts.top.name, null, false, opts.top.amount, opts.top.unit, null, conn);
+        }
 
         await conn.query(
             `INSERT INTO Price
@@ -150,14 +147,14 @@ export async function applyReceiptSplit(opts: {
              VALUES (?, ?, ?, ?, ?, 0, ?, 0)
              ON DUPLICATE KEY UPDATE price = VALUES(price), promoPrice = VALUES(promoPrice)`,
             [
-                resolveResult.storeProductId, storeId, receiptId,
+                topSpId, storeId, receiptId,
                 opts.top.price, opts.top.promoPrice ?? null, date,
             ],
         );
 
         const [[newSp]]: any = await conn.query(
             `SELECT productId FROM StoreProduct WHERE id = ? LIMIT 1`,
-            [resolveResult.storeProductId],
+            [topSpId],
         );
         const newProductId = Number(newSp.productId);
 
@@ -176,7 +173,7 @@ export async function applyReceiptSplit(opts: {
             );
             if (idx !== -1) {
                 const orig = products[idx];
-                const topLine    = { ...orig, name: opts.top.name,    price: opts.top.price,    promoPrice: opts.top.promoPrice    ?? null, amount: opts.top.amount    ?? null, unit: opts.top.unit    ?? null, storeProductId: resolveResult.storeProductId };
+                const topLine    = { ...orig, name: opts.top.name,    price: opts.top.price,    promoPrice: opts.top.promoPrice    ?? null, amount: opts.top.amount    ?? null, unit: opts.top.unit    ?? null, storeProductId: topSpId };
                 const bottomLine = { ...orig, name: opts.bottom.name, price: opts.bottom.price, promoPrice: opts.bottom.promoPrice ?? null, amount: opts.bottom.amount ?? null, unit: opts.bottom.unit ?? null, storeProductId: Number(storeProductId) };
                 products.splice(idx, 1, topLine, bottomLine);
                 await conn.query(
@@ -196,7 +193,7 @@ export async function applyReceiptSplit(opts: {
         });
 
         await conn.commit();
-        return { newProductId, newIsNew: resolveResult.source === 'created' };
+        return { newProductId, newIsNew: topWasCreated };
     } catch (e) {
         await conn.rollback();
         throw e;

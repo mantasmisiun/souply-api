@@ -9,9 +9,19 @@ import {
     createListShareToken,
     getShareTokenStatus,
     claimShareToken,
+    linkReceiptToShoppingList,
 } from '../controllers/shoppingListController.js';
+import { requireUser, requireSelfUserParam } from '../middleware/sessionAuth.js';
+import { requireListMember, requireListOwner } from '../middleware/resourceAuth.js';
 
 const router = Router();
+
+// Shopping lists are COLLABORATIVE (ShoppingListMember + share tokens): most routes accept
+// any MEMBER (requireListMember), only the destructive whole-list DELETE requires the strict
+// CREATOR (requireListOwner). The share-token status/claim routes are authorized by POSSESSION
+// OF THE UNGUESSABLE TOKEN (the claimer is a stranger to the list) — they take requireUser to
+// attribute the claim but MUST NOT get a member/owner check or claiming a shared list breaks.
+const member = requireListMember('id');
 
 /**
  * @swagger
@@ -41,7 +51,7 @@ const router = Router();
  *         description: Shopping list created successfully
  */
 // POST /api/shopping-lists - Create a new shopping list
-router.post('/shopping-lists', addShoppingList);
+router.post('/shopping-lists', requireUser, addShoppingList);
 
 /**
  * @swagger
@@ -62,7 +72,7 @@ router.post('/shopping-lists', addShoppingList);
  *         description: A list of shopping lists for the user
  */
 // GET /api/shopping-lists/user/:userId - Get all shopping lists for a user
-router.get('/shopping-lists/user/:userId', fetchShoppingListsByUserId);
+router.get('/shopping-lists/user/:userId', requireUser, requireSelfUserParam, fetchShoppingListsByUserId);
 
 /**
  * @swagger
@@ -82,7 +92,7 @@ router.get('/shopping-lists/user/:userId', fetchShoppingListsByUserId);
  *         description: A single shopping list
  */
 // GET /api/shopping-lists/:id - Get a single shopping list by ID
-router.get('/shopping-lists/:id', fetchShoppingListById);
+router.get('/shopping-lists/:id', requireUser, member, fetchShoppingListById);
 
 /**
  * @swagger
@@ -102,17 +112,21 @@ router.get('/shopping-lists/:id', fetchShoppingListById);
  *         description: Shopping list deleted successfully
  */
 // DELETE /api/shopping-lists/:id - Delete a shopping list by ID
-router.delete('/shopping-lists/:id', removeShoppingList);
+router.delete('/shopping-lists/:id', requireUser, requireListOwner('id'), removeShoppingList);
 
-router.patch('/shopping-lists/:id/status', changeShoppingListStatus);
+router.patch('/shopping-lists/:id/status', requireUser, member, changeShoppingListStatus);
 
-router.post('/shopping-lists/:id/duplicate', duplicateList);
+router.post('/shopping-lists/:id/duplicate', requireUser, member, duplicateList);
+
+// Link an uploaded/scanned receipt to a completed list row (post-completion
+// receipt upload flow + duplicate silent-link).
+router.post('/shopping-lists/:id/link-receipt', requireUser, member, linkReceiptToShoppingList);
 
 // Sharing: creator mints a token, scanner claims it. The /status route
 // is polled by the creator-side QR modal (~1.5s cadence) to detect a
 // scan without needing a persistent socket.
-router.post('/shopping-lists/:id/share', createListShareToken);
-router.get('/shopping-lists/share/:token/status', getShareTokenStatus);
-router.post('/shopping-lists/share/:token/claim', claimShareToken);
+router.post('/shopping-lists/:id/share', requireUser, member, createListShareToken);
+router.get('/shopping-lists/share/:token/status', requireUser, getShareTokenStatus);
+router.post('/shopping-lists/share/:token/claim', requireUser, claimShareToken);
 
 export default router;

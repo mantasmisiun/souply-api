@@ -45,6 +45,14 @@ jest.unstable_mockModule('../src/models/storeProductMatchModel.js', () => ({
     // orderPair is a pure sort — provide the real behaviour inline.
     orderPair: (a: number, b: number) => ({ spIdA: Math.min(a, b), spIdB: Math.max(a, b) }),
     upsertMatchVote: mockUpsertMatchVote,
+    // PLAIN function (not jest.fn — resetAllMocks would wipe the implementation):
+    // mirrors the real helper's math, delegating to the mocked applyAggregateDelta so
+    // existing per-test delta assertions keep observing the net effect.
+    applyVoteTransitionDeltas: async (a: number, b: number, prev: any, prevAgg: any, newV: any, conn?: any) => {
+        const counted = prev !== null && !!prevAgg;
+        if (counted && prev !== newV) await mockApplyAggregateDelta(a, b, prev, -1, conn);
+        if (newV !== null && !(counted && prev === newV)) await mockApplyAggregateDelta(a, b, newV, +1, conn);
+    },
     deleteMatchVote: jest.fn(),
 }));
 
@@ -123,7 +131,7 @@ beforeEach(() => {
     mockCountRecentVotes.mockResolvedValue(0);
     // getCandidatePair: orphan=10, candidate=20 → after orderPair: spIdA=10, spIdB=20
     mockGetCandidatePair.mockResolvedValue({ orphanSpId: 10, candidateSpId: 20 });
-    mockUpsertMatchVote.mockResolvedValue({ previousVote: null });
+    mockUpsertMatchVote.mockResolvedValue({ previousVote: null, previousAggregated: false });
     mockApplyAggregateDelta.mockResolvedValue(undefined);
     mockGetProductIdForStoreProduct.mockResolvedValue(100);
     mockApplyBaseProductLinkForVote.mockResolvedValue(undefined);
@@ -176,7 +184,7 @@ describe('castOrphanSwipeVote — pre-flight guards', () => {
 
 describe('castOrphanSwipeVote — aggregate delta', () => {
     it('applies +1 delta for the new vote when there was no previous vote', async () => {
-        mockUpsertMatchVote.mockResolvedValue({ previousVote: null });
+        mockUpsertMatchVote.mockResolvedValue({ previousVote: null, previousAggregated: false });
 
         await castOrphanSwipeVote({
             userId: 'u1', candidateId: 1, vote: 'identical', dwellMs: 1000,
@@ -187,7 +195,7 @@ describe('castOrphanSwipeVote — aggregate delta', () => {
     });
 
     it('applies -1 for old vote then +1 for new vote when changing the vote', async () => {
-        mockUpsertMatchVote.mockResolvedValue({ previousVote: 'identical' });
+        mockUpsertMatchVote.mockResolvedValue({ previousVote: 'identical', previousAggregated: true });
 
         await castOrphanSwipeVote({
             userId: 'u1', candidateId: 1, vote: 'similar', dwellMs: 1000,
@@ -199,7 +207,7 @@ describe('castOrphanSwipeVote — aggregate delta', () => {
     });
 
     it('applies no aggregate deltas when re-casting the same vote', async () => {
-        mockUpsertMatchVote.mockResolvedValue({ previousVote: 'similar' });
+        mockUpsertMatchVote.mockResolvedValue({ previousVote: 'similar', previousAggregated: true });
 
         await castOrphanSwipeVote({
             userId: 'u1', candidateId: 1, vote: 'similar', dwellMs: 1000,
@@ -231,7 +239,7 @@ describe('castOrphanSwipeVote — success path', () => {
         });
 
         expect(mockUpsertMatchVote).toHaveBeenCalledWith(
-            'u1', 10, 20, 'identical', 1000, null, mockConn
+            'u1', 10, 20, 'identical', 1000, null, true, mockConn
         );
     });
 

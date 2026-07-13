@@ -14,7 +14,7 @@ const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
  *   - SENTRY_ENVIRONMENT === 'staging' → 'staging'    (.env.staging already sets it)
  *   - otherwise                        → 'production' (Oracle prod)
  */
-function resolveEnv(): 'dev' | 'staging' | 'production' {
+export function resolveEnv(): 'dev' | 'staging' | 'production' {
     const explicit = process.env.APP_ENV?.toLowerCase();
     if (explicit === 'dev' || explicit === 'staging' || explicit === 'production') return explicit;
     if (process.env.NODE_ENV !== 'production') return 'dev';

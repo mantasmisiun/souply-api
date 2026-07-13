@@ -24,8 +24,13 @@ export function orderPair(a: number, b: number): { spIdA: number; spIdB: number 
 /**
  * Upsert a user's vote for a pair. Unique index on (userId, spIdA, spIdB)
  * means a repeat vote from the same user overwrites rather than stuffing
- * the ledger. Returns the previous vote value (if any) so the caller can
- * adjust the aggregate counts by the net delta instead of recomputing.
+ * the ledger. Returns the previous vote value AND whether that previous vote
+ * was actually counted into the StoreProductMatch aggregate (`aggregated`
+ * provenance) — burst votes write a row but skip the aggregate, so callers
+ * must adjust deltas by what was REALLY counted, not by what the row said.
+ *
+ * `aggregated` records whether THIS write will be counted (the caller applies
+ * the matching delta via applyVoteTransitionDeltas).
  */
 export const upsertMatchVote = async (
     userId: string,
@@ -34,36 +39,67 @@ export const upsertMatchVote = async (
     vote: MatchVote,
     dwellMs: number | null,
     receiptId: number | null,
+    aggregated: boolean,
     conn?: Connection
-): Promise<{ previousVote: MatchVote | null }> => {
+): Promise<{ previousVote: MatchVote | null; previousAggregated: boolean }> => {
     const db = conn || pool;
     if (spIdA >= spIdB) {
         throw new Error('upsertMatchVote requires spIdA < spIdB — use orderPair() first');
     }
 
     const [existing]: any = await db.query(
-        `SELECT vote FROM StoreProductMatchVote
+        `SELECT vote, aggregated FROM StoreProductMatchVote
           WHERE userId = ? AND spIdA = ? AND spIdB = ? LIMIT 1`,
         [userId, spIdA, spIdB]
     );
     const previousVote: MatchVote | null = existing[0]?.vote ?? null;
+    const previousAggregated: boolean = !!existing[0]?.aggregated;
 
     if (previousVote === null) {
         await db.query(
             `INSERT INTO StoreProductMatchVote
-               (userId, spIdA, spIdB, vote, dwellMs, receiptId)
-             VALUES (?, ?, ?, ?, ?, ?)`,
-            [userId, spIdA, spIdB, vote, dwellMs, receiptId]
+               (userId, spIdA, spIdB, vote, dwellMs, receiptId, aggregated)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            [userId, spIdA, spIdB, vote, dwellMs, receiptId, aggregated ? 1 : 0]
         );
-    } else if (previousVote !== vote) {
+    } else if (previousVote !== vote || previousAggregated !== aggregated) {
         await db.query(
             `UPDATE StoreProductMatchVote
-                SET vote = ?, dwellMs = ?, receiptId = ?
+                SET vote = ?, dwellMs = ?, receiptId = ?, aggregated = ?
               WHERE userId = ? AND spIdA = ? AND spIdB = ?`,
-            [vote, dwellMs, receiptId, userId, spIdA, spIdB]
+            [vote, dwellMs, receiptId, aggregated ? 1 : 0, userId, spIdA, spIdB]
         );
     }
-    return { previousVote };
+    return { previousVote, previousAggregated };
+};
+
+/**
+ * Provenance-aware aggregate transition — the ONE place the "what was counted vs
+ * what is now counted" math lives, shared by every vote-writing service.
+ *
+ *   previousVote/previousAggregated — from upsertMatchVote's return.
+ *   newVote — the vote now on the row, or NULL when it is NOT being counted
+ *             (burst write, or a deletion).
+ *
+ * Decrements the old contribution only if it was actually counted; increments the
+ * new one only when it isn't already counted at the same value. Handles every
+ * burst↔non-burst re-vote combination without double-counting or going negative.
+ */
+export const applyVoteTransitionDeltas = async (
+    spIdA: number,
+    spIdB: number,
+    previousVote: MatchVote | null,
+    previousAggregated: boolean,
+    newVote: MatchVote | null,
+    conn?: Connection
+): Promise<void> => {
+    const prevCounted = previousVote !== null && previousAggregated;
+    if (prevCounted && previousVote !== newVote) {
+        await applyAggregateDelta(spIdA, spIdB, previousVote!, -1, conn);
+    }
+    if (newVote !== null && !(prevCounted && previousVote === newVote)) {
+        await applyAggregateDelta(spIdA, spIdB, newVote, +1, conn);
+    }
 };
 
 /**
@@ -89,11 +125,13 @@ export const applyAggregateDelta = async (
         vote === 'similar'   ? 'similarVotes'   :
                                'differentVotes';
 
-    // INSERT ... ON DUPLICATE KEY UPDATE keeps this single-round-trip.
+    // INSERT ... ON DUPLICATE KEY UPDATE keeps this single-round-trip. GREATEST(0, …)
+    // clamps both paths: a decrement can never take a count negative (residual
+    // pre-provenance histories) and a fresh row can never be created at -1.
     await db.query(
         `INSERT INTO StoreProductMatch (spIdA, spIdB, ${column})
-             VALUES (?, ?, ?)
-         ON DUPLICATE KEY UPDATE ${column} = ${column} + VALUES(${column})`,
+             VALUES (?, ?, GREATEST(0, ?))
+         ON DUPLICATE KEY UPDATE ${column} = GREATEST(0, ${column} + VALUES(${column}))`,
         [spIdA, spIdB, delta]
     );
 };
@@ -114,33 +152,35 @@ export const getMatchAggregate = async (
 };
 
 /**
- * Delete a user's vote and return what it was (for aggregate reversal).
+ * Delete a user's vote and return what it was PLUS whether it was actually counted
+ * into the aggregate — the caller reverses the aggregate/link contributions only
+ * when `deletedAggregated` is true (a burst row was never counted).
  */
 export const deleteMatchVote = async (
     userId: string,
     spIdA: number,
     spIdB: number,
     conn?: Connection
-): Promise<{ deletedVote: MatchVote | null }> => {
+): Promise<{ deletedVote: MatchVote | null; deletedAggregated: boolean }> => {
     const db = conn || pool;
     if (spIdA >= spIdB) {
         throw new Error('deleteMatchVote requires spIdA < spIdB');
     }
 
     const [existing]: any = await db.query(
-        `SELECT vote FROM StoreProductMatchVote
+        `SELECT vote, aggregated FROM StoreProductMatchVote
           WHERE userId = ? AND spIdA = ? AND spIdB = ? LIMIT 1`,
         [userId, spIdA, spIdB]
     );
     if (existing.length === 0) {
-        return { deletedVote: null };
+        return { deletedVote: null, deletedAggregated: false };
     }
     await db.query(
         `DELETE FROM StoreProductMatchVote
            WHERE userId = ? AND spIdA = ? AND spIdB = ?`,
         [userId, spIdA, spIdB]
     );
-    return { deletedVote: existing[0].vote as MatchVote };
+    return { deletedVote: existing[0].vote as MatchVote, deletedAggregated: !!existing[0].aggregated };
 };
 
 export interface VoteHistoryRow {

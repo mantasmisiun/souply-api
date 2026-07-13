@@ -1,7 +1,12 @@
 import { Router } from 'express';
 import { addBasketItem, fetchBasketItemsByBasketId, updateBasketItem, removeBasketItem, convertBasketMode } from '../controllers/basketItemController.js';
+import { requireUser } from '../middleware/sessionAuth.js';
+import { requireBasketOwner, requireBasketOwnerFromBody, requireBasketItemOwner } from '../middleware/resourceAuth.js';
 
 const router = Router();
+
+// Basket items belong to a basket → its owner. Item CRUD binds to the parent basket's
+// owner (POST reads basketId from the body; :id item routes resolve item→basket→userId).
 
 /**
  * @swagger
@@ -34,7 +39,7 @@ const router = Router();
  *         description: Basket item added successfully
  */
 // POST /api/basket-items - Add an item to a basket
-router.post('/basket-items', addBasketItem);
+router.post('/basket-items', requireUser, requireBasketOwnerFromBody('basketId'), addBasketItem);
 
 /**
  * @swagger
@@ -54,11 +59,11 @@ router.post('/basket-items', addBasketItem);
  *         description: A list of items in the basket
  */
 // GET /api/baskets/:basketId/items - Get all items in a basket
-router.get('/baskets/:basketId/items', fetchBasketItemsByBasketId);
+router.get('/baskets/:basketId/items', requireUser, requireBasketOwner('basketId'), fetchBasketItemsByBasketId);
 
 // POST /api/baskets/:basketId/convert-mode - flip all items in a basket
 // between 'sku' and 'base'. Sums quantities on sku→base cluster collisions.
-router.post('/baskets/:basketId/convert-mode', convertBasketMode);
+router.post('/baskets/:basketId/convert-mode', requireUser, requireBasketOwner('basketId'), convertBasketMode);
 
 /**
  * @swagger
@@ -90,7 +95,7 @@ router.post('/baskets/:basketId/convert-mode', convertBasketMode);
  *         description: Basket item updated successfully
  */
 // PUT /api/basket-items/:id - Update the quantity of a basket item
-router.put('/basket-items/:id', updateBasketItem);
+router.put('/basket-items/:id', requireUser, requireBasketItemOwner('id'), updateBasketItem);
 
 /**
  * @swagger
@@ -110,6 +115,6 @@ router.put('/basket-items/:id', updateBasketItem);
  *         description: Basket item removed successfully
  */
 // DELETE /api/basket-items/:id - Remove an item from a basket
-router.delete('/basket-items/:id', removeBasketItem);
+router.delete('/basket-items/:id', requireUser, requireBasketItemOwner('id'), removeBasketItem);
 
 export default router;

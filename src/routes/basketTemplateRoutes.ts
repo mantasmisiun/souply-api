@@ -19,12 +19,18 @@ import {
     duplicateTemplate,
 } from '../controllers/basketTemplateController.js';
 import { attachVerifiedUser } from '../middleware/requireVerifiedUser.js';
+import { requireUser } from '../middleware/sessionAuth.js';
+
+// requireUser now provides identity (req.authUserId) from the token/cookie (or the non-prod
+// dev-header shim) — callerId() reads that instead of the spoofable x-user-id header, closing
+// the template IDOR. attachVerifiedUser is kept for the publish/visibility flag. /t/:slug stays
+// PUBLIC (shared-template view). The in-controller loadOwnedTemplate owner checks are now sound.
 
 const router = Router();
 
 // Build the auto "default" template from the caller's receipts ("Build it").
 // Registered before the `:id` routes so "default" isn't swallowed as an id.
-router.post('/basket-templates/default/build', attachVerifiedUser, buildDefault);
+router.post('/basket-templates/default/build', requireUser, attachVerifiedUser, buildDefault);
 
 /**
  * @swagger
@@ -40,7 +46,7 @@ router.post('/basket-templates/default/build', attachVerifiedUser, buildDefault)
  *     responses:
  *       200: { description: List of templates with item counts joined in }
  */
-router.get('/basket-templates/user/:userId', attachVerifiedUser, listTemplates);
+router.get('/basket-templates/user/:userId', requireUser, attachVerifiedUser, listTemplates);
 
 /**
  * @swagger
@@ -54,7 +60,7 @@ router.get('/basket-templates/user/:userId', attachVerifiedUser, listTemplates);
  *       `items[]` lets a single request seed the template with products,
  *       used by the "save current basket as template" flow.
  */
-router.post('/basket-templates', attachVerifiedUser, addTemplate);
+router.post('/basket-templates', requireUser, attachVerifiedUser, addTemplate);
 
 /**
  * @swagger
@@ -65,7 +71,7 @@ router.post('/basket-templates', attachVerifiedUser, addTemplate);
  *     description: |
  *       Source basket stays untouched. Body must include a `name`.
  */
-router.post('/basket-templates/from-basket/:basketId', attachVerifiedUser, addTemplateFromBasket);
+router.post('/basket-templates/from-basket/:basketId', requireUser, attachVerifiedUser, addTemplateFromBasket);
 
 /**
  * @swagger
@@ -74,7 +80,7 @@ router.post('/basket-templates/from-basket/:basketId', attachVerifiedUser, addTe
  *     summary: Get a single template with its items inlined
  *     tags: [BasketTemplate]
  */
-router.get('/basket-templates/:id', attachVerifiedUser, fetchTemplate);
+router.get('/basket-templates/:id', requireUser, attachVerifiedUser, fetchTemplate);
 
 /**
  * @swagger
@@ -83,7 +89,7 @@ router.get('/basket-templates/:id', attachVerifiedUser, fetchTemplate);
  *     summary: Update a template's metadata (name and/or autoUpdate)
  *     tags: [BasketTemplate]
  */
-router.patch('/basket-templates/:id', attachVerifiedUser, patchTemplate);
+router.patch('/basket-templates/:id', requireUser, attachVerifiedUser, patchTemplate);
 
 /**
  * @swagger
@@ -92,7 +98,7 @@ router.patch('/basket-templates/:id', attachVerifiedUser, patchTemplate);
  *     summary: Delete a template + cascade its items
  *     tags: [BasketTemplate]
  */
-router.delete('/basket-templates/:id', attachVerifiedUser, removeTemplate);
+router.delete('/basket-templates/:id', requireUser, attachVerifiedUser, removeTemplate);
 
 /**
  * @swagger
@@ -101,7 +107,7 @@ router.delete('/basket-templates/:id', attachVerifiedUser, removeTemplate);
  *     summary: List items in a template
  *     tags: [BasketTemplate]
  */
-router.get('/basket-templates/:id/items', attachVerifiedUser, fetchTemplateItems);
+router.get('/basket-templates/:id/items', requireUser, attachVerifiedUser, fetchTemplateItems);
 
 /**
  * @swagger
@@ -110,7 +116,7 @@ router.get('/basket-templates/:id/items', attachVerifiedUser, fetchTemplateItems
  *     summary: Add an item to a template
  *     tags: [BasketTemplate]
  */
-router.post('/basket-templates/:id/items', attachVerifiedUser, addItem);
+router.post('/basket-templates/:id/items', requireUser, attachVerifiedUser, addItem);
 
 /**
  * @swagger
@@ -119,7 +125,7 @@ router.post('/basket-templates/:id/items', attachVerifiedUser, addItem);
  *     summary: Update an item's quantity and/or sort order
  *     tags: [BasketTemplate]
  */
-router.patch('/basket-templates/:id/items/:itemId', attachVerifiedUser, patchItem);
+router.patch('/basket-templates/:id/items/:itemId', requireUser, attachVerifiedUser, patchItem);
 
 /**
  * @swagger
@@ -128,7 +134,7 @@ router.patch('/basket-templates/:id/items/:itemId', attachVerifiedUser, patchIte
  *     summary: Remove a template item
  *     tags: [BasketTemplate]
  */
-router.delete('/basket-templates/:id/items/:itemId', attachVerifiedUser, removeItem);
+router.delete('/basket-templates/:id/items/:itemId', requireUser, attachVerifiedUser, removeItem);
 
 /**
  * @swagger
@@ -143,7 +149,7 @@ router.delete('/basket-templates/:id/items/:itemId', attachVerifiedUser, removeI
  *       was created and the template's items were copied into it.
  *       Abandoned siblings are silently deleted in the same transaction.
  */
-router.post('/basket-templates/:id/instantiate', attachVerifiedUser, instantiateTemplate);
+router.post('/basket-templates/:id/instantiate', requireUser, attachVerifiedUser, instantiateTemplate);
 
 /**
  * @swagger
@@ -152,7 +158,7 @@ router.post('/basket-templates/:id/instantiate', attachVerifiedUser, instantiate
  *     summary: Copy a template into a new editable (isDefault=0) template
  *     tags: [BasketTemplate]
  */
-router.post('/basket-templates/:id/duplicate', attachVerifiedUser, duplicateTemplate);
+router.post('/basket-templates/:id/duplicate', requireUser, attachVerifiedUser, duplicateTemplate);
 
 /**
  * @swagger
@@ -161,7 +167,7 @@ router.post('/basket-templates/:id/duplicate', attachVerifiedUser, duplicateTemp
  *     summary: Acknowledge the auto-update nudge (clears lastAutoUpdateDelta)
  *     tags: [BasketTemplate]
  */
-router.post('/basket-templates/:id/ack-auto-update', ackAutoUpdate);
+router.post('/basket-templates/:id/ack-auto-update', requireUser, ackAutoUpdate);
 
 /**
  * @swagger
@@ -173,8 +179,8 @@ router.post('/basket-templates/:id/ack-auto-update', ackAutoUpdate);
  *     summary: Revoke share link, downgrade visibility to 'private'
  *     tags: [BasketTemplate]
  */
-router.post('/basket-templates/:id/share', attachVerifiedUser, generateShareLink);
-router.delete('/basket-templates/:id/share', attachVerifiedUser, revokeShareLink);
+router.post('/basket-templates/:id/share', requireUser, attachVerifiedUser, generateShareLink);
+router.delete('/basket-templates/:id/share', requireUser, attachVerifiedUser, revokeShareLink);
 
 /**
  * @swagger

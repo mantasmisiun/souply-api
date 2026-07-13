@@ -74,6 +74,20 @@ export function computeSavingsFromPrices(
 // ---------------------------------------------------------------------------
 
 /**
+ * Receipt-level COMBO/SET-deal discount (e.g. IKI's bare "RINKINYS -1,90") captured by the
+ * parser into parsedData.footer.comboDiscount — a POSITIVE magnitude of money off the paid
+ * total that belongs to NO single product (which products form the bundle is unknown, so it
+ * is never distributed onto lines and never touches reference prices). Consumers ADD it to
+ * savings and SUBTRACT it from the visited-store basket total. Defensive: non-finite,
+ * non-positive, or absurdly large (> cap) values collapse toward 0/cap.
+ */
+export const comboDiscountOf = (parsedData: any, cap = Infinity): number => {
+    const v = Number(parsedData?.footer?.comboDiscount);
+    if (!Number.isFinite(v) || v <= 0) return 0;
+    return Math.round(Math.min(v, cap) * 100) / 100;
+};
+
+/**
  * Fetches the average latest market price for each matched receipt item,
  * then delegates to the pure computeSavingsFromPrices function.
  * Uses a batch of 3 queries regardless of item count.
@@ -137,7 +151,7 @@ export const computeReceiptSavings = async (
 
 export const getUserStats = async (userId: string, locale: Locale = 'lt') => {
     const [receipts]: any = await pool.query(
-        `SELECT r.receiptDate, r.parsedData, sc.name AS chainName, sc.miniLogoUrl AS chainMiniLogoUrl
+        `SELECT r.id, r.receiptDate, r.parsedData, sc.name AS chainName, sc.miniLogoUrl AS chainMiniLogoUrl
            FROM Receipt r
            LEFT JOIN Store s ON s.id = r.storeId
            LEFT JOIN StoreChain sc ON sc.id = s.chainId
@@ -149,24 +163,60 @@ export const getUserStats = async (userId: string, locale: Locale = 'lt') => {
     const chainMiniLogoMap: Record<string, string | null> = {};
     const categoryMap: Record<string, number> = {};
     const monthMap: Record<string, number> = {};
+    // month (`YYYY-MM`) → chainName → spend, for the per-month store breakdown
+    // (the profile Stores donut is scoped to a selectable month).
+    const storeMonthMap: Record<string, Record<string, number>> = {};
+    // month (`YYYY-MM`) → L2 categoryName → spend, for the per-month category
+    // breakdown (the profile Categories donut is scoped to a selectable month).
+    const categoryMonthMap: Record<string, Record<string, number>> = {};
     // spId → { productId, [{price, qty}] } — filled during the receipt loop
     // so both category aggregation and savings computation share one SP query.
     const spCategoryMap = new Map<number, string>();
     const spToProductId = new Map<number, number>();
-    // spId → [{price, qty}] collected from all receipt items with a matched SP.
-    const spPriceList = new Map<number, Array<{ price: number; qty: number }>>();
+    // spId → [{price, qty, month}] collected from all receipt items with a
+    // matched SP. `month` (local `YYYY-MM`, null when the receipt has no date)
+    // lets savings be bucketed per calendar month for the this-month figure.
+    const spPriceList = new Map<number, Array<{ price: number; qty: number; month: string | null }>>();
     // productId → the user's personal orphan rescue (Nepriskirta → real category
     // via their own "same" votes). Empty when there are no matched SPs.
     let rescueByProduct = new Map<number, { categoryId: number | null; leafName: string | null; l2Name: string | null }>();
 
+    // Per-receipt item lists, resolved ONCE for both passes below.
+    let perReceiptItems: Array<{ receipt: any; items: any[] }> = [];
+
     if (receipts.length > 0) {
-        // Pass 1: collect all unique storeProductIds for the batch SP lookup.
-        const allSpIds: number[] = [];
-        for (const receipt of receipts) {
+        // ReceiptItem rows are the item source since the ReceiptItem cutover — the
+        // stored blob keeps products: [] so reading parsedData here would silently
+        // drop every post-cutover receipt from stats/savings. One batch query;
+        // matchedSpId is aliased to the blob's storeProductId shape so the
+        // aggregation below is source-agnostic. The blob products/items remain
+        // ONLY as the legacy fallback for receipts that predate the migration
+        // (no ReceiptItem rows, e.g. an un-backfilled environment).
+        const [itemRows]: any = await pool.query(
+            `SELECT receiptId, matchedSpId AS storeProductId, price, promoPrice, quantity
+               FROM ReceiptItem
+              WHERE receiptId IN (?)`,
+            [receipts.map((r: any) => Number(r.id))],
+        );
+        const itemsByReceipt = new Map<number, any[]>();
+        for (const row of itemRows) {
+            const list = itemsByReceipt.get(Number(row.receiptId)) ?? [];
+            list.push(row);
+            itemsByReceipt.set(Number(row.receiptId), list);
+        }
+        perReceiptItems = receipts.map((receipt: any) => {
+            const rows = itemsByReceipt.get(Number(receipt.id));
+            if (rows && rows.length > 0) return { receipt, items: rows };
             const parsed = typeof receipt.parsedData === 'string'
                 ? JSON.parse(receipt.parsedData)
                 : receipt.parsedData;
-            for (const item of (parsed?.products ?? parsed?.items ?? [])) {
+            return { receipt, items: parsed?.products ?? parsed?.items ?? [] };
+        });
+
+        // Pass 1: collect all unique storeProductIds for the batch SP lookup.
+        const allSpIds: number[] = [];
+        for (const { items } of perReceiptItems) {
+            for (const item of items) {
                 if (item.storeProductId) allSpIds.push(Number(item.storeProductId));
             }
         }
@@ -224,11 +274,7 @@ export const getUserStats = async (userId: string, locale: Locale = 'lt') => {
         }
 
         // Pass 2: aggregate spending + collect (spId, price, qty) for savings.
-        for (const receipt of receipts) {
-            const parsed = typeof receipt.parsedData === 'string'
-                ? JSON.parse(receipt.parsedData)
-                : receipt.parsedData;
-            const items: any[] = parsed?.products ?? parsed?.items ?? [];
+        for (const { receipt, items } of perReceiptItems) {
             const chainName: string = receipt.chainName ?? 'Kita';
             if (!(chainName in chainMiniLogoMap)) {
                 chainMiniLogoMap[chainName] = receipt.chainMiniLogoUrl ?? null;
@@ -260,14 +306,20 @@ export const getUserStats = async (userId: string, locale: Locale = 'lt') => {
                 }
                 if (catName) {
                     categoryMap[catName] = (categoryMap[catName] ?? 0) + itemTotal;
+                    if (month) {
+                        const cm = (categoryMonthMap[month] ??= {});
+                        cm[catName] = (cm[catName] ?? 0) + itemTotal;
+                    }
                 }
                 if (month) {
                     monthMap[month] = (monthMap[month] ?? 0) + itemTotal;
+                    const sm = (storeMonthMap[month] ??= {});
+                    sm[chainName] = (sm[chainName] ?? 0) + itemTotal;
                 }
                 // Accumulate for savings — only matched SPs with a known productId.
                 if (spId && unitPrice > 0 && spToProductId.has(spId)) {
                     const list = spPriceList.get(spId) ?? [];
-                    list.push({ price: unitPrice, qty });
+                    list.push({ price: unitPrice, qty, month });
                     spPriceList.set(spId, list);
                 }
             }
@@ -275,12 +327,17 @@ export const getUserStats = async (userId: string, locale: Locale = 'lt') => {
     }
 
     // Dynamic savings: compare each receipt item's price against the live
-    // cross-chain market average. Computed from parsedData so historical
-    // receipts (savedAmount defaulted to 0) are correctly included.
+    // cross-chain market average. Computed from the ReceiptItem rows (blob
+    // fallback for pre-migration receipts) so historical receipts
+    // (savedAmount defaulted to 0) are correctly included.
     // Includes both real receipt prices (isFallback=0) AND scraped catalog
     // prices (isFallback=1, receiptId IS NULL). Excludes within-chain
     // propagated fallbacks (isFallback=1, receiptId IS NOT NULL).
     let totalSavings = 0;
+    // Savings bucketed by receipt month (`YYYY-MM`) so the profile card can
+    // show the current-month figure and its change vs last month. Same
+    // avg-vs-paid formula as the all-time total — only the grouping differs.
+    const monthSavingsMap: Record<string, number> = {};
     if (spPriceList.size > 0) {
         // spPriceList only contains spIds that are in spToProductId (guarded above).
         const productIds = [...new Set(
@@ -317,13 +374,29 @@ export const getUserStats = async (userId: string, locale: Locale = 'lt') => {
                 if (!productId) continue;
                 const avg = productAvgPrice.get(productId);
                 if (!avg || avg <= 0) continue;
-                for (const { price, qty } of purchases) {
-                    totalSavings += (avg - price) * qty;
+                for (const { price, qty, month } of purchases) {
+                    const saved = (avg - price) * qty;
+                    totalSavings += saved;
+                    if (month) monthSavingsMap[month] = (monthSavingsMap[month] ?? 0) + saved;
                 }
             }
         }
     }
     totalSavings = Math.round(totalSavings * 100) / 100;
+
+    // This-month savings + change vs last month. Local calendar months (same
+    // convention as Pass 2's `month` keys), NOT toISOString(). savingsChangePct
+    // is null when last month has no savings baseline to compare against.
+    const nowM = new Date();
+    const thisMonthKey = `${nowM.getFullYear()}-${String(nowM.getMonth() + 1).padStart(2, '0')}`;
+    const lastM = new Date(nowM.getFullYear(), nowM.getMonth() - 1, 1);
+    const lastMonthKey = `${lastM.getFullYear()}-${String(lastM.getMonth() + 1).padStart(2, '0')}`;
+    const savingsThisMonth = Math.round((monthSavingsMap[thisMonthKey] ?? 0) * 100) / 100;
+    // Last month's figure is returned raw so the client can show a €-delta
+    // "vs last month" chip. A percentage change was intentionally dropped: it's
+    // unstable for a signed savings metric (sign flips + tiny denominators make
+    // e.g. a 14-cent baseline read as "-101%"). A € delta is always honest.
+    const savingsLastMonth = Math.round((monthSavingsMap[lastMonthKey] ?? 0) * 100) / 100;
 
     const storeBreakdown = Object.entries(storeMap)
         .map(([chainName, total]) => ({
@@ -333,6 +406,21 @@ export const getUserStats = async (userId: string, locale: Locale = 'lt') => {
             miniLogoUrl: chainMiniLogoMap[chainName] ?? null,
         }))
         .sort((a, b) => b.total - a.total);
+
+    // Same store breakdown, but bucketed per calendar month so the profile
+    // Stores donut can page through months. Each month's slices are sorted
+    // desc; the client derives per-store percentages from these totals.
+    const storeBreakdownByMonth: Record<string, typeof storeBreakdown> = {};
+    for (const [month, chains] of Object.entries(storeMonthMap)) {
+        storeBreakdownByMonth[month] = Object.entries(chains)
+            .map(([chainName, total]) => ({
+                chainName,
+                total: Math.round(total * 100) / 100,
+                color: getChainColor(chainName),
+                miniLogoUrl: chainMiniLogoMap[chainName] ?? null,
+            }))
+            .sort((a, b) => b.total - a.total);
+    }
 
     const TOP_CATEGORIES = 5;
     const sortedCategories = Object.entries(categoryMap)
@@ -352,6 +440,17 @@ export const getUserStats = async (userId: string, locale: Locale = 'lt') => {
         ...item,
         color: CATEGORY_COLORS[(TOP_CATEGORIES + i) % CATEGORY_COLORS.length],
     }));
+
+    // Full per-month category breakdown (NOT truncated to top-N — the client
+    // applies its own top-N/"Kitos" split so it can toggle 5↔10). Sorted desc
+    // with a stable color per position; the client derives percentages.
+    const categoryBreakdownByMonth: Record<string, Array<{ categoryName: string; total: number; color: string }>> = {};
+    for (const [month, cats] of Object.entries(categoryMonthMap)) {
+        categoryBreakdownByMonth[month] = Object.entries(cats)
+            .map(([categoryName, total]) => ({ categoryName, total: Math.round(total * 100) / 100 }))
+            .sort((a, b) => b.total - a.total)
+            .map((item, i) => ({ ...item, color: CATEGORY_COLORS[i % CATEGORY_COLORS.length] }));
+    }
 
     // Full monthly series from the earliest month with data (or 6 months ago,
     // whichever is earlier) up to the current month, zero-filled. The client
@@ -381,5 +480,9 @@ export const getUserStats = async (userId: string, locale: Locale = 'lt') => {
         if (mm > 12) { mm = 1; yy++; }
     }
 
-    return { storeBreakdown, categoryBreakdown, kitaBreakdown, monthlySpending, totalSavings };
+    return {
+        storeBreakdown, storeBreakdownByMonth, categoryBreakdown, kitaBreakdown,
+        categoryBreakdownByMonth, monthlySpending, totalSavings, savingsThisMonth,
+        savingsLastMonth,
+    };
 };

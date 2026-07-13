@@ -20,6 +20,7 @@
 import * as jose from 'jose';
 import pool from '../config/db.js';
 import { createUser } from '../models/userModel.js';
+import { mergeFreshIntoRecovered, MergeRollbackError } from './accountMergeService.js';
 
 // ── Provider config ──────────────────────────────────────────────────────
 
@@ -184,6 +185,39 @@ export async function linkOrCreateVerifiedUser(opts: {
         const userId = String(existing[0].id);
         // Backfill the name on existing accounts whose fields are still empty.
         await backfillProfileFromClaims(userId, claims);
+        // Silently fold the device's anonymous data (baskets / lists / receipts
+        // / votes / points) into the existing verified account, then drop the
+        // emptied anon row. Reuses the recovery merge (same shape: fresh anon →
+        // existing account); its fast-path also covers the "empty anon" case by
+        // just deleting the orphan row.
+        //
+        // GUARD: only merge a GENUINELY anonymous device row. If this device's
+        // UUID is itself a verified account (a second provider login), merging +
+        // deleting it would silently destroy a real account — so we skip and
+        // just switch identity, leaving both accounts intact.
+        if (anonymousUserId !== userId) {
+            await createUser(anonymousUserId);
+            const [anonRow]: any = await pool.query(
+                `SELECT authProvider FROM User WHERE id = ? LIMIT 1`,
+                [anonymousUserId],
+            );
+            const anonIsAnonymous = anonRow.length > 0 && anonRow[0].authProvider === null;
+            if (anonIsAnonymous) {
+                try {
+                    await mergeFreshIntoRecovered(anonymousUserId, userId, null);
+                } catch (e) {
+                    // Merge failed AND rolled back (it's atomic — no half-merge
+                    // possible; a Telegram alert already fired). Fail-OPEN: never
+                    // block sign-in. The user still gets their account; the anon
+                    // data stays under its own UUID, recoverable later.
+                    if (e instanceof MergeRollbackError) {
+                        console.error(`[oauth] anon→account merge rolled back, stage=${e.stage}; continuing login`);
+                    } else {
+                        console.error('[oauth] anon→account merge errored, continuing login:', e);
+                    }
+                }
+            }
+        }
         return { userId, action: 'loginExisting' };
     }
 

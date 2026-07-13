@@ -15,6 +15,7 @@
  */
 import { jest } from '@jest/globals';
 import request from 'supertest';
+import { primeTokens, asUser } from './helpers/authedRequest.js';
 import app from '../src/index.js';
 import pool from '../src/config/db.js';
 
@@ -35,6 +36,7 @@ const PERF_STORE_BASE = 990000; // seeded Maxima store fleet (clean test DB)
 const STORE_FLEET = 240;        // mirrors the real Maxima chain size
 
 beforeAll(async () => {
+        await primeTokens(USER_PERF);
     const conn = await (pool as any).getConnection();
     try {
         await conn.query(`SET foreign_key_checks = 0`);
@@ -171,7 +173,7 @@ describe('Swipe queue — performance with real Maxima chain (240 stores)', () =
     it('POST /api/receipts with 10 priceVerified items completes fast (< 3 s)', async () => {
         const storeId = (global as any).__PERF_STORE_ID__;
         const t0 = Date.now();
-        const res = await request(app).post('/api/receipts').send({
+        const res = await asUser(app, USER_PERF).post('/api/receipts').send({
             userId: USER_PERF,
             filePath: 'perf-test.jpg',
             fileType: 'image/jpeg',
@@ -192,7 +194,7 @@ describe('Swipe queue — performance with real Maxima chain (240 stores)', () =
         // This is the critical assertion: the swipe queue must not be blocked
         // by background fallback propagation. Previously failed at 10–20 s.
         const t0 = Date.now();
-        const res = await request(app)
+        const res = await asUser(app, USER_PERF)
             .get(`/api/receipts/${receiptId}/swipe-queue`)
             .query({ userId: USER_PERF });
         const elapsed = Date.now() - t0;
@@ -203,7 +205,7 @@ describe('Swipe queue — performance with real Maxima chain (240 stores)', () =
     });
 
     it('swipe-queue items contain the expected alt candidates', async () => {
-        const res = await request(app)
+        const res = await asUser(app, USER_PERF)
             .get(`/api/receipts/${receiptId}/swipe-queue`)
             .query({ userId: USER_PERF });
         expect(res.status).toBe(200);
@@ -220,7 +222,7 @@ describe('Swipe queue — performance with real Maxima chain (240 stores)', () =
 
     it('GET /api/receipts/:id responds in < 2 000 ms (existing-receipt mode)', async () => {
         const t0 = Date.now();
-        const res = await request(app).get(`/api/receipts/${receiptId}`);
+        const res = await asUser(app, USER_PERF).get(`/api/receipts/${receiptId}`);
         const elapsed = Date.now() - t0;
         console.log(`GET /api/receipts/${receiptId} took ${elapsed} ms`);
         expect(res.status).toBe(200);

@@ -17,7 +17,8 @@
  */
 
 export interface RecoveryFields {
-    receiptNo: string;
+    receiptNo: string;          // canonical id (= receiptNos[0]); satisfies the submission requirement
+    receiptNos?: string[];      // every identifier on the footer (used as the ambiguity tiebreaker)
     date: string;   // YYYY-MM-DD, day precision
     total: number;  // euros, finite, positive
 }
@@ -27,7 +28,12 @@ export function extractRecoveryFields(parsedData: unknown): RecoveryFields | nul
     const footer = (parsedData as any).footer;
     if (!footer || typeof footer !== 'object') return null;
 
-    const receiptNo = typeof footer.receiptNo === 'string' ? footer.receiptNo.trim() : '';
+    // The submission "needs a receipt number" requirement is satisfied by ANY identifier — a
+    // receipt that printed only a "Kvitas" (Kvito Nr. OCR-dropped) is still recoverable.
+    const receiptNos = Array.isArray(footer.receiptNos)
+        ? footer.receiptNos.filter((v: unknown): v is string => typeof v === 'string' && v.trim().length > 0).map((v: string) => v.trim())
+        : [];
+    const receiptNo = (typeof footer.receiptNo === 'string' ? footer.receiptNo.trim() : '') || receiptNos[0] || '';
     if (!receiptNo) return null;
 
     // Date may arrive as ISO datetime ("2025-11-05T19:53:00") or date-only
@@ -44,7 +50,7 @@ export function extractRecoveryFields(parsedData: unknown): RecoveryFields | nul
             : NaN;
     if (!Number.isFinite(total) || total <= 0) return null;
 
-    return { receiptNo, date, total };
+    return { receiptNo, receiptNos: receiptNos.length ? receiptNos : undefined, date, total };
 }
 
 /**

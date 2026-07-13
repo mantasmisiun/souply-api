@@ -14,9 +14,10 @@ import { copiedSourceTemplateId } from '../util/basketCopy.js';
 export const copyBasket = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const sourceId = Number(req.params.id);
-        const { userId } = req.body ?? {};
+        // New basket owned by the token subject (the source is owner-checked by middleware).
+        const userId = req.authUserId;
         if (!Number.isFinite(sourceId) || !userId) {
-            res.status(400).json({ error: 'Basket id and userId are required' });
+            res.status(400).json({ error: 'auth and basket id are required' });
             return;
         }
         const source = await getBasketById(sourceId);
@@ -60,9 +61,9 @@ export const copyBasket = async (req: Request, res: Response, next: NextFunction
 
 export const addBasket = async (req: Request, res: Response, next: NextFunction) => {
     try {
-        const { userId } = req.body;
+        const userId = req.authUserId; // token subject; body userId ignored
         if (!userId) {
-            res.status(400).json({ error: 'User ID is required' });
+            res.status(401).json({ error: 'auth-required' });
             return;
         }
         // Idempotent behaviour: if the user already has a draft basket,

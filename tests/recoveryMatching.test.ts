@@ -49,4 +49,19 @@ describe('extractRecoveryFields', () => {
         expect(extractRecoveryFields(42)).toBeNull();
         expect(extractRecoveryFields({})).toBeNull();
     });
+
+    it('exposes the full receiptNos array when present (for the ambiguity tiebreaker)', () => {
+        const parsed = { footer: { date: '2026-06-11', receiptNo: '168/645/104148', receiptNos: ['168/645/104148', '104148', '3157'], total: 26.52 } };
+        const out = extractRecoveryFields(parsed);
+        expect(out?.receiptNo).toBe('168/645/104148');
+        expect(out?.receiptNos).toEqual(['168/645/104148', '104148', '3157']);
+    });
+
+    it('satisfies the requirement via receiptNos[0] when the canonical receiptNo is blank', () => {
+        // Kvito Nr. OCR-dropped: only a "Kvitas" survived in the array — still recoverable.
+        const parsed = { footer: { date: '2026-06-11', receiptNo: '', receiptNos: ['3157'], total: 26.52 } };
+        const out = extractRecoveryFields(parsed);
+        expect(out?.receiptNo).toBe('3157');
+        expect(out?.receiptNos).toEqual(['3157']);
+    });
 });

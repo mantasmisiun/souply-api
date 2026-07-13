@@ -105,8 +105,8 @@ beforeAll(async () => {
 
     // Seed a receipt + Price rows so recentPurchaseCount has signal.
     const [rcpt]: any = await pool.query(
-        `INSERT INTO Receipt (userId, storeId, filePath, fileType, processingStatus, receiptNo, receiptDate, parsedData)
-         VALUES (?, ?, '/dev/null', 'image/jpeg', 'completed', 'AIQ-1', NOW(), JSON_OBJECT('footer', JSON_OBJECT('total', 1.0)))`,
+        `INSERT INTO Receipt (userId, storeId, filePath, fileType, processingStatus, receiptNos, receiptDate, parsedData)
+         VALUES (?, ?, '/dev/null', 'image/jpeg', 'completed', JSON_ARRAY('AIQ-1'), NOW(), JSON_OBJECT('footer', JSON_OBJECT('total', 1.0)))`,
         [USER_ID, STORE_B_ID],
     );
     receiptId = Number(rcpt.insertId);

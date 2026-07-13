@@ -1,6 +1,8 @@
 import { Request, Response, NextFunction } from 'express';
 import pool from '../config/db.js';
 import { countOutstandingImageQueue } from '../models/adminImageQueueModel.js';
+import { countNewFailedReceipts } from '../models/failedReceiptLogModel.js';
+import { resolveEnv } from '../scrapers/shared/telegramAlert.js';
 
 // Mirrors FALLBACK_CATEGORY_IDS in adminUncategorisedQueueModel.ts
 const UNCATEGORISED_CATEGORY_ID = 688;
@@ -33,11 +35,14 @@ export const getQueueCounts = async (req: Request, res: Response, next: NextFunc
             countOutstandingImageQueue(),
         ]);
 
+        const failedReceipts = await countNewFailedReceipts(resolveEnv());
+
         res.json({
             flags: Number((flagRows as any[])[0]?.n ?? 0),
             uncategorised: Number((uncatRows as any[])[0]?.n ?? 0),
             images,
             amounts: Number((amountRows as any[])[0]?.n ?? 0),
+            failedReceipts,
         });
     } catch (e) { next(e); }
 };

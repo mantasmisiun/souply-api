@@ -163,6 +163,22 @@ export const getBasketsByUserId = async (userId: string) => {
     return rows;
 };
 
+/** Owning userId of a basket (null if it doesn't exist) — cheap, for the ownership
+ *  middleware on `/baskets/:id` routes. */
+export const getBasketOwnerId = async (id: number): Promise<string | null> => {
+    const [rows]: any = await pool.query('SELECT userId FROM Basket WHERE id = ? LIMIT 1', [id]);
+    return rows[0] ? String(rows[0].userId) : null;
+};
+
+/** Owning userId of a basket ITEM, via its parent basket (null if the item is gone). */
+export const getBasketItemOwnerId = async (itemId: number): Promise<string | null> => {
+    const [rows]: any = await pool.query(
+        'SELECT b.userId FROM BasketItem bi JOIN Basket b ON b.id = bi.basketId WHERE bi.id = ? LIMIT 1',
+        [itemId],
+    );
+    return rows[0] ? String(rows[0].userId) : null;
+};
+
 export const getBasketById = async (id: number) => {
     // Join the source template's cover identity + creator handle so the
     // basket inherits the emoji/colour strip and shows attribution. NULL for

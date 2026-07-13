@@ -1,7 +1,7 @@
 import { detectUnitConflict } from '../utils/unitConflict.js';
 
 export interface RawSlot2Row {
-    source: '2a' | '2b';
+    source: '2a' | '2b' | '2c';
     orphanSpId: number;
     candidateSpId: number;
     score: number;
@@ -36,7 +36,7 @@ export interface Slot2QueueItem {
     cardId: string;
     slot: 2;
     score: number;
-    source: '2a' | '2b';
+    source: '2a' | '2b' | '2c';
     orphanSpId: number;
     candidateSpId: number;
     sameChain: boolean;

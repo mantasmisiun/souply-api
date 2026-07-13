@@ -1,7 +1,7 @@
 /**
  * Stage receipt PDFs for the phone-side batch screen:
  *   1. Walks souply-api/receipts/<chain>/*.pdf
- *   2. Runs `pdftoppm -r 200 -png` per file → one PNG per page, named
+ *   2. Runs `pdftoppm -r 300 -png` per file (300 dpi: 200 left thin price digits at MLKit's glyph floor — dropped rows) → one PNG per page, named
  *      <basename>.png (or <basename>-N.png for multi-page) under
  *      souply-api/receipts/_batch_staging/<chain>/.
  *   3. Writes a manifest.json alongside so the phone knows what to
@@ -30,6 +30,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { spawnSync } from 'child_process';
+import { convertPdfBufferToImagePages } from '../../services/pdfService.js';
 
 type ChainName = 'maxima' | 'rimi' | 'iki' | 'norfa' | 'lidl';
 const SUPPORTED: ChainName[] = ['maxima', 'rimi', 'iki', 'norfa', 'lidl'];
@@ -77,34 +78,25 @@ const run = (cmd: string, args: string[]): { stdout: string; status: number } =>
 };
 
 /**
- * Convert one PDF to PNGs via pdftoppm. Multi-page PDFs produce
- * `<base>-1.png`, `<base>-2.png`, ... (pdftoppm's default). Single-page
- * PDFs produce a single `<base>.png` when we pass `-singlefile`; we
- * detect page count first and dispatch accordingly so the phone screen
- * doesn't need to special-case naming.
+ * Convert one PDF to PNGs via the SHARED pdfService — the exact code the
+ * live /api/receipts/pdf-to-image endpoint runs, so a receipt staged here
+ * is pixel-identical to what a user's share-PDF upload produces (including
+ * the image-wrapper extraction + enhancement path for Rimi app-share PDFs).
+ * Naming keeps pdftoppm's convention the phone screen expects: single page
+ * → `<base>.png`, multi-page → `<base>-1.png`… (zero-padded to page count).
  */
-const convertPdf = (pdfPath: string, outDir: string, baseName: string): string[] => {
-    const info = run('pdfinfo', [pdfPath]);
-    const pagesMatch = info.stdout.match(/^Pages:\s*(\d+)/m);
-    const pages = pagesMatch ? parseInt(pagesMatch[1], 10) : 1;
-
-    const outPrefix = path.join(outDir, baseName);
-    if (pages === 1) {
-        const r = run('pdftoppm', ['-r', '200', '-png', '-singlefile', pdfPath, outPrefix]);
-        if (r.status !== 0) throw new Error(`pdftoppm failed for ${pdfPath}`);
+const convertPdf = async (pdfPath: string, outDir: string, baseName: string): Promise<string[]> => {
+    const pages = await convertPdfBufferToImagePages(fs.readFileSync(pdfPath));
+    if (pages.length === 1) {
+        fs.writeFileSync(path.join(outDir, `${baseName}.png`), pages[0]);
         return [`${baseName}.png`];
-    } else {
-        const r = run('pdftoppm', ['-r', '200', '-png', pdfPath, outPrefix]);
-        if (r.status !== 0) throw new Error(`pdftoppm failed for ${pdfPath}`);
-        // pdftoppm pads with enough zeros to represent pages (e.g. 10
-        // pages → "-01", "-02", …). We regenerate the expected names
-        // here rather than re-list the dir so ordering is stable.
-        const pad = String(pages).length;
-        return Array.from({ length: pages }, (_, i) => {
-            const n = String(i + 1).padStart(pad, '0');
-            return `${baseName}-${n}.png`;
-        });
     }
+    const pad = String(pages.length).length;
+    return pages.map((buf: Buffer, i: number) => {
+        const n = String(i + 1).padStart(pad, '0');
+        fs.writeFileSync(path.join(outDir, `${baseName}-${n}.png`), buf);
+        return `${baseName}-${n}.png`;
+    });
 };
 
 const main = async () => {
@@ -159,6 +151,11 @@ const main = async () => {
         interface ManifestEntry {
             sourcePdf: string;
             pages: string[];
+            /** Staged copy of the raw PDF — present so a device with the
+             *  souply-receipt-pdf native module can convert ON-DEVICE (the
+             *  production share-flow path) instead of using the server-
+             *  converted PNGs. Batch↔live parity for the conversion step. */
+            pdf?: string;
         }
         const manifest: ManifestEntry[] = [];
         for (const file of files) {
@@ -166,9 +163,11 @@ const main = async () => {
             const base = path.basename(file, ext);
             try {
                 if (ext === '.pdf') {
-                    const pages = convertPdf(path.join(srcDir, file), outDir, base);
-                    manifest.push({ sourcePdf: file, pages });
-                    process.stdout.write(`  · ${file} → ${pages.length} page(s)\n`);
+                    const pages = await convertPdf(path.join(srcDir, file), outDir, base);
+                    const pdfName = `${base}.pdf`;
+                    fs.copyFileSync(path.join(srcDir, file), path.join(outDir, pdfName));
+                    manifest.push({ sourcePdf: file, pages, pdf: pdfName });
+                    process.stdout.write(`  · ${file} → ${pages.length} page(s) + raw pdf\n`);
                 } else {
                     // Raw image — copy (with normalized extension) into
                     // staging. We re-use the pdftoppm output filename

@@ -152,6 +152,13 @@ type MatchOutcome =
  *     Spec rule: blocks attackers who only know a victim's habitual
  *     single store.
  */
+/** Normalize a receipt identifier for cross-parse comparison (OCR spacing/case noise). */
+const canonicaliseId = (s: string): string => (s ?? '').replace(/\s+/g, '').toUpperCase();
+/** A receipt identifier unique ENOUGH to disambiguate users: a long structured id
+ *  ("168/645/104148", "104148") qualifies; a short per-terminal sequence (IKI "Kvitas 3157")
+ *  does NOT, so a coincidental short collision can never tiebreak. (≥6 alphanumerics OR a "/".) */
+const isStrongId = (s: string): boolean => !!s && (s.replace(/[^0-9A-Z]/gi, '').length >= 6 || s.includes('/'));
+
 async function tryMatch(submitted: RecoveryFields[], freshUserId: string): Promise<MatchOutcome> {
     const hits: { receiptId: number; userId: string; chainId: number | null }[] = [];
 
@@ -162,11 +169,52 @@ async function tryMatch(submitted: RecoveryFields[], freshUserId: string): Promi
         // recover them to themselves).
         const others = candidates.filter(c => c.userId !== freshUserId && c.userId !== null);
         if (others.length === 0) {
-            // Print the submission + near-misses ONLY on failure, so the
-            // happy-path log stays quiet. Tells you which field diverged
-            // (receiptNo OK + total off → OCR misread the total, etc.).
-            console.log(`[recover] no-match on submission[${i}]: receiptNo="${fields.receiptNo}" date=${fields.date} total=${fields.total}`);
-            await logDiagnosticMisses(fields);
+            // Distinguish the SELF-MATCH case: the fields matched a stored
+            // receipt, but it belongs to THIS device's own current account, so
+            // it was filtered out. That's not an OCR/field divergence — the user
+            // is already signed into the account they're trying to recover (a
+            // common dev pitfall: re-installing with the same persisted UUID).
+            const selfMatched = candidates.some(c => c.userId === freshUserId);
+            if (selfMatched) {
+                console.log(`[recover] no-match on submission[${i}]: matched receipt belongs to the CURRENT device account (freshUserId=${freshUserId}) — you are already on this account, nothing to recover. receiptNo="${fields.receiptNo}"`);
+            } else {
+                // Print the submission + near-misses ONLY on failure, so the
+                // happy-path log stays quiet. Tells you which field diverged
+                // (receiptNo OK + total off → OCR misread the total, etc.).
+                console.log(`[recover] no-match on submission[${i}]: receiptNo="${fields.receiptNo}" date=${fields.date} total=${fields.total}`);
+                await logDiagnosticMisses(fields);
+            }
+            return { status: 'failed', reason: 'no-match' };
+        }
+        // AMBIGUITY GUARD: matching is by date+total (receiptNo can diverge across re-parses, so
+        // it's not the key), so a collision could surface receipts from DIFFERENT users with the
+        // same date+total. Refuse to pick one arbitrarily — that would let an attacker ride a
+        // coincidental collision. Multiple rows for the SAME user (e.g. a re-upload) are fine.
+        const distinctUsers = new Set(others.map(o => o.userId));
+        if (distinctUsers.size > 1) {
+            // TIEBREAKER ONLY: among the colliding users, if the submission shares a STRONG
+            // (unique-enough) receipt identifier with EXACTLY ONE of them, disambiguate to that
+            // user — date+total still had to match, so this only resolves the rare collision; it
+            // never broadens the match. Never tiebreaks on a short value (e.g. IKI "Kvitas 3157").
+            const submittedStrong = new Set(
+                [fields.receiptNo, ...(fields.receiptNos ?? [])].map(canonicaliseId).filter(isStrongId),
+            );
+            const overlapUsers = new Set<string>();
+            if (submittedStrong.size > 0) {
+                for (const o of others) {
+                    const stored = (o.storedReceiptNos.length ? o.storedReceiptNos : [o.storedReceiptNo])
+                        .map(canonicaliseId).filter(isStrongId);
+                    if (stored.some(s => submittedStrong.has(s))) overlapUsers.add(o.userId!);
+                }
+            }
+            if (overlapUsers.size === 1) {
+                const winner = [...overlapUsers][0];
+                const c = others.find(o => o.userId === winner)!;
+                console.log(`[recover] tiebreak on submission[${i}]: ${distinctUsers.size} users by date+total → one strong receiptNo overlap → user resolved`);
+                hits.push({ receiptId: c.receiptId, userId: c.userId!, chainId: c.chainId });
+                continue;
+            }
+            console.log(`[recover] no-match on submission[${i}]: AMBIGUOUS — date=${fields.date} total=${fields.total} matched ${distinctUsers.size} different users (no single strong receiptNo overlap)`);
             return { status: 'failed', reason: 'no-match' };
         }
         const c = others[0];
@@ -213,7 +261,7 @@ async function logDiagnosticMisses(fields: RecoveryFields): Promise<void> {
                     r.processingStatus, s.chainId
                FROM Receipt r
                LEFT JOIN Store s ON s.id = r.storeId
-              WHERE r.receiptNo = ?
+              WHERE r.receiptNoCanonical = ?
               LIMIT 5`,
             [fields.receiptNo],
         );
@@ -225,7 +273,7 @@ async function logDiagnosticMisses(fields: RecoveryFields): Promise<void> {
             }
         }
         const [byDateTotal]: any = await pool.query(
-            `SELECT r.id, r.receiptNo, r.userId, DATE_FORMAT(r.receiptDate, '%Y-%m-%d') AS storedDate,
+            `SELECT r.id, r.receiptNoCanonical AS receiptNo, r.userId, DATE_FORMAT(r.receiptDate, '%Y-%m-%d') AS storedDate,
                     CAST(JSON_EXTRACT(r.parsedData, '$.footer.total') AS DECIMAL(10,2)) AS storedTotal,
                     r.processingStatus
                FROM Receipt r
@@ -253,11 +301,16 @@ function parseSubmittedReceipts(raw: unknown): RecoveryFields[] {
     const out: RecoveryFields[] = [];
     for (const r of raw) {
         if (!r || typeof r !== 'object') return [];
-        const receiptNo = typeof (r as any).receiptNo === 'string' ? (r as any).receiptNo.trim() : '';
+        // The requirement "each receipt must carry an identifier" is satisfied by ANY value — the
+        // client may send the full receiptNos array; the canonical receiptNo is its first element.
+        const receiptNos = Array.isArray((r as any).receiptNos)
+            ? (r as any).receiptNos.filter((v: unknown): v is string => typeof v === 'string' && v.trim().length > 0).map((v: string) => v.trim())
+            : [];
+        const receiptNo = (typeof (r as any).receiptNo === 'string' ? (r as any).receiptNo.trim() : '') || receiptNos[0] || '';
         const date      = typeof (r as any).date === 'string' ? (r as any).date.trim() : '';
         const total     = typeof (r as any).total === 'number' ? (r as any).total : NaN;
         if (!receiptNo || !/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(total) || total <= 0) return [];
-        out.push({ receiptNo, date, total });
+        out.push({ receiptNo, receiptNos: receiptNos.length ? receiptNos : undefined, date, total });
     }
     return out;
 }

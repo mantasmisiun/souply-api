@@ -68,18 +68,18 @@ describe('resolveEffectiveProductId', () => {
 describe('deleteMatchVote', () => {
     it('returns the deleted vote when a row exists', async () => {
         // First call: SELECT to check existing vote
-        mockQuery.mockResolvedValueOnce([[{ vote: 'identical' }]]);
+        mockQuery.mockResolvedValueOnce([[{ vote: 'identical', aggregated: 1 }]]);
         // Second call: DELETE
         mockQuery.mockResolvedValueOnce([{ affectedRows: 1 }]);
         const result = await deleteMatchVote('user1', 1, 2);
-        expect(result).toEqual({ deletedVote: 'identical' });
+        expect(result).toEqual({ deletedVote: 'identical', deletedAggregated: true });
     });
 
     it('returns null deletedVote when no vote row exists', async () => {
         // SELECT returns empty
         mockQuery.mockResolvedValueOnce([[]]);
         const result = await deleteMatchVote('user1', 1, 2);
-        expect(result).toEqual({ deletedVote: null });
+        expect(result).toEqual({ deletedVote: null, deletedAggregated: false });
     });
 
     it('does not call DELETE when the vote row does not exist', async () => {

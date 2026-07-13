@@ -85,7 +85,9 @@ function hasAnyActivity(s: MergeSnapshot): boolean {
 export async function mergeFreshIntoRecovered(
     freshId: string,
     recoveredId: string,
-    attemptId: number,
+    /** Recovery-attempt id for the rollback Telegram alert, or `null` when the
+     *  merge is driven by the OAuth sign-in path (no recovery attempt row). */
+    attemptId: number | null,
 ): Promise<MergeSnapshot> {
     if (freshId === recoveredId) {
         throw new Error(`mergeFreshIntoRecovered called with identical ids ${freshId}`);
@@ -285,13 +287,13 @@ export async function mergeFreshIntoRecovered(
  * rows with, not enough to be useful as a recovery key for an attacker who
  * intercepts the channel.
  */
-async function sendRollbackAlert(err: MergeRollbackError, attemptId: number): Promise<void> {
+async function sendRollbackAlert(err: MergeRollbackError, attemptId: number | null): Promise<void> {
     const shortFresh = err.freshId.slice(-8);
     const shortRecovered = err.recoveredId.slice(-8);
     const s = err.snapshot;
     await notifyTelegram(
         `🚨 <b>Account merge rolled back</b>\n` +
-        `Attempt: <code>${attemptId}</code>\n` +
+        `Attempt: <code>${attemptId ?? 'OAuth login merge'}</code>\n` +
         `Stage: <code>${err.stage}</code>\n` +
         `Error: <code>${escapeHtml(err.cause.message).slice(0, 300)}</code>\n` +
         `Fresh → Recovered: <code>…${shortFresh}</code> → <code>…${shortRecovered}</code>\n` +

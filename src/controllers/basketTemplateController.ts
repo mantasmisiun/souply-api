@@ -49,9 +49,12 @@ function validateName(rawName: unknown): { ok: true; name: string } | { ok: fals
 // endpoint is keyed only by a sequential integer id (IDOR).
 
 function callerId(req: Request): string | null {
+    // Identity from the SESSION (requireUser sets authUserId from a Bearer/cookie, or the
+    // non-prod dev-header shim). The old raw `x-user-id` header read is REMOVED — it let an
+    // unauthenticated caller impersonate any user in production (the live template IDOR).
+    if (req.authUserId) return req.authUserId;
     if (req.verifiedUser?.id) return String(req.verifiedUser.id);
-    const h = req.headers['x-user-id'];
-    return typeof h === 'string' && h.length > 0 ? h : null;
+    return null;
 }
 
 /** Load the template by `:id` and assert the caller owns it. Sends the

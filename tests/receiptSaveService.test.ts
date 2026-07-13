@@ -22,7 +22,18 @@ jest.unstable_mockModule('../src/config/db.js', () => ({
 const mockCreatePrice = jest.fn<any>();
 const mockBatchGetBaselinePriceAverages = jest.fn<any>();
 const mockBatchGetLatestPricesForReceiptItems = jest.fn<any>();
+// The save flow fire-and-forgets a mandatory-queue prewarm post-commit — stub the whole
+// service so its transitive imports (swipe-queue controller graph) stay out of this suite.
+const mockPrewarmMandatoryQueue = jest.fn<any>();
+jest.unstable_mockModule('../src/services/mandatoryQueueService.js', () => ({
+    prewarmMandatoryQueue: mockPrewarmMandatoryQueue,
+    getMandatoryQueue: jest.fn<any>(),
+    _clearMandatoryQueueSnapshots: jest.fn<any>(),
+}));
+
 jest.unstable_mockModule('../src/models/priceModel.js', () => ({
+    // Fishing selectivity pre-check — selective by default so fishing paths run in tests.
+    countPriceRowsNearValue: jest.fn<any>().mockResolvedValue(0),
     createPrice: mockCreatePrice,
     batchGetBaselinePriceAverages: mockBatchGetBaselinePriceAverages,
     batchGetLatestPricesForReceiptItems: mockBatchGetLatestPricesForReceiptItems,
@@ -30,12 +41,16 @@ jest.unstable_mockModule('../src/models/priceModel.js', () => ({
     getPriceHistoryForStoreProduct: jest.fn(),
     getLatestPricesAcrossStores: jest.fn(),
     getActivePromoPrices: jest.fn(),
+    getChainSpsByRegularPrice: jest.fn<any>().mockResolvedValue([]), // Round-2.5 fishing pool — empty here
     updatePriceById: jest.fn(),
     getPriceByStoreProductAndStore: jest.fn(),
     updateFallbackPrice: jest.fn(),
     getBaselinePriceAverage: jest.fn(),
     getPriceHistoryForStoreProductAllStores: jest.fn(),
     getLatestPriceForReceiptItem: jest.fn(),
+    // Round-2 price matcher lookup — default to no price history so Round 2 is a
+    // no-op in these save-flow tests (it has its own dedicated suite).
+    getAsOfDatePricesForCandidates: jest.fn<any>(async () => new Map()),
 }));
 
 // ---------------------------------------------------------------------------
@@ -63,6 +78,28 @@ jest.unstable_mockModule('../src/services/statsService.js', () => ({
     computeReceiptSavings: mockComputeReceiptSavings,
     getUserStats: jest.fn(),
     computeSavingsFromPrices: jest.fn(),
+    // Real implementation (pure) — savedAmount now adds the receipt-level combo/set-deal
+    // discount; the mock must expose it or the module import fails.
+    comboDiscountOf: (parsedData: any, cap = Infinity) => {
+        const v = Number(parsedData?.footer?.comboDiscount);
+        if (!Number.isFinite(v) || v <= 0) return 0;
+        return Math.round(Math.min(v, cap) * 100) / 100;
+    },
+}));
+
+// ---------------------------------------------------------------------------
+// receiptItemModel — the P1 dual-write (blob + rows). No-op mock: the save-flow
+// assertions cover the blob; ReceiptItem parity has its own suite.
+// ---------------------------------------------------------------------------
+
+const mockReplaceReceiptItems = jest.fn<any>(async () => new Map());
+jest.unstable_mockModule('../src/models/receiptItemModel.js', () => ({
+    replaceReceiptItems: mockReplaceReceiptItems,
+    getReceiptItemLines: jest.fn(),
+    getReceiptItemRows: jest.fn(),
+    updateReceiptItem: jest.fn(),
+    lineToItem: jest.fn(),
+    itemToLine: jest.fn(),
 }));
 
 // ---------------------------------------------------------------------------
@@ -150,6 +187,7 @@ beforeEach(() => {
     mockReplaceSwipeCandidates.mockResolvedValue(undefined);
     mockInitMandatorySwipeSession.mockResolvedValue(undefined);
     mockAwardReceiptPoints.mockResolvedValue(undefined);
+    mockPrewarmMandatoryQueue.mockResolvedValue(undefined);
     mockComputeReceiptSavings.mockResolvedValue(0);
     mockCreatePrice.mockResolvedValue(1);
     mockPropagateAllFallbackPrices.mockResolvedValue(undefined);
@@ -316,6 +354,45 @@ describe('persistReceiptPrices — duplicate guard', () => {
         expect(result.skippedDuplicate).toBe(0);
         expect(result.saved).toBe(1);
     });
+
+    it('mixed-deal duplicate: same SP twice, ONE discounted one not → writes REGULAR price only (no promo), once', async () => {
+        // Two "CLEVER … DUO" loaves resolved to the same SP; only one is 50% off. The
+        // discount is a per-unit deal, not the product's price → drop the promo, write once.
+        const input = makeInput({ products: [
+            { storeProductId: 100, price: 0.45, promoPrice: 0.23 }, // 50%-off loaf
+            { storeProductId: 100, price: 0.45, promoPrice: null }, // full-price loaf
+        ] });
+        const parsedData = makeParsedData([
+            { name: 'CLEVER SVIESI RAIKYTA DUO', storeProductId: 100 },
+            { name: 'CLEVER SVIESI RAIKYTA DUO', storeProductId: 100 },
+        ]);
+
+        const result = await persistReceiptPrices(1, 'u1', parsedData, input);
+
+        expect(result.saved).toBe(1);
+        expect(result.skippedDuplicate).toBe(1);
+        expect(mockCreatePrice).toHaveBeenCalledTimes(1);
+        expect(mockCreatePrice.mock.calls[0][2]).toBeCloseTo(0.45, 2); // regular price
+        expect(mockCreatePrice.mock.calls[0][3]).toBeNull();            // promo dropped
+    });
+
+    it('non-mixed duplicate: same SP twice BOTH discounted → keeps the promo (not a per-unit deal)', async () => {
+        const input = makeInput({ products: [
+            { storeProductId: 100, price: 0.45, promoPrice: 0.23 },
+            { storeProductId: 100, price: 0.45, promoPrice: 0.23 },
+        ] });
+        const parsedData = makeParsedData([
+            { name: 'CLEVER', storeProductId: 100 },
+            { name: 'CLEVER', storeProductId: 100 },
+        ]);
+
+        const result = await persistReceiptPrices(1, 'u1', parsedData, input);
+
+        expect(result.saved).toBe(1);
+        expect(result.skippedDuplicate).toBe(1);
+        expect(mockCreatePrice).toHaveBeenCalledTimes(1);
+        expect(mockCreatePrice.mock.calls[0][3]).toBeCloseTo(0.23, 2); // promo preserved
+    });
 });
 
 // ---------------------------------------------------------------------------
@@ -341,6 +418,7 @@ describe('persistReceiptPrices — createPrice arguments', () => {
             1,                // receiptId
             false,            // requiresCoupon
             mockConn,         // connection
+            null,             // receiptItemId (empty in these mocked tests)
         );
     });
 
@@ -351,7 +429,7 @@ describe('persistReceiptPrices — createPrice arguments', () => {
         await persistReceiptPrices(1, 'u1', parsedData, input);
 
         expect(mockCreatePrice).toHaveBeenCalledWith(
-            100, 10, 2.00, null, null, false, expect.any(Date), false, 1, false, mockConn,
+            100, 10, 2.00, null, null, false, expect.any(Date), false, 1, false, mockConn, null,
         );
     });
 });
@@ -477,5 +555,44 @@ describe('persistReceiptPrices — transaction', () => {
         expect(mockConn.rollback).toHaveBeenCalled();
         expect(mockConn.commit).not.toHaveBeenCalled();
         expect(mockConn.release).toHaveBeenCalled();
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Unmatched lines — no stale SP id, true source label
+// ---------------------------------------------------------------------------
+
+describe('persistReceiptPrices — unmatched lines', () => {
+    it('nulls the stale app/round-1 SP id and records the resolver\'s TRUE source on unmatched lines', async () => {
+        // The app sent a (possibly cross-chain) round-1 pick, but the resolver says UNMATCHED.
+        mockResolveReceiptLineStoreProduct.mockResolvedValue({ storeProductId: null, source: 'unmatched' });
+        const input = makeInput({ products: [{ storeProductId: 111, matchConfirmed: true, price: 2.0 }] });
+        const parsedData = makeParsedData([
+            { name: 'GARBLED X', storeProductId: 111, matchedName: 'Wrong cross-chain SP', storeProductImageUrl: 'x.jpg', price: 2.0, quantity: 1 },
+        ]);
+
+        await persistReceiptPrices(1, 'u1', parsedData, input);
+
+        // The stale pick is scrubbed everywhere it could leak from…
+        expect(parsedData.products[0].storeProductId).toBeNull();
+        expect(parsedData.products[0].matchedName).toBeNull();
+        expect(parsedData.products[0].storeProductImageUrl).toBeNull();
+        expect(input.products[0].storeProductId).toBeNull();
+        // …and the ReceiptItem dual-write records NULL + the true source, not 'skipped_unpriced'.
+        const itemLines = mockReplaceReceiptItems.mock.calls[0][1];
+        expect(itemLines[0].storeProductId).toBeNull();
+        expect(itemLines[0].matchSource).toBe('unmatched');
+    });
+
+    it("keeps 'skipped_unpriced' as the source for price-less garbled lines", async () => {
+        mockResolveReceiptLineStoreProduct.mockResolvedValue({ storeProductId: null, source: 'skipped_unpriced' });
+        const input = makeInput({ products: [{ storeProductId: null, matchConfirmed: false, price: 0 }] });
+        const parsedData = makeParsedData([{ name: 'NO PRICE LINE', price: 0, quantity: 1 }]);
+
+        await persistReceiptPrices(1, 'u1', parsedData, input);
+
+        const itemLines = mockReplaceReceiptItems.mock.calls[0][1];
+        expect(itemLines[0].matchSource).toBe('skipped_unpriced');
+        expect(itemLines[0].storeProductId ?? null).toBeNull();
     });
 });

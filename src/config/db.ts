@@ -37,7 +37,12 @@ const pool = mysql.createPool({
     // an emoji name is truncated → empty/garbled. Pin the connection to utf8mb4.
     charset: 'utf8mb4',
     waitForConnections: true,
-    connectionLimit: 10,
+    connectionLimit: Number(process.env.DB_POOL_SIZE) || 15,
+    // Bound the acquisition queue so overload SHEDS (fails fast) instead of hanging: a
+    // receipt burst spawns post-commit propagation + orphan refill + N per-vote txns, and
+    // with an unbounded queue (queueLimit:0) those pile up and requests wait forever. With
+    // a cap, excess acquisitions reject and the caller returns an error the client retries.
+    queueLimit: Number(process.env.DB_QUEUE_LIMIT) || 60,
     timezone: process.env.DB_TIMEZONE || '+02:00',
     ssl: process.env.DB_SSL_REJECT_UNAUTHORIZED === 'false' ? { rejectUnauthorized: false } : undefined,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

@@ -48,11 +48,33 @@ export const replaceSwipeCandidates = async (
 
     if (rows.length === 0) return;
 
+    // Drop candidates whose StoreProduct no longer exists. An alt-match can
+    // reference an SP that was retired/deleted (e.g. orphan cleanup) between
+    // when the match was computed and this insert — the fk_rsc_storeproduct
+    // constraint would then 500 the ENTIRE receipt save (norfa downloadfile(1)
+    // hit this). A stale candidate is not a valid swipe option, so silently
+    // dropping it is correct; the receipt and its other candidates still save.
+    const spIds = [...new Set(rows.map((r) => r[3] as number))];
+    const [existing]: any = await db.query(
+        'SELECT id FROM StoreProduct WHERE id IN (?)',
+        [spIds]
+    );
+    const validIds = new Set<number>(existing.map((e: any) => Number(e.id)));
+    const validRows = rows.filter((r) => validIds.has(r[3] as number));
+    const dropped = rows.length - validRows.length;
+    if (dropped > 0) {
+        console.warn(
+            `[swipeCandidates] receipt ${receiptId}: dropped ${dropped} candidate(s) ` +
+            `referencing missing StoreProduct(s): ${rows.filter((r) => !validIds.has(r[3] as number)).map((r) => r[3]).join(', ')}`
+        );
+    }
+    if (validRows.length === 0) return;
+
     await db.query(
         `INSERT INTO ReceiptSwipeCandidate
            (receiptId, receiptLineIdx, rankPos, storeProductId, matchScore, autoMatched)
          VALUES ?`,
-        [rows]
+        [validRows]
     );
 };
 
@@ -143,13 +165,21 @@ export const getVotedPairKeysForUser = async (
 export const getVerifiedStoreProductIdsForReceipt = async (
     receiptId: number
 ): Promise<Set<number>> => {
+    // LINE-scoped truth first: ReceiptItem.priceVerified is synced by every vote flip
+    // and is immune to (sp, store, date) Price-slot ownership (a same-slot second
+    // receipt has no Price row of its own but its line still verifies). The Price arm
+    // remains for legacy pre-migration receipts whose flips only ever touched Price.
     const [rows]: any = await pool.query(
-        `SELECT DISTINCT storeProductId
+        `SELECT DISTINCT matchedSpId AS spId
+           FROM ReceiptItem
+          WHERE receiptId = ? AND priceVerified = 1 AND matchedSpId IS NOT NULL
+         UNION
+         SELECT DISTINCT storeProductId AS spId
            FROM Price
           WHERE receiptId = ? AND isFallback = 0 AND priceVerified = 1`,
-        [receiptId]
+        [receiptId, receiptId]
     );
     const s = new Set<number>();
-    for (const r of rows) s.add(Number(r.storeProductId));
+    for (const r of rows) s.add(Number(r.spId));
     return s;
 };

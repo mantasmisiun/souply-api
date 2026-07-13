@@ -1,5 +1,10 @@
 import type { Request, Response, NextFunction } from 'express';
 import { verifySessionToken, getVerifiedUser, isVerified, type VerifiedUserRow } from '../services/authService.js';
+import { getSessionToken, SESSION_COOKIE } from './sessionAuth.js';
+
+// Token extraction + cookie name are shared with sessionAuth (anonymous identity);
+// re-exported here so existing importers of requireVerifiedUser keep resolving them.
+export { SESSION_COOKIE };
 
 declare global {
     namespace Express {
@@ -7,27 +12,6 @@ declare global {
             verifiedUser?: VerifiedUserRow;
         }
     }
-}
-
-/** Name of the web httpOnly session cookie. Mobile keeps using the
- *  `Authorization: Bearer` header; web sends this cookie (with
- *  credentials). Both carry the same session JWT. */
-export const SESSION_COOKIE = 'souply_session';
-
-/** Pull the session JWT from the Bearer header (mobile) or, failing
- *  that, the httpOnly session cookie (web). Manual cookie parse so we
- *  don't add cookie-parser for a single cookie. */
-function getSessionToken(req: Request): string | null {
-    const header = req.header('authorization');
-    if (header && header.toLowerCase().startsWith('bearer ')) {
-        return header.slice(7).trim();
-    }
-    const raw = req.headers.cookie;
-    if (raw) {
-        const m = raw.match(/(?:^|;\s*)souply_session=([^;]+)/);
-        if (m) return decodeURIComponent(m[1]);
-    }
-    return null;
 }
 
 /**

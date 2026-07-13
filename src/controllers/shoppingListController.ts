@@ -11,6 +11,7 @@ import {
     getShoppingListByBasketAndStore,
     getBasketIdByListId,
     duplicateShoppingList,
+    linkReceiptToList,
 } from '../models/shoppingListModel.js';
 import {
     createListItemsBatch,
@@ -25,6 +26,8 @@ import {
     getShareTokenByToken,
     markShareTokenClaimed,
 } from '../models/shoppingListShareTokenModel.js';
+import { getBasketOwnerId } from '../models/basketModel.js';
+import { getReceiptOwnerId } from '../models/receiptModel.js';
 
 /**
  * POST /api/shopping-lists
@@ -41,14 +44,29 @@ import {
  */
 export const addShoppingList = async (req: Request, res: Response, next: NextFunction) => {
     try {
-        const { userId, storeId, basketId, items, savingsEur } = req.body ?? {};
-        if (!userId || !storeId) {
-            res.status(400).json({ error: 'User ID and Store ID are required' });
+        const { storeId, basketId, items, savingsEur } = req.body ?? {};
+        const userId = req.authUserId; // token subject; body userId ignored
+        if (!userId) {
+            res.status(401).json({ error: 'auth-required' });
+            return;
+        }
+        if (!storeId) {
+            res.status(400).json({ error: 'Store ID is required' });
             return;
         }
         if (items !== undefined && !Array.isArray(items)) {
             res.status(400).json({ error: 'items must be an array' });
             return;
+        }
+        // When creating a list FROM a basket, the caller must own that basket — otherwise
+        // supplying someone else's basketId flips their basket to 'inProgress' and reads
+        // its template. (The list routes have no basket-owner middleware; check inline.)
+        if (basketId) {
+            const basketOwner = await getBasketOwnerId(Number(basketId));
+            if (basketOwner !== null && basketOwner !== userId) {
+                res.status(403).json({ error: 'forbidden' });
+                return;
+            }
         }
 
         // Duplicate-per-basket guard. The DB also enforces this, but a
@@ -210,6 +228,47 @@ export const changeShoppingListStatus = async (req: Request, res: Response, next
     }
 };
 
+/**
+ * POST /api/shopping-lists/:id/link-receipt
+ * Body: { receiptId }
+ *
+ * Link an uploaded/scanned Receipt to the completed list row (the store
+ * trip it covers). Sets Receipt.shoppingListId. Used both by the
+ * post-completion upload flow and the duplicate silent-link path (a
+ * re-photographed receipt already in the DB is pointed at the list
+ * instead of inserting a new row).
+ */
+export const linkReceiptToShoppingList = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const id = Number(req.params.id);
+        const receiptId = Number(req.body?.receiptId);
+        if (!Number.isFinite(id) || !Number.isFinite(receiptId)) {
+            res.status(400).json({ error: 'Valid list id and receiptId are required' });
+            return;
+        }
+        const list = await getShoppingListById(id);
+        if (!list) {
+            res.status(404).json({ error: 'Shopping list not found' });
+            return;
+        }
+        // List membership is already enforced by middleware; ALSO require the caller to own
+        // the receipt they're attaching, so a member can't link someone else's receipt.
+        const receiptOwner = await getReceiptOwnerId(receiptId);
+        if (receiptOwner === null) {
+            res.status(404).json({ error: 'Receipt not found' });
+            return;
+        }
+        if (receiptOwner !== req.authUserId) {
+            res.status(403).json({ error: 'forbidden' });
+            return;
+        }
+        await linkReceiptToList(receiptId, id);
+        res.json({ success: true });
+    } catch (error) {
+        next(error);
+    }
+};
+
 export const removeShoppingList = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const id = Number(req.params.id);
@@ -248,7 +307,7 @@ export const removeShoppingList = async (req: Request, res: Response, next: Next
 export const createListShareToken = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const listId = Number(req.params.id);
-        const { userId } = req.body ?? {};
+        const userId = req.authUserId; // token subject
         if (isNaN(listId) || !userId) {
             res.status(400).json({ error: 'Invalid list ID or missing userId' });
             return;
@@ -310,7 +369,7 @@ export const getShareTokenStatus = async (req: Request, res: Response, next: Nex
 export const claimShareToken = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const token = String(req.params.token);
-        const { userId } = req.body ?? {};
+        const userId = req.authUserId; // token subject
         if (!userId) {
             res.status(400).json({ error: 'Missing userId' });
             return;
@@ -355,7 +414,7 @@ export const claimShareToken = async (req: Request, res: Response, next: NextFun
 export const duplicateList = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const id = Number(req.params.id);
-        const { userId } = req.body;
+        const userId = req.authUserId; // token subject
         if (isNaN(id) || !userId) {
             res.status(400).json({ error: 'Invalid ID or missing userId' });
             return;

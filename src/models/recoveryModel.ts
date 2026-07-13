@@ -3,9 +3,14 @@ import type { RecoveryFields } from '../utils/receiptIntrospect.js';
 
 /** How many failed attempts in a rolling 24h window before lockout. */
 export const RATE_LIMIT_MAX_FAILURES = 3;
-/** Tolerance on total-sum match (euros). Defensive against floating-point /
- *  rounding noise from re-OCR; tight enough that a real misread fails. */
-export const TOTAL_MATCH_TOLERANCE_EUR = 0.01;
+/** Tolerance on total-sum match (euros). The match ALSO requires an exact
+ *  `receiptNo` (a long structured string) + exact `date`, which together
+ *  already near-uniquely identify the stored receipt — so the total is only a
+ *  "did the user actually OCR this receipt" confirmation, not the identifier.
+ *  Kept loose enough to survive a single-digit re-OCR misread in the amount
+ *  (e.g. 11.34 vs 11.24 — a 0.10 drift that previously failed recovery at the
+ *  old 0.01 window), tight enough that a wildly different total still fails. */
+export const TOTAL_MATCH_TOLERANCE_EUR = 0.5;
 
 export type FailureReason =
     | 'no-match'
@@ -18,15 +23,23 @@ export interface ReceiptMatchCandidate {
     userId: string | null;
     chainId: number | null;
     storedReceiptNo: string;
+    storedReceiptNos: string[];   // every identifier on the stored receipt (for the ambiguity tiebreaker)
     storedDate: string;   // YYYY-MM-DD
     storedTotal: number;
 }
 
 /**
- * Match query for a single submitted receipt. Looks up by receiptNo + date
- * + total (with tolerance). Joins Store→StoreChain to expose chainId for
- * the 2-chain rule. Returns 0..N candidates; collisions are statistically
- * vanishing given the three-field key, but the algorithm handles >1 anyway.
+ * Match query for a single submitted receipt. Identifies by the STABLE
+ * date + total pair (total within tolerance) — NOT receiptNo. The receiptNo
+ * can legitimately diverge between two parses of the same physical receipt
+ * (the canonical "Kvito Nr.", the shorter "Kvitas" sequence number, or a
+ * synthetic date+time+total id — whichever OCR could read that time), so
+ * requiring it would break recovery for a receipt re-scanned via a different
+ * fallback. The short "Kvitas" number is also NOT globally unique, so it must
+ * never be the sole key. date+total identifies the receipt either way; the
+ * 3-receipt / 2-chain / same-user floor in tryMatch supplies the security, and
+ * an ambiguity guard there rejects a date+total collision across users.
+ * storedReceiptNo is still returned for diagnostics. Joins Store for chainId.
  */
 export async function findRecoveryCandidates(
     fields: RecoveryFields,
@@ -35,29 +48,44 @@ export async function findRecoveryCandidates(
         `SELECT r.id          AS receiptId,
                 r.userId      AS userId,
                 s.chainId     AS chainId,
-                r.receiptNo   AS storedReceiptNo,
+                r.receiptNoCanonical AS storedReceiptNo,
+                r.receiptNos         AS storedReceiptNos,
                 DATE_FORMAT(r.receiptDate, '%Y-%m-%d') AS storedDate,
                 CAST(JSON_EXTRACT(r.parsedData, '$.footer.total') AS DECIMAL(10,2)) AS storedTotal
            FROM Receipt r
            LEFT JOIN Store s ON s.id = r.storeId
-          WHERE r.receiptNo = ?
-            AND DATE(r.receiptDate) = ?
+          WHERE DATE(r.receiptDate) = ?
             AND r.processingStatus = 'completed'
             AND r.parsedData IS NOT NULL
             AND r.userId IS NOT NULL
             AND ABS(
                 CAST(JSON_EXTRACT(r.parsedData, '$.footer.total') AS DECIMAL(10,2)) - ?
             ) <= ?`,
-        [fields.receiptNo, fields.date, fields.total, TOTAL_MATCH_TOLERANCE_EUR],
+        [fields.date, fields.total, TOTAL_MATCH_TOLERANCE_EUR],
     );
-    return (rows as any[]).map(r => ({
-        receiptId: Number(r.receiptId),
-        userId: r.userId ?? null,
-        chainId: r.chainId !== null && r.chainId !== undefined ? Number(r.chainId) : null,
-        storedReceiptNo: String(r.storedReceiptNo),
-        storedDate: String(r.storedDate),
-        storedTotal: Number(r.storedTotal),
-    }));
+    return (rows as any[]).map(r => {
+        // storedReceiptNos: the receiptNos COLUMN — a JSON-text array, or null on rows not yet
+        // backfilled. The driver returns it as a STRING (the column isn't in db.ts JSON_ARRAY_FIELDS),
+        // but decode up to twice to be robust if it's ever registered there (→ already-parsed) or
+        // double-encoded. Fall back to the single canonical receiptNo when absent/garbage.
+        let storedReceiptNos: string[] = [];
+        let v: unknown = r.storedReceiptNos;
+        for (let i = 0; i < 2 && typeof v === 'string'; i++) {
+            try { v = JSON.parse(v); } catch { v = null; break; }
+        }
+        if (Array.isArray(v)) storedReceiptNos = v.filter((x) => typeof x === 'string').map(String);
+        const storedReceiptNo = String(r.storedReceiptNo);
+        if (storedReceiptNos.length === 0 && storedReceiptNo) storedReceiptNos = [storedReceiptNo];
+        return {
+            receiptId: Number(r.receiptId),
+            userId: r.userId ?? null,
+            chainId: r.chainId !== null && r.chainId !== undefined ? Number(r.chainId) : null,
+            storedReceiptNo,
+            storedReceiptNos,
+            storedDate: String(r.storedDate),
+            storedTotal: Number(r.storedTotal),
+        };
+    });
 }
 
 /**

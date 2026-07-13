@@ -279,6 +279,8 @@ CREATE TABLE `DiscountedProductSummary` (
   `unit` varchar(8) DEFAULT 'g',
   `hasWeighable` tinyint(1) DEFAULT 0,
   `bestDiscountPct` int(11) NOT NULL,
+  `realDiscountPct` int(11) DEFAULT NULL,
+  `cheapestChainId` int(11) DEFAULT NULL,
   `canonicalUnit` varchar(8) DEFAULT NULL,
   `canonicalStep` double DEFAULT NULL,
   `canonicalFamily` varchar(16) DEFAULT NULL,
@@ -387,9 +389,11 @@ CREATE TABLE `Price` (
   `isFallback` tinyint(1) DEFAULT 0,
   `priceVerified` tinyint(1) DEFAULT 0,
   `receiptId` int(11) DEFAULT NULL,
+  `receiptItemId` int(11) DEFAULT NULL,
   `requiresCoupon` tinyint(1) NOT NULL DEFAULT 0,
   PRIMARY KEY (`id`),
   UNIQUE KEY `unique_price` (`storeProductId`,`storeId`,`date`),
+  KEY `idx_price_receiptitem` (`receiptItemId`),
   KEY `idx_price_receipt_sp` (`receiptId`,`storeProductId`,`isFallback`),
   KEY `idx_price_receipt_verified` (`receiptId`,`isFallback`,`priceVerified`,`storeProductId`),
   KEY `idx_price_store_verified` (`storeId`,`priceVerified`,`storeProductId`),
@@ -445,7 +449,8 @@ CREATE TABLE `Receipt` (
   `fileType` varchar(50) DEFAULT 'pending',
   `receiptDate` datetime DEFAULT current_timestamp(),
   `processingStatus` varchar(50) DEFAULT 'pending',
-  `receiptNo` varchar(50) DEFAULT NULL,
+  `receiptNos` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL CHECK (json_valid(`receiptNos`)),
+  `receiptNoCanonical` varchar(50) GENERATED ALWAYS AS (json_unquote(json_extract(`receiptNos`,'$[0]'))) VIRTUAL,
   `parsedData` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL CHECK (json_valid(`parsedData`)),
   `mandatorySwipesRequired` tinyint(4) NOT NULL DEFAULT 0,
   `mandatorySwipesCompleted` tinyint(4) NOT NULL DEFAULT 0,
@@ -453,13 +458,59 @@ CREATE TABLE `Receipt` (
   `savedAmount` decimal(10,2) NOT NULL DEFAULT 0.00,
   `adminEditedAt` datetime DEFAULT NULL,
   PRIMARY KEY (`id`),
-  UNIQUE KEY `unique_receipt` (`receiptNo`,`storeId`,`receiptDate`),
+  UNIQUE KEY `unique_receipt` (`receiptNoCanonical`,`storeId`,`receiptDate`),
   KEY `storeId` (`storeId`),
   KEY `idx_receipt_user_status` (`userId`,`processingStatus`),
   KEY `userId` (`userId`),
   CONSTRAINT `Receipt_ibfk_1` FOREIGN KEY (`userId`) REFERENCES `User` (`id`) ON DELETE SET NULL,
   CONSTRAINT `Receipt_ibfk_2` FOREIGN KEY (`storeId`) REFERENCES `Store` (`id`)
 ) ENGINE=InnoDB AUTO_INCREMENT=144 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+DROP TABLE IF EXISTS `ReceiptItem`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE `ReceiptItem` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `receiptId` int(11) NOT NULL,
+  `lineIdx` int(11) NOT NULL,
+  `name` varchar(512) NOT NULL DEFAULT '',
+  `price` decimal(10,2) DEFAULT NULL,
+  `promoPrice` decimal(10,2) DEFAULT NULL,
+  `quantity` decimal(10,3) DEFAULT NULL,
+  `unit` varchar(20) DEFAULT NULL,
+  `amount` decimal(10,3) DEFAULT NULL,
+  `sizeUnit` varchar(20) DEFAULT NULL,
+  `isWeighable` tinyint(1) NOT NULL DEFAULT 0,
+  `pricePerUnit` decimal(10,4) DEFAULT NULL,
+  `brandName` varchar(255) DEFAULT NULL,
+  `matchedSpId` int(11) DEFAULT NULL,
+  `matchSource` varchar(24) DEFAULT NULL,
+  `matchedName` varchar(512) DEFAULT NULL,
+  `storeProductImageUrl` varchar(1024) DEFAULT NULL,
+  `matchConfidence` decimal(4,3) DEFAULT NULL,
+  `matchConfirmed` tinyint(1) NOT NULL DEFAULT 0,
+  `priceVerified` tinyint(1) NOT NULL DEFAULT 0,
+  `variantUncertain` tinyint(1) NOT NULL DEFAULT 0,
+  `priceImplausible` tinyint(1) NOT NULL DEFAULT 0,
+  `band` varchar(8) DEFAULT NULL,
+  `needsHuman` decimal(8,2) DEFAULT NULL,
+  `categoryId` int(11) DEFAULT NULL,
+  `categoryName` varchar(255) DEFAULT NULL,
+  `categoryL2Name` varchar(255) DEFAULT NULL,
+  `itemConfidence` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL CHECK (json_valid(`itemConfidence`)),
+  `altMatches` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL CHECK (json_valid(`altMatches`)),
+  `region` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL CHECK (json_valid(`region`)),
+  `rawLines` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL CHECK (json_valid(`rawLines`)),
+  `extra` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL CHECK (json_valid(`extra`)),
+  `createdAt` datetime NOT NULL DEFAULT current_timestamp(),
+  `updatedAt` datetime NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_receipt_line` (`receiptId`,`lineIdx`),
+  KEY `idx_ri_receipt` (`receiptId`,`lineIdx`),
+  KEY `idx_ri_sp` (`matchedSpId`),
+  CONSTRAINT `fk_ri_receipt` FOREIGN KEY (`receiptId`) REFERENCES `Receipt` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_ri_sp` FOREIGN KEY (`matchedSpId`) REFERENCES `StoreProduct` (`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 DROP TABLE IF EXISTS `ReceiptLineIssue`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
@@ -611,6 +662,9 @@ CREATE TABLE `StoreProduct` (
   `unit` varchar(20) DEFAULT NULL,
   `isWeighable` tinyint(1) NOT NULL DEFAULT 0,
   `imageUrl` varchar(500) DEFAULT NULL,
+  `provisional` tinyint(1) NOT NULL DEFAULT 0,
+  `provisionalOwnerUserId` char(36) DEFAULT NULL,
+  `mintedFromSpId` int(11) DEFAULT NULL,
   PRIMARY KEY (`id`),
   KEY `productId` (`productId`),
   KEY `idx_sp_chainId` (`chainId`),
@@ -644,6 +698,7 @@ CREATE TABLE `StoreProductMatchVote` (
   `spIdB` int(11) NOT NULL,
   `vote` enum('identical','similar','different') NOT NULL,
   `dwellMs` int(11) DEFAULT NULL,
+  `aggregated` tinyint(1) NOT NULL DEFAULT 1,
   `receiptId` int(11) DEFAULT NULL,
   `createdAt` timestamp NOT NULL DEFAULT current_timestamp(),
   `updatedAt` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
@@ -736,3 +791,40 @@ CREATE TABLE `UserStoreProductEquivalence` (
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*M!100616 SET NOTE_VERBOSITY=@OLD_NOTE_VERBOSITY */;
 
+
+-- Vocabulary (Issue H) tables — added for crossChainRescue integration tests
+CREATE TABLE IF NOT EXISTS `StoreProductReceiptAlias` (
+  `id` int(10) unsigned NOT NULL AUTO_INCREMENT,
+  `chainId` int(11) NOT NULL,
+  `storeProductId` int(11) NOT NULL,
+  `normalizedAlias` varchar(255) NOT NULL,
+  `rawSample` varchar(255) DEFAULT NULL,
+  `occurrences` int(10) unsigned NOT NULL DEFAULT 1,
+  `identicalUsers` int(10) unsigned NOT NULL DEFAULT 0,
+  `similarUsers` int(10) unsigned NOT NULL DEFAULT 0,
+  `differentUsers` int(10) unsigned NOT NULL DEFAULT 0,
+  `status` enum('pending','canonical','similarity','rejected') NOT NULL DEFAULT 'pending',
+  `adminVerdict` enum('confirmed','rejected') DEFAULT NULL,
+  `sampleReceiptId` int(11) DEFAULT NULL,
+  `firstSeenAt` datetime NOT NULL DEFAULT current_timestamp(),
+  `lastSeenAt` datetime NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_alias` (`chainId`,`storeProductId`,`normalizedAlias`),
+  KEY `idx_match` (`chainId`,`status`,`normalizedAlias`),
+  KEY `idx_curation` (`status`,`chainId`,`lastSeenAt`),
+  KEY `idx_sp` (`storeProductId`,`status`),
+  CONSTRAINT `fk_alias_sp` FOREIGN KEY (`storeProductId`) REFERENCES `StoreProduct` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB AUTO_INCREMENT=87 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+CREATE TABLE IF NOT EXISTS `StoreProductReceiptAliasVote` (
+  `id` int(10) unsigned NOT NULL AUTO_INCREMENT,
+  `aliasId` int(10) unsigned NOT NULL,
+  `userId` varchar(64) NOT NULL,
+  `vote` enum('identical','similar','different') NOT NULL,
+  `receiptId` int(11) DEFAULT NULL,
+  `createdAt` datetime NOT NULL DEFAULT current_timestamp(),
+  `updatedAt` datetime NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_alias_user` (`aliasId`,`userId`),
+  KEY `idx_user` (`userId`),
+  CONSTRAINT `fk_aliasvote_alias` FOREIGN KEY (`aliasId`) REFERENCES `StoreProductReceiptAlias` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB AUTO_INCREMENT=88 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

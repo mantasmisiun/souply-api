@@ -113,14 +113,18 @@ export const deleteUser = async (
     try {
         await connection.beginTransaction();
 
+        // Only APPLIED votes (aggregated=1) are reversed — burst rows exist in the
+        // ledger but never fed the aggregate, and blind reversal drove counts negative.
         const [votes]: any = await connection.query(
-            `SELECT spIdA, spIdB, vote FROM StoreProductMatchVote WHERE userId = ?`,
+            `SELECT spIdA, spIdB, vote, aggregated FROM StoreProductMatchVote WHERE userId = ?`,
             [targetUserId],
         );
 
         const pairsToRevaluate = new Map<string, { spIdA: number; spIdB: number }>();
         for (const v of votes) {
-            await applyAggregateDelta(v.spIdA, v.spIdB, v.vote, -1, connection);
+            if (v.aggregated) {
+                await applyAggregateDelta(v.spIdA, v.spIdB, v.vote, -1, connection);
+            }
             pairsToRevaluate.set(`${v.spIdA}-${v.spIdB}`, { spIdA: v.spIdA, spIdB: v.spIdB });
         }
 

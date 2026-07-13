@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import pool from '../config/db.js';
 import { swipeLog, resetSwipeLog } from '../utils/swipeLogger.js';
+import { getReceiptRelatednessScope, isCardRelated } from '../services/receiptRelatednessService.js';
 import { fetchVotedPairKeys } from '../models/votedPairsModel.js';
 import { fetchSlot1Rows, type RawSlot1Row } from '../models/slot1CandidateModel.js';
 import { fetchAllSlot2Rows } from '../models/slot2CandidateModel.js';
@@ -9,9 +10,15 @@ import { buildSlot2Queue } from '../services/slot2QueueBuilder.js';
 import { buildSlot3Queue } from '../services/slot3QueueBuilder.js';
 import { castSlot2Vote } from '../services/slot2VoteService.js';
 import { castDirectSpPairVote } from '../services/directSpPairVoteService.js';
+import { withDeadlockRetry } from '../utils/withDeadlockRetry.js';
 import type { SwipeVote } from '../services/swipeVoteService.js';
 import { getUserPointsProfile } from '../services/userPointsService.js';
 import { refillUserOrphansIfMissing } from '../services/orphanRefillService.js';
+import type { Locale } from '../middleware/locale.js';
+import { capVoluntaryQueue } from '../../../shared/swipeQueueCap.js';
+import { buildReceiptResolveCards } from '../services/receiptResolveQueueService.js';
+import { buildSlot2cBackfill } from '../services/slot2cBackfillService.js';
+import { RECOGNITION } from '../../../shared/recognitionConfig.js';
 
 const VALID_VOTES: SwipeVote[] = ['identical', 'similar', 'different'];
 
@@ -56,13 +63,24 @@ function canonicalKey(spA: number, spB: number): string {
 function buildSlot1Queue(
     rows: RawSlot1Row[],
     votedPairKeys: Set<string>,
+    label = 'global',
 ): SwipeQueueCard[] {
     const seen = new Set<string>();
     const items: SwipeQueueCard[] = [];
+    let dup = 0, voted = 0;
+
+    // [GLOBAL-QUEUE] funnel — CONSOLE-visible (unlike swipeLog, which only writes
+    // swipe-debug.log): for every cross-chain "related" candidate pair, why it does or
+    // doesn't become a swipe card. Answers "what was considered + why N available". The
+    // deeper per-anchor GENERATION trace (why only N raw pairs exist) is [Slot1] in
+    // swipe-debug.log.
+    console.log(`[GLOBAL-QUEUE] slot1 (${label}): ${rows.length} raw cross-chain candidate pair(s) generated`);
 
     for (const row of rows) {
         const key = canonicalKey(row.leftSpId, row.rightSpId);
-        if (seen.has(key) || votedPairKeys.has(key)) continue;
+        const pair = `SP${row.leftSpId} ${JSON.stringify(row.left?.name)} ⇄ SP${row.rightSpId} ${JSON.stringify(row.right?.name)} score=${row.score.toFixed(3)}`;
+        if (seen.has(key)) { dup++; console.log(`[GLOBAL-QUEUE]   ✗ ${pair} → SKIP duplicate pair (same SPs from another anchor)`); continue; }
+        if (votedPairKeys.has(key)) { voted++; console.log(`[GLOBAL-QUEUE]   ✗ ${pair} → SKIP already-voted (no-repeat: you swiped this pair before)`); continue; }
         seen.add(key);
 
         // Enforce canonical (smaller spId = left) for consistent card rendering.
@@ -79,9 +97,11 @@ function buildSlot1Queue(
             left:  { spId: leftSpId,  ...leftSide },
             right: { spId: rightSpId, ...rightSide },
         });
+        console.log(`[GLOBAL-QUEUE]   ✓ ${pair} → SERVED`);
     }
 
     items.sort((a, b) => b.score - a.score);
+    console.log(`[GLOBAL-QUEUE]   => ${items.length} slot1 card(s) available (filtered ${dup} duplicate, ${voted} already-voted)`);
     return items;
 }
 
@@ -155,6 +175,65 @@ async function logReceiptPipeline(receiptId: number): Promise<void> {
 // ── Controllers ────────────────────────────────────────────────────────────
 
 /**
+ * Assemble the prioritised swipe cards (slot 2 → 1 → 3) for a user, applying the
+ * relatedness gate when `relatedTo` is set. Extracted so BOTH GET /swipe-queue and
+ * the voluntary-count endpoint build the queue through ONE code path — the count
+ * and the served queue can never drift. Returns the cards + pre-gate slot counts.
+ */
+export async function buildSwipeQueueItems(
+    userId: string,
+    receiptIdParam: number | undefined,
+    relatedTo: number | undefined,
+    locale: Locale,
+): Promise<{ items: SwipeQueueCard[]; slotCounts: { slot1: number; slot2: number; slot3: number } }> {
+    const [votedPairKeys, slot1Rows, slot2Rows, slot3Rows] = await Promise.all([
+        fetchVotedPairKeys(userId),
+        fetchSlot1Rows(userId, receiptIdParam, locale),
+        fetchAllSlot2Rows(userId, receiptIdParam, locale),
+        fetchSlot3Rows(userId, receiptIdParam, locale),
+    ]);
+
+    const slot2Items = buildSlot2Queue(slot2Rows, votedPairKeys);
+    const slot1Items = buildSlot1Queue(slot1Rows, votedPairKeys, receiptIdParam !== undefined ? `receipt-anchored r${receiptIdParam}` : 'global');
+    const slot3Items = buildSlot3Queue(slot3Rows, votedPairKeys);
+
+    const slot2Cards: SwipeQueueCard[] = slot2Items.map(item => ({
+        cardId: item.cardId,
+        slot: 2 as const,
+        score: item.score,
+        left:  { spId: item.orphanSpId,    ...item.orphan },
+        right: { spId: item.candidateSpId, ...item.candidate },
+        slot2Meta: { sameChain: item.sameChain, conflictDetected: item.conflictDetected },
+    }));
+    const slot3Cards: SwipeQueueCard[] = slot3Items.map(item => ({
+        cardId: item.cardId,
+        slot: 3 as const,
+        score: item.score,
+        left:  { spId: item.spIdA, ...item.left },
+        right: { spId: item.spIdB, ...item.right },
+    }));
+
+    let items: SwipeQueueCard[] = [...slot2Cards, ...slot1Items, ...slot3Cards];
+
+    if (relatedTo !== undefined && Number.isFinite(relatedTo)) {
+        const scope = await getReceiptRelatednessScope(relatedTo, pool);
+        const before = items.length;
+        const slot1Before = items.filter((c) => c.slot === 1).length;
+        items = items.filter((c) =>
+            isCardRelated({ categoryId: c.left.categoryId, name: c.left.name, imageUrl: c.left.imageUrl }, scope) ||
+            isCardRelated({ categoryId: c.right.categoryId, name: c.right.name, imageUrl: c.right.imageUrl }, scope),
+        );
+        const slot1After = items.filter((c) => c.slot === 1).length;
+        swipeLog(`[Relatedness] relatedTo=${relatedTo} scope: ${scope.categoryIds.size} cats, ${scope.lineNames.length} line-names → kept ${items.length}/${before}`);
+        if (slot1Before !== slot1After) {
+            console.log(`[GLOBAL-QUEUE] relatedness gate (relatedTo=${relatedTo}): dropped ${slot1Before - slot1After} slot1 card(s) not related to the receipt → ${slot1After} kept`);
+        }
+    }
+
+    return { items, slotCounts: { slot1: slot1Items.length, slot2: slot2Items.length, slot3: slot3Items.length } };
+}
+
+/**
  * GET /api/users/:userId/swipe-queue
  *
  * Returns a prioritised list of swipe cards for the user:
@@ -212,52 +291,86 @@ export const getSwipeQueue = async (
                 .catch(e => swipeLog(`[Voluntary] background refill failed: ${(e as Error).message}`));
         }
 
-        const [votedPairKeys, slot1Rows, slot2Rows, slot3Rows] = await Promise.all([
-            fetchVotedPairKeys(userId),
-            fetchSlot1Rows(userId, receiptIdParam, req.locale),
-            fetchAllSlot2Rows(userId, receiptIdParam, req.locale),
-            fetchSlot3Rows(userId, receiptIdParam, req.locale),
-        ]);
+        // Relatedness gate: a receipt-SCOPED fetch (receiptId present) gates to ITS OWN
+        // receipt even when the client didn't pass `relatedTo`; only the global pool
+        // (receiptId=none) stays ungated. Item assembly + the gate live in
+        // buildSwipeQueueItems so the voluntary-count endpoint uses the same path.
+        const relatedToParam = typeof req.query.relatedTo === 'string' && req.query.relatedTo.length > 0
+            ? Number(req.query.relatedTo)
+            : undefined;
+        const relatedTo = relatedToParam ?? receiptIdParam;
+        if (relatedTo === undefined || !Number.isFinite(relatedTo)) {
+            swipeLog(`[Relatedness] relatedTo NOT supplied — global cards UNGATED (receiptId=${receiptIdParam ?? 'none'})`);
+        }
 
-        const slot2Items = buildSlot2Queue(slot2Rows, votedPairKeys);
-        const slot1Items = buildSlot1Queue(slot1Rows, votedPairKeys);
-        const slot3Items = buildSlot3Queue(slot3Rows, votedPairKeys);
+        const { items, slotCounts } = await buildSwipeQueueItems(userId, receiptIdParam, relatedTo, req.locale);
 
-        const slot2Cards: SwipeQueueCard[] = slot2Items.map(item => ({
-            cardId: item.cardId,
-            slot: 2 as const,
-            score: item.score,
-            left:  { spId: item.orphanSpId,    ...item.orphan },
-            right: { spId: item.candidateSpId, ...item.candidate },
-            slot2Meta: {
-                sameChain:         item.sameChain,
-                conflictDetected:  item.conflictDetected,
-            },
-        }));
-
-        const slot3Cards: SwipeQueueCard[] = slot3Items.map(item => ({
-            cardId: item.cardId,
-            slot: 3 as const,
-            score: item.score,
-            left:  { spId: item.spIdA, ...item.left },
-            right: { spId: item.spIdB, ...item.right },
-        }));
-
-        const items: SwipeQueueCard[] = [...slot2Cards, ...slot1Items, ...slot3Cards];
-
-        swipeLog(`[SwipeQueue] userId=${userId} receiptId=${receiptIdParam ?? 'none'} → slot1=${slot1Items.length} slot2=${slot2Items.length} slot3=${slot3Items.length} total=${items.length}`);
+        swipeLog(`[SwipeQueue] userId=${userId} receiptId=${receiptIdParam ?? 'none'} → slot1=${slotCounts.slot1} slot2=${slotCounts.slot2} slot3=${slotCounts.slot3} total=${items.length}`);
         for (const card of items) {
             swipeLog(`[SwipeQueue]   [slot${card.slot}] "${card.left.name}" (${card.left.chainName}) vs "${card.right.name}" (${card.right.chainName}) score=${card.score.toFixed(3)}`);
         }
+        // CONSOLE summary (the per-card list above is in swipe-debug.log). This is the POOL the
+        // client draws from — the client mixes it with Card-B crop cards and caps the session via
+        // capVoluntaryQueue (shared/swipeQueueCap.ts). So a low slot1 here = few related candidates
+        // existed, NOT a cap; a high slot1 that still serves few on-device = the client cap.
+        console.log(`[GLOBAL-QUEUE] pool for receipt ${receiptIdParam ?? 'none'}: slot1(cross-chain related)=${slotCounts.slot1} · slot2(orphan-rescue)=${slotCounts.slot2} · slot3(same-chain dedup)=${slotCounts.slot3} · total=${items.length}`);
 
-        res.json({
-            items,
-            slotCounts: {
-                slot1: slot1Items.length,
-                slot2: slot2Items.length,
-                slot3: slot3Items.length,
-            },
-        });
+        res.json({ items, slotCounts });
+    } catch (error) {
+        next(error);
+    }
+};
+
+/**
+ * GET /api/users/:userId/voluntary-queue-count?receiptId=…
+ *
+ * SINGLE SOURCE OF TRUTH for the "Improve price comparison" button's badge. Runs the
+ * EXACT voluntary served-queue assembly server-side — the relatedTo-gated receipt +
+ * global pools through capVoluntaryQueue, plus up to 5 prepended Card-B resolve cards
+ * — and returns the final count. The button hides at 0 and shows a number that equals
+ * what actually opens (kills the "advertises 10 → opens empty" divergence, which came
+ * from the old count omitting the relatedTo gate AND the resolve-queue cards).
+ */
+export const getVoluntaryQueueCount = async (
+    req: Request,
+    res: Response,
+    next: NextFunction,
+) => {
+    try {
+        const userId = typeof req.params.userId === 'string' ? req.params.userId.trim() : '';
+        if (!userId) { res.status(400).json({ error: 'userId is required' }); return; }
+        const receiptId = typeof req.query.receiptId === 'string' && req.query.receiptId.length > 0
+            ? Number(req.query.receiptId)
+            : undefined;
+        if (receiptId === undefined || !Number.isFinite(receiptId)) {
+            res.status(400).json({ error: 'receiptId is required' });
+            return;
+        }
+
+        // Mirror SwipeQueue.loadQueue's voluntary branch exactly:
+        //   receiptItems = swipe-queue(receiptId, relatedTo=receiptId)
+        //   globalItems  = swipe-queue(relatedTo=receiptId)   (no receiptId)
+        //   capVoluntaryQueue({receiptItems, globalItems}); then prepend ≤5 Card-B, cap 10.
+        const [receiptPool, globalPool] = await Promise.all([
+            buildSwipeQueueItems(userId, receiptId, receiptId, req.locale),
+            buildSwipeQueueItems(userId, undefined, receiptId, req.locale),
+        ]);
+        const capped = capVoluntaryQueue({ receiptItems: receiptPool.items, globalItems: globalPool.items }).items;
+
+        const max = RECOGNITION.queue.voluntaryReceiptHalf;
+        const conn = await (pool as any).getConnection();
+        let cardBCount = 0;
+        try {
+            const { cards } = await buildReceiptResolveCards(receiptId, conn, max);
+            cardBCount = cards.length;
+        } finally {
+            conn.release();
+        }
+
+        const count = cardBCount > 0
+            ? Math.min(10, Math.min(max, cardBCount) + capped.length)
+            : capped.length;
+        res.json({ count });
     } catch (error) {
         next(error);
     }
@@ -281,7 +394,7 @@ export const submitDirectVote = async (
             return;
         }
 
-        const { spIdA, spIdB, vote, dwellMs } = req.body ?? {};
+        const { spIdA, spIdB, vote, dwellMs, receiptId } = req.body ?? {};
 
         if (!VALID_VOTES.includes(vote)) {
             res.status(400).json({ error: 'vote must be identical, similar, or different' });
@@ -292,13 +405,20 @@ export const submitDirectVote = async (
             return;
         }
 
-        const result = await castDirectSpPairVote({
+        // Deadlock-retried: the vote txn's demotion (SELECT … FOR UPDATE on ReceiptItem)
+        // can deadlock against a concurrent autosave's replaceReceiptItems — the whole
+        // vote transaction is rolled back by MySQL, so the only correct recovery is to
+        // re-run the entire vote (receipt-232's lost third-card vote).
+        const result = await withDeadlockRetry(() => castDirectSpPairVote({
             userId,
             spIdA: Number(spIdA),
             spIdB: Number(spIdB),
             vote,
             dwellMs: Number.isFinite(dwellMs) ? Number(dwellMs) : 0,
-        });
+            // Optional — present when the card came from a receipt's swipe queue;
+            // lets a 'different' vote demote the rejected line back to OCR.
+            receiptId: Number.isFinite(receiptId) ? Number(receiptId) : null,
+        }), { label: `direct vote ${spIdA}-${spIdB}` });
 
         const { level } = await getUserPointsProfile(userId);
         res.json({ ...result, level });
@@ -357,6 +477,52 @@ export const submitSlot2Vote = async (
 
         const { level } = await getUserPointsProfile(userId);
         res.json({ ...result, level });
+    } catch (error) {
+        next(error);
+    }
+};
+
+/**
+ * GET /api/users/:userId/receipts/:receiptId/orphan-backfill?k=N
+ *
+ * Slot 2c — receipt-scoped orphan BACKFILL for the mandatory session. The client
+ * calls this ONLY when the receipt's own pool (Card-B + slots) left free mandatory
+ * slots; the response fills them with orphan-rescue cards RELATED to the receipt
+ * (its category family + chain; name+price composite; highest pair wins). Cards
+ * are ordinary slot-2 cards — the existing slot2 vote endpoint + no-repeat ledger
+ * handle them unchanged. Serves fewer than k (or none) when nothing clears the
+ * floor: an honest short session beats junk.
+ */
+export const getOrphanBackfill = async (
+    req: Request,
+    res: Response,
+    next: NextFunction,
+) => {
+    try {
+        const userId = typeof req.params.userId === 'string' ? req.params.userId.trim() : '';
+        const receiptId = Number(req.params.receiptId);
+        const k = Math.min(3, Math.max(1, Number(req.query.k) || 1));
+        if (!userId || !Number.isFinite(receiptId) || receiptId <= 0) {
+            res.status(400).json({ error: 'userId and receiptId are required' });
+            return;
+        }
+        // Ownership: the receipt must belong to the (token-pinned) user.
+        const [own]: any = await pool.query('SELECT userId FROM Receipt WHERE id = ?', [receiptId]);
+        if (!own?.[0] || String(own[0].userId) !== userId) {
+            res.status(404).json({ error: 'Receipt not found' });
+            return;
+        }
+        const items = await buildSlot2cBackfill(userId, receiptId, k, req.locale);
+        res.json({
+            items: items.map((item) => ({
+                cardId: item.cardId,
+                slot: 2 as const,
+                score: item.score,
+                left: { spId: item.orphanSpId, ...item.orphan },
+                right: { spId: item.candidateSpId, ...item.candidate },
+                slot2Meta: { sameChain: item.sameChain, conflictDetected: item.conflictDetected },
+            })),
+        });
     } catch (error) {
         next(error);
     }

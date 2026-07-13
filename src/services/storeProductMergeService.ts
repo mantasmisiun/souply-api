@@ -52,11 +52,75 @@ export const promoteMergeByProductIds = async (
         `UPDATE Product SET mergedIntoId = ? WHERE id = ?`,
         [winner.id, loser.id]
     );
+
+    // TRIGGER B (global divergence, join direction): the community just joined these
+    // products — every user still holding a personal 'different' on an SP pair across
+    // them now diverges from the global model. Flag their vote for re-verification
+    // (priority swipe card, no-repeat bypassed) and CLEAR the reverifiedAt stamp: a
+    // global transition is genuinely new information, so even a previously-reconfirmed
+    // vote earns one fresh challenge. Mirrors the reversal-direction trigger in
+    // demoteMergeByProductIds (which flags 'same' voters).
+    await db.query(
+        `UPDATE UserStoreProductEquivalence e
+           JOIN StoreProduct sp1 ON sp1.id = e.spIdA
+           JOIN StoreProduct sp2 ON sp2.id = e.spIdB
+            SET e.needsReverification = 1, e.reverifiedAt = NULL
+          WHERE e.verdict = 'different'
+            AND sp1.productId IN (?, ?)
+            AND sp2.productId IN (?, ?)`,
+        [winner.id, loser.id, winner.id, loser.id]
+    );
+
     return {
         action: 'promoted',
         winnerProductId: winner.id,
         loserProductId: loser.id,
     };
+};
+
+/** Nepriskirta ("Uncategorised") bucket. */
+const NEPRISKIRTA_CATEGORY_ID = 688;
+
+/**
+ * After a 'promoted' merge, CATEGORISE an uncategorised (Nepriskirta, 688) product by
+ * adopting the categorised partner's category onto its OWN row. promoteMergeByProductIds
+ * picks the winner by NAME LENGTH (category-blind), so a 688 product can land on EITHER
+ * side — and if it WINS, the merged identity would otherwise resolve to 688, silently
+ * DE-CATEGORISING the good partner. Fixing the 688 row's own categoryId (which every
+ * downstream reader uses directly) sidesteps the merge direction entirely. This is how a
+ * community "same" confirmation on a [688-with-photo, categorised] slot3 pair categorises
+ * the scraped item. Idempotent + safe: the `categoryId = 688` guard makes it a no-op once
+ * categorised and it ONLY ever moves a product OUT of 688, never overwrites a real category.
+ */
+export const categoriseUncategorisedOnMerge = async (
+    decision: MergeDecision,
+    conn?: Connection,
+): Promise<void> => {
+    if (decision.action !== 'promoted' || decision.winnerProductId == null || decision.loserProductId == null) return;
+    const db = conn || pool;
+    const [rows]: any = await db.query(
+        'SELECT id, categoryId FROM Product WHERE id IN (?, ?)',
+        [decision.winnerProductId, decision.loserProductId],
+    );
+    const byId = new Map<number, any>((rows as any[]).map((r) => [Number(r.id), r]));
+    const winner = byId.get(decision.winnerProductId);
+    const loser = byId.get(decision.loserProductId);
+    if (!winner || !loser) return;
+    const winnerCat = Number(winner.categoryId);
+    const loserCat = Number(loser.categoryId);
+    // Exactly one side is 688 → adopt the categorised side's category onto the 688 row.
+    let target: number | null = null;
+    let newCat: number | null = null;
+    // `> 0` is defense-in-depth: only ever adopt a REAL category id (never write 0/NULL onto
+    // the 688 row even if a partner's categoryId were ever absent).
+    if (loserCat === NEPRISKIRTA_CATEGORY_ID && winnerCat > 0 && winnerCat !== NEPRISKIRTA_CATEGORY_ID) { target = Number(loser.id); newCat = winnerCat; }
+    else if (winnerCat === NEPRISKIRTA_CATEGORY_ID && loserCat > 0 && loserCat !== NEPRISKIRTA_CATEGORY_ID) { target = Number(winner.id); newCat = loserCat; }
+    if (target == null || newCat == null) return;
+    await db.query(
+        'UPDATE Product SET categoryId = ? WHERE id = ? AND categoryId = ?',
+        [newCat, target, NEPRISKIRTA_CATEGORY_ID],
+    );
+    console.log(`[MERGE] CATEGORISE: product ${target} (Nepriskirta 688) → categoryId=${newCat}`);
 };
 
 /**
@@ -102,14 +166,16 @@ export const demoteMergeByProductIds = async (
         [loserId]
     );
 
-    // Flag personal equivalences on this product pair for re-verification.
-    // Users who previously voted these products as identical should reconfirm
-    // on their next purchase — the community has reversed the merge.
+    // TRIGGER B (global divergence, split direction): users who previously voted
+    // these products as identical should reconfirm on their next purchase — the
+    // community has reversed the merge. reverifiedAt is cleared for the same reason
+    // as the join-direction trigger above: a global transition re-opens the question
+    // even for a previously-reconfirmed vote.
     await db.query(
         `UPDATE UserStoreProductEquivalence e
            JOIN StoreProduct sp1 ON sp1.id = e.spIdA
            JOIN StoreProduct sp2 ON sp2.id = e.spIdB
-            SET e.needsReverification = 1
+            SET e.needsReverification = 1, e.reverifiedAt = NULL
           WHERE e.verdict = 'same'
             AND sp1.productId IN (?, ?)
             AND sp2.productId IN (?, ?)`,

@@ -1,6 +1,13 @@
 import { Router } from 'express';
 import { addUser, fetchUserById, updateUserLastActive, fetchUserProfile, fetchUserEquivalences, putUserEquivalence, deleteUserEquivalence, fetchUserProductMergeMap, fetchUserStats, fetchUserVoteHistory, editUserVotePair, deleteSelfAccount } from '../controllers/userController.js';
 import { recoverAccount } from '../controllers/accountRecoveryController.js';
+import { requireUser, requireSelfUserParam } from '../middleware/sessionAuth.js';
+
+// All /users/:id[/**] routes are SELF-ONLY: requireUser proves a session token and
+// requireSelfUserParam('id') binds the path id to the token subject, closing the
+// unauthenticated account-read/tamper/DELETE IDOR. POST /users (token bootstrap) and
+// POST /users/recover (proof-of-knowledge, rate-limited) stay open by design.
+const self = [requireUser, requireSelfUserParam('id')];
 
 const router = Router();
 
@@ -61,7 +68,7 @@ router.post('/users/recover', recoverAccount);
  *       200:
  *         description: User retrieved successfully
  */
-router.get('/users/:id', fetchUserById);
+router.get('/users/:id', ...self, fetchUserById);
 
 /**
  * @swagger
@@ -84,7 +91,7 @@ router.get('/users/:id', fetchUserById);
  *       204: { description: Account deleted }
  *       404: { description: User not found }
  */
-router.delete('/users/:id', deleteSelfAccount);
+router.delete('/users/:id', ...self, deleteSelfAccount);
 
 /**
  * @swagger
@@ -104,14 +111,14 @@ router.delete('/users/:id', deleteSelfAccount);
  *       200:
  *         description: User's last active time updated successfully
  */
-router.patch('/users/:id/last-active', updateUserLastActive);
-router.get('/users/:id/profile', fetchUserProfile);
-router.get('/users/:id/equivalences', fetchUserEquivalences);
-router.put('/users/:id/equivalences', putUserEquivalence);
-router.delete('/users/:id/equivalences', deleteUserEquivalence);
-router.get('/users/:id/product-merge-map', fetchUserProductMergeMap);
-router.get('/users/:id/stats', fetchUserStats);
-router.get('/users/:id/votes', fetchUserVoteHistory);
-router.put('/users/:id/votes/pair', editUserVotePair);
+router.patch('/users/:id/last-active', ...self, updateUserLastActive);
+router.get('/users/:id/profile', ...self, fetchUserProfile);
+router.get('/users/:id/equivalences', ...self, fetchUserEquivalences);
+router.put('/users/:id/equivalences', ...self, putUserEquivalence);
+router.delete('/users/:id/equivalences', ...self, deleteUserEquivalence);
+router.get('/users/:id/product-merge-map', ...self, fetchUserProductMergeMap);
+router.get('/users/:id/stats', ...self, fetchUserStats);
+router.get('/users/:id/votes', ...self, fetchUserVoteHistory);
+router.put('/users/:id/votes/pair', ...self, editUserVotePair);
 
 export default router;

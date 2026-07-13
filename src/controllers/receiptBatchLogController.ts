@@ -16,8 +16,9 @@
 import { Request, Response, NextFunction } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
-import { createReceipt } from '../models/receiptModel.js';
+import { createReceipt, deleteReceipt, getReceiptByReceiptNoAndUser } from '../models/receiptModel.js';
 import { persistReceiptPrices } from '../services/receiptSaveService.js';
+import { deleteReceiptWithData } from '../services/receiptDeletionService.js';
 
 const LOGS_ROOT = path.resolve(
     path.dirname(new URL(import.meta.url).pathname),
@@ -42,6 +43,8 @@ interface BatchLogBody {
     parsedData: any;
     dryRun: boolean;
     userId?: string;
+    /** 'ios' | 'android' — which OCR/parser combo produced this run. */
+    platform?: string;
 }
 
 /**
@@ -52,7 +55,12 @@ interface BatchLogBody {
 export const logBatchReceipt = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const body = req.body as BatchLogBody;
-        const { chain, filename, rawLines, parsedData, dryRun, userId } = body ?? {};
+        const { chain, filename, rawLines, parsedData, dryRun, userId, platform } = body ?? {};
+        // Per-platform artefact suffix so an Android run no longer OVERWRITES
+        // the iOS run's OCR snapshot (they used to clobber each other, making
+        // the other combo unreplayable). The unsuffixed files stay = latest
+        // run, preserving every existing reader.
+        const plat = platform === 'ios' || platform === 'android' ? platform : null;
         if (!chain || !filename || !parsedData) {
             res.status(400).json({ error: 'chain, filename, parsedData are required' });
             return;
@@ -75,8 +83,16 @@ export const logBatchReceipt = async (req: Request, res: Response, next: NextFun
                     )
                     .join('\n')
             );
+            // Full-geometry copy (x + y + text) — raw.txt drops the x-coords,
+            // which makes an OFF-DEVICE 1:1 reproduction of a device parse
+            // impossible (the banders read column positions). With this file a
+            // failing batch receipt can be replayed/fixture-ised without
+            // pasting Metro logs around.
+            writeLog(logDir, 'rawLines.json', rawLines);
+            if (plat) writeLog(logDir, `rawLines.${plat}.json`, rawLines);
         }
         writeLog(logDir, 'parsedData.json', parsedData);
+        if (plat) writeLog(logDir, `parsedData.${plat}.json`, parsedData);
 
         const chainId: number | null =
             typeof parsedData?.header?.chainId === 'number'
@@ -93,8 +109,13 @@ export const logBatchReceipt = async (req: Request, res: Response, next: NextFun
         const totalOcr = parsedData?.footer?.total ?? null;
         const sumLines = Array.isArray(parsedData?.products)
             ? parsedData.products.reduce(
-                  (acc: number, p: any) =>
-                      acc + (Number(p.promoPrice ?? p.price) || 0),
+                  (acc: number, p: any) => {
+                      // Prices are per-unit NORMALIZED — multiply the quantity
+                      // back or multi-buy/weighed rows understate the sum.
+                      const unit = Number(p.promoPrice ?? p.price) || 0;
+                      const qty = Number(p.quantity) > 0 ? Number(p.quantity) : 1;
+                      return acc + unit * qty;
+                  },
                   0
               )
             : 0;
@@ -108,32 +129,60 @@ export const logBatchReceipt = async (req: Request, res: Response, next: NextFun
                 return;
             }
             const chainIdNum: number = chainId;
-            const newReceiptId: number = await createReceipt(
-                userId!,
-                storeId,
-                `batch:${chain}/${filename}`,
-                'image/png'
-            );
-            receiptId = newReceiptId;
-            persistResult = await persistReceiptPrices(newReceiptId, userId!, parsedData, {
-                chainId: chainIdNum,
-                storeId,
-                receiptNo,
-                date: parsedData?.footer?.date ?? null,
-                products: (parsedData?.products ?? []).map((p: any) => ({
-                    storeProductId: p.storeProductId ?? null,
-                    matchConfirmed: !!p.matchConfirmed,
-                    // Force false for batch to suppress fallback propagation
-                    // fan-out. The user hasn't eyeballed these matches, so
-                    // we shouldn't stamp prices into every store in the
-                    // chain on speculation — same guard as the dev script.
-                    priceVerified: false,
-                    price: p.price,
-                    promoPrice: p.promoPrice ?? null,
-                    quantity: p.quantity,
-                    unit: p.unit,
-                })),
-            });
+            const doPersist = async (): Promise<{ id: number; result: any }> => {
+                const newReceiptId: number = await createReceipt(
+                    userId!,
+                    storeId,
+                    `batch:${chain}/${filename}`,
+                    'image/png'
+                );
+                try {
+                    const result = await persistReceiptPrices(newReceiptId, userId!, parsedData, {
+                        chainId: chainIdNum,
+                        storeId,
+                        receiptNo,
+                        date: parsedData?.footer?.date ?? null,
+                        products: (parsedData?.products ?? []).map((p: any) => ({
+                            storeProductId: p.storeProductId ?? null,
+                            matchConfirmed: !!p.matchConfirmed,
+                            // Force false for batch to suppress fallback propagation
+                            // fan-out. The user hasn't eyeballed these matches, so
+                            // we shouldn't stamp prices into every store in the
+                            // chain on speculation — same guard as the dev script.
+                            priceVerified: false,
+                            price: p.price,
+                            promoPrice: p.promoPrice ?? null,
+                            quantity: p.quantity,
+                            unit: p.unit,
+                        })),
+                    });
+                    return { id: newReceiptId, result };
+                } catch (err) {
+                    // The persist transaction rolled back — the bare Receipt row
+                    // would linger as a "malformed" Analyze entry. Same cleanup
+                    // as receiptController's upload path.
+                    await deleteReceipt(newReceiptId).catch(() => {});
+                    throw err;
+                }
+            };
+            // BATCH RERUN = REPLACE: re-running a staged receipt hits the
+            // unique_receipt dedup key of its previous persist. This is a dev
+            // harness — cascade-delete the prior copy and persist fresh, so
+            // repeated batch runs never require manual DB cleanup.
+            let persisted: { id: number; result: any };
+            try {
+                persisted = await doPersist();
+            } catch (err: any) {
+                const isDup = err?.code === 'ER_DUP_ENTRY' && /unique_receipt/i.test(String(err?.sqlMessage ?? ''));
+                if (!isDup || !receiptNo) throw err;
+                const existing = await getReceiptByReceiptNoAndUser(String(receiptNo), userId!);
+                if (!existing) throw err; // duplicate belongs to another user — don't touch it
+                const wiped = await deleteReceiptWithData(existing.id);
+                console.log(`[batch-log] ${filename}: replaced prior receipt ${existing.id} (prices=${wiped.prices})`);
+                persisted = await doPersist();
+            }
+            receiptId = persisted.id;
+            persistResult = persisted.result;
             writeLog(logDir, 'persistResult.json', { receiptId, ...persistResult });
         }
 
@@ -245,6 +294,12 @@ const fmtDelta = (prev: number | undefined, now: number, digits = 0): string => 
 export const finalizeBatchReport = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const chain = String(req.body?.chain ?? '').trim();
+        // Per-combo tracking: with a platform the baseline/report land in
+        // _baseline.<platform>.json / _report.<platform>.md, so "change from
+        // previous run" always diffs like-for-like (iOS vs iOS, Android vs
+        // Android). Without a platform the legacy shared files are used.
+        const platRaw = String(req.body?.platform ?? '').trim();
+        const plat = platRaw === 'ios' || platRaw === 'android' ? platRaw : null;
         if (!chain) {
             res.status(400).json({ error: 'chain is required' });
             return;
@@ -292,13 +347,25 @@ export const finalizeBatchReport = async (req: Request, res: Response, next: Nex
                 // Footer total is NET (after every per-item discount).
                 // p.price is GROSS (before discount); p.promoPrice is
                 // the after-discount price when the parser caught the
-                // savings row. Sum the effective paid price so the
-                // reconcile check tracks the actual receipt total.
+                // savings row. Prices are per-unit NORMALIZED, so the
+                // quantity must be multiplied back — without it every
+                // multi-buy/weighed receipt reads as a "total mismatch"
+                // (the old report flagged all 27 rimi receipts).
                 const sumLines = products.reduce(
-                    (acc: number, p: any) =>
-                        acc + (Number(p.promoPrice ?? p.price) || 0),
+                    (acc: number, p: any) => {
+                        const unit = Number(p.promoPrice ?? p.price) || 0;
+                        const qty = Number(p.quantity) > 0 ? Number(p.quantity) : 1;
+                        return acc + unit * qty;
+                    },
                     0
                 );
+                // Parser self-verification wins when present (IKI/Rimi emit
+                // footer.reconciled/reconDelta — exact printed-arithmetic
+                // checks incl. receipt-level adjustments the naive sum can't
+                // see). The naive ±tolerance check stays as the fallback for
+                // chains without receipt-level recon.
+                const parserRecon: boolean | null | undefined = pd?.footer?.reconciled;
+                const parserDelta: number | null | undefined = pd?.footer?.reconDelta;
 
                 // Metrics rollup.
                 metrics.totalProducts += productCount;
@@ -314,18 +381,22 @@ export const finalizeBatchReport = async (req: Request, res: Response, next: Nex
                     if (conf >= 0.7) metrics.productsConf70++;
                     if (conf >= 0.9) metrics.productsConf90++;
                 }
-                if (typeof totalOcr === 'number') {
+                const reconciled = typeof parserRecon === 'boolean'
+                    ? parserRecon
+                    : typeof totalOcr === 'number' && Math.abs(totalOcr - sumLines) <= RECONCILE_TOLERANCE_EUR;
+                if (typeof totalOcr === 'number' || typeof parserRecon === 'boolean') {
                     metrics.reconcileEligible++;
-                    if (Math.abs(totalOcr - sumLines) <= RECONCILE_TOLERANCE_EUR) {
-                        metrics.reconcileCount++;
-                    }
+                    if (reconciled) metrics.reconcileCount++;
                 }
 
                 tableRows.push(
-                    `| ${name} | ${productCount} | ${matched} | ${productCount - matched} | ${totalOcr ?? '-'} | ${sumLines.toFixed(2)} |`
+                    `| ${name} | ${productCount} | ${matched} | ${productCount - matched} | ${totalOcr ?? '-'} | ${sumLines.toFixed(2)} | ${typeof parserRecon === 'boolean' ? (parserRecon ? '✓' : `✗ Δ${parserDelta ?? '?'}`) : '—'} |`
                 );
                 const flags: string[] = [];
-                if (
+                if (parserRecon === false) {
+                    flags.push(`parser recon Δ=${parserDelta ?? '?'} (OCR=${totalOcr}, sum=${sumLines.toFixed(2)})`);
+                } else if (
+                    parserRecon == null &&
                     typeof totalOcr === 'number' &&
                     Math.abs(totalOcr - sumLines) > RECONCILE_TOLERANCE_EUR
                 ) {
@@ -346,7 +417,7 @@ export const finalizeBatchReport = async (req: Request, res: Response, next: Nex
         metrics.reviewableCount = reviewable.length;
 
         // Diff block only renders when a previous snapshot exists.
-        const baselinePath = path.join(chainDir, BASELINE_FILE);
+        const baselinePath = path.join(chainDir, plat ? `_baseline.${plat}.json` : BASELINE_FILE);
         let prev: ChainMetrics | null = null;
         if (fs.existsSync(baselinePath)) {
             try {
@@ -392,8 +463,8 @@ export const finalizeBatchReport = async (req: Request, res: Response, next: Nex
 
         rows.push('');
         rows.push('## Per-file');
-        rows.push('| File | Products | w/ candidates | Unmatched | Total OCR | Sum lines |');
-        rows.push('|---|---:|---:|---:|---:|---:|');
+        rows.push('| File | Products | w/ candidates | Unmatched | Total OCR | Sum lines | Recon |');
+        rows.push('|---|---:|---:|---:|---:|---:|---:|');
         rows.push(...tableRows);
 
         if (reviewable.length > 0) {
@@ -402,7 +473,7 @@ export const finalizeBatchReport = async (req: Request, res: Response, next: Nex
             rows.push(...reviewable);
         }
 
-        const reportPath = path.join(chainDir, '_report.md');
+        const reportPath = path.join(chainDir, plat ? `_report.${plat}.md` : '_report.md');
         fs.writeFileSync(reportPath, rows.join('\n'));
         // Snapshot for next run's diff. Always overwrites — each batch
         // sets the baseline for the next one.

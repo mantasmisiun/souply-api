@@ -257,9 +257,8 @@ export async function runLidlPromoScraper(): Promise<void> {
             errorNote,
         );
     } catch (e: any) {
-        const msg = `🚨 <b>Lidl</b> scraper failed\n${(e as Error).message}`;
-        console.error(msg);
-        await notifyTelegram(msg);
+        // Failure alerting is owned by runScraperWithRetry — surface + rethrow.
+        console.error(`[Lidl] scrape failed: ${(e as Error).message}`);
         throw e;
     }
 }

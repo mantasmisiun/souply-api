@@ -4,7 +4,7 @@ Node/Express + MariaDB backend.
 
 ## Branches & flow
 - `main` — **production**. Protected: PRs only, CI must pass, no force-push.
-- `staging` — integration; deploys to the staging stack (`api.souply.manofoto.dpdns.org`).
+- `staging` — integration; deploys to the staging stack (`souply-api.manofoto.dpdns.org`).
 - `feature/*` — your work. Branch off `staging`.
 
 Flow: `feature/*` → PR into `staging` → validate on staging → PR `staging` → `main` (promotion) → prod deploy.

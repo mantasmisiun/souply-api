@@ -2,6 +2,7 @@ import pool from '../config/db.js';
 import { resolveEffectiveProductId } from '../services/storeProductMergeService.js';
 import { getPersonalComponentForProduct } from './userEquivalenceModel.js';
 import { buildFuzzyNameClause } from '../utils/fuzzyNameClause.js';
+import { fetchAliasesByChainGrouped } from './storeProductAliasModel.js';
 import type { Locale } from '../middleware/locale.js';
 
 type Connection = typeof pool | any;
@@ -22,16 +23,59 @@ export const findExactMatchingStoreProduct = async (
     conn?: Connection
 ): Promise<number | null> => {
     const db = conn || pool;
+    // Catalog-first: when several same-chain SPs share this exact name, prefer a
+    // CATALOG row (has an imageUrl — scraped products carry one) over a garbled
+    // RECEIPT-MINTED ORPHAN (imageUrl NULL). Without this, a prior receipt's OCR
+    // orphan ("LIETUVISKI POMTDORA") could capture future receipts by exact-name
+    // dedup even though a clean catalog SP exists. (User: match catalog first,
+    // fall back to orphan only if that fails.)
     const [rows]: any = await db.query(
         `SELECT id FROM StoreProduct
           WHERE chainId = ?
             AND LOWER(storeProductName) = LOWER(?)
             AND (amount IS NULL OR ? IS NULL OR amount = ?)
             AND (unit   IS NULL OR ? IS NULL OR unit   = ?)
+          ORDER BY (imageUrl IS NOT NULL) DESC, id ASC
           LIMIT 1`,
         [chainId, name, amount, amount, unit, unit]
     );
     return rows[0]?.id ?? null;
+};
+
+/**
+ * Minimal display fields (name + image) for one StoreProduct. Used by receipt
+ * save to re-sync a line's shown name/image to whatever SP the resolver actually
+ * linked, so display can never diverge from the link (e.g. after a dedup swap).
+ */
+export const getStoreProductDisplayById = async (
+    spId: number,
+    conn?: Connection,
+): Promise<{ name: string | null; imageUrl: string | null } | null> => {
+    const db = conn || pool;
+    const [rows]: any = await db.query(
+        'SELECT storeProductName, imageUrl FROM StoreProduct WHERE id = ? LIMIT 1',
+        [spId],
+    );
+    if (!rows[0]) return null;
+    return { name: rows[0].storeProductName ?? null, imageUrl: rows[0].imageUrl ?? null };
+};
+
+/**
+ * Proposal display fetch for the S2-unlinked Card-B path: name/image for the card
+ * face + chainId so the queue builder can refuse to propose a cross-chain SP
+ * (voting identical must link same-chain only — the chain-price invariant).
+ */
+export const getSpProposalDisplayById = async (
+    spId: number,
+    conn?: Connection,
+): Promise<{ name: string | null; imageUrl: string | null; chainId: number } | null> => {
+    const db = conn || pool;
+    const [rows]: any = await db.query(
+        'SELECT storeProductName, imageUrl, chainId FROM StoreProduct WHERE id = ? LIMIT 1',
+        [spId],
+    );
+    if (!rows[0]) return null;
+    return { name: rows[0].storeProductName ?? null, imageUrl: rows[0].imageUrl ?? null, chainId: Number(rows[0].chainId) };
 };
 
 export const createStoreProduct = async (
@@ -66,8 +110,9 @@ export const getStoreProductsByProductId = async (productId: number, userId?: st
         `SELECT StoreProduct.*, StoreChain.name AS chainName, StoreChain.logoUrl
          FROM StoreProduct
          JOIN StoreChain ON StoreProduct.chainId = StoreChain.id
-         WHERE StoreProduct.productId IN (?)`,
-        [productIds]
+         WHERE StoreProduct.productId IN (?)
+           AND (StoreProduct.provisional = 0 OR StoreProduct.provisionalOwnerUserId = ?)`,
+        [productIds, userId ?? '']
     );
     return rows;
 };
@@ -183,6 +228,21 @@ export const updateStoreProductName = async (id: number, storeProductName: strin
     );
 };
 
+/**
+ * Catalog self-heal: flip a mislabeled SP to weighable. Idempotent — the
+ * `AND isWeighable = 0` guard makes a repeat call a no-op and ensures we only
+ * ever correct packaged→weighable, never the reverse. A null amount becomes 1 so
+ * a weighable kg row carries the standard "1 kg" reference. Returns true if it flipped.
+ */
+export const markStoreProductWeighable = async (id: number, conn?: Connection): Promise<boolean> => {
+    const db = conn || pool;
+    const [result]: any = await db.query(
+        'UPDATE StoreProduct SET isWeighable = 1, amount = COALESCE(amount, 1) WHERE id = ? AND isWeighable = 0',
+        [id]
+    );
+    return result.affectedRows > 0;
+};
+
 //For verifying price's storeProduct and store belong to the same chain
 export const getChainIdByStoreProductId = async (storeProductId: number) => {
     const [rows]: any = await pool.query(
@@ -211,20 +271,36 @@ export const getStoreProductsByChainWithProductData = async (chainId: number, lo
                   WHEN c2.parentCategoryId IS NULL THEN COALESCE(ct.name, c.name)
                   ELSE COALESCE(ct2.name, c2.name)
                 END AS categoryL2Name,
-                sp.chainId
+                sp.chainId,
+                -- isCatalog: a REAL scraped SKU has at least one scraped price
+                -- (Price.receiptId IS NULL). A receipt-minted ORPHAN has only
+                -- receipt-derived prices. Used as a matcher tiebreak so a garbled
+                -- orphan can't out-rank the clean catalog on a near-tie. Indexed
+                -- by idx_price_receipt_sp (receiptId, storeProductId).
+                EXISTS(SELECT 1 FROM Price pr WHERE pr.storeProductId = sp.id AND pr.receiptId IS NULL) AS isCatalog
          FROM StoreProduct sp
          JOIN Product p ON sp.productId = p.id
          LEFT JOIN Category c  ON p.categoryId = c.id
          LEFT JOIN Category c2 ON c2.id = c.parentCategoryId
          LEFT JOIN CategoryTranslation ct  ON ct.categoryId  = c.id  AND ct.locale  = ?
          LEFT JOIN CategoryTranslation ct2 ON ct2.categoryId = c2.id AND ct2.locale = ?
-         WHERE sp.chainId = ?`,
+         WHERE sp.chainId = ?
+           AND sp.provisional = 0`,
         [locale, locale, chainId]
     );
+    // Attach learned receipt-name aliases (Issue H vocabulary): canonical (extra match
+    // targets — match the way THIS chain prints each SP), rejected (suppress a known-
+    // wrong combo), similarity (same-category link → L2-scope + L3-boost). Same-chain
+    // only — aliases are chain-scoped, so the cross-chain fetcher intentionally omits them.
+    const grouped = await fetchAliasesByChainGrouped(chainId);
     return rows.map((r: any) => ({
         ...r,
         isWeighable: !!r.isWeighable,
+        isCatalog: !!r.isCatalog,
         amount: r.amount !== null ? parseFloat(r.amount) : null,
+        aliases: grouped.canonical.get(Number(r.id)),
+        rejectedAliases: grouped.rejected.get(Number(r.id)),
+        similarityAliases: grouped.similarity.get(Number(r.id)),
     }));
 };
 
@@ -263,10 +339,10 @@ export const getStoreProductsCrossChainWithProductData = async (excludeChainId: 
          JOIN (
              SELECT productId, MIN(id) AS repId
              FROM StoreProduct
-             WHERE chainId <> ?
+             WHERE chainId <> ? AND provisional = 0
              GROUP BY productId
          ) rep ON rep.repId = sp.id
-         WHERE sp.chainId <> ?`,
+         WHERE sp.chainId <> ? AND sp.provisional = 0`,
         [locale, locale, excludeChainId, excludeChainId]
     );
     return rows.map((r: any) => ({
@@ -275,6 +351,44 @@ export const getStoreProductsCrossChainWithProductData = async (excludeChainId: 
         amount: r.amount !== null ? parseFloat(r.amount) : null,
     }));
 };
+
+// ── Match-candidate catalog cache ──────────────────────────────────────────────────
+// The /store-products/match endpoint is called ONCE PER OCR LINE, and each call re-fetched
+// the full ~13k-row chain catalog (13k-row correlated isCatalog subquery + alias attach).
+// A 40-line receipt = 40 identical heavy queries against a 10-connection pool, all firing
+// within a couple of seconds. This TTL cache collapses them to ONE fetch per (chain, locale)
+// per window. The catalog changes on the order of days (scrapes); a short TTL bounds the
+// staleness of freshly-learned vocabulary aliases to seconds. Candidates are read-only in
+// findBestProductMatches, so the shared array is safe to reuse across requests.
+const CATALOG_CACHE_TTL_MS = 30_000;
+type CatalogEntry = { at: number; data: any[] };
+const sameChainCatalogCache = new Map<string, CatalogEntry>();
+const crossChainCatalogCache = new Map<string, CatalogEntry>();
+
+export const getCachedChainCandidates = async (chainId: number, locale: Locale = 'lt'): Promise<any[]> => {
+    const key = `${chainId}:${locale}`;
+    const hit = sameChainCatalogCache.get(key);
+    if (hit && Date.now() - hit.at < CATALOG_CACHE_TTL_MS) return hit.data;
+    const data = await getStoreProductsByChainWithProductData(chainId, locale);
+    sameChainCatalogCache.set(key, { at: Date.now(), data });
+    return data;
+};
+
+export const getCachedCrossChainCandidates = async (excludeChainId: number, locale: Locale = 'lt'): Promise<any[]> => {
+    const key = `${excludeChainId}:${locale}`;
+    const hit = crossChainCatalogCache.get(key);
+    if (hit && Date.now() - hit.at < CATALOG_CACHE_TTL_MS) return hit.data;
+    const data = await getStoreProductsCrossChainWithProductData(excludeChainId, locale);
+    crossChainCatalogCache.set(key, { at: Date.now(), data });
+    return data;
+};
+
+/** Drop cached catalogs (call after a bulk catalog mutation if immediate freshness matters). */
+export const invalidateCatalogCache = (): void => {
+    sameChainCatalogCache.clear();
+    crossChainCatalogCache.clear();
+};
+
 export const searchUnifiedProductsByChain = async (
     chainId: number,
     name: string,

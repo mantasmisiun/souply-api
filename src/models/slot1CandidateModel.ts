@@ -2,17 +2,65 @@ import pool from '../config/db.js';
 import { crossChainNameSimilarity } from '../utils/productNameNormalize.js';
 import { swipeLog } from '../utils/swipeLogger.js';
 import type { Locale } from '../middleware/locale.js';
+import { RECOGNITION } from '../../../shared/recognitionConfig.js';
+import { fetchCanonicalAliasesForSps } from './storeProductAliasModel.js';
+
+/**
+ * Best cross-chain name similarity over a product's catalog name AND its canonical
+ * receipt-name aliases on BOTH sides (Issue H vocab-driven queue). When the chains'
+ * catalog names diverge but they PRINT the product similarly, a learned alias bridges
+ * the pair — surfacing identity candidates a pure name comparison would miss. Reduces
+ * to plain name×name similarity when neither side has aliases. See RECEIPT_VOCABULARY.md.
+ */
+export function bestCrossChainSimilarity(aName: string, aAliases: string[], bName: string, bAliases: string[]): number {
+    const aTexts = [aName, ...aAliases];
+    const bTexts = [bName, ...bAliases];
+    let best = 0;
+    for (const a of aTexts) {
+        for (const b of bTexts) {
+            const s = crossChainNameSimilarity(a, b);
+            if (s > best) best = s;
+        }
+    }
+    return best;
+}
+
+/**
+ * Diagnostics-only (Log 4): same best score as bestCrossChainSimilarity, but also reports
+ * whether the WINNING text pair used a learned alias (index > 0) rather than the catalog
+ * name on either side — so the Slot-1 vocab-bridge log can flag when the vocabulary, not
+ * the catalog names, is what surfaced a cross-chain identity candidate. Kept SEPARATE from
+ * the hot-path function above so per-candidate scoring is untouched; called once, only for
+ * the winning candidate.
+ */
+export function bestCrossChainSimilarityDetailed(
+    aName: string, aAliases: string[], bName: string, bAliases: string[],
+): { score: number; viaAlias: boolean; aText: string; bText: string; catalogScore: number } {
+    const aTexts = [aName, ...aAliases];
+    const bTexts = [bName, ...bAliases];
+    let best = 0, bi = 0, bj = 0;
+    for (let i = 0; i < aTexts.length; i++) {
+        for (let j = 0; j < bTexts.length; j++) {
+            const s = crossChainNameSimilarity(aTexts[i], bTexts[j]);
+            if (s > best) { best = s; bi = i; bj = j; }
+        }
+    }
+    // catalogScore = the catalog-name × catalog-name pair (index 0×0) on its own, so the
+    // log can say whether the alias was NECESSARY (catalog below threshold) or merely
+    // scored higher (catalog already above threshold).
+    return { score: best, viaAlias: bi > 0 || bj > 0, aText: aTexts[bi], bText: bTexts[bj], catalogScore: crossChainNameSimilarity(aName, bName) };
+}
 
 /** Minimum match score for an anchor SP to be used as a Slot 1 source. */
-const SLOT1_ANCHOR_MIN_SCORE = 0.85;
+const SLOT1_ANCHOR_MIN_SCORE = RECOGNITION.match.slot1AnchorMinScore;
 /**
  * Minimum cross-chain name similarity to surface a pair.
  * Lower than Slot 3 (0.75) because chain-specific naming diverges cross-chain
  * even after stripping brand tokens.
  */
-const SLOT1_CROSS_CHAIN_MIN_SCORE = 0.6;
+const SLOT1_CROSS_CHAIN_MIN_SCORE = RECOGNITION.match.slot1CrossChainMinScore;
 /** Candidates fetched per (otherChainId, categoryId) group for JS scoring. */
-const MAX_CANDIDATES_PER_GROUP = 25;
+const MAX_CANDIDATES_PER_GROUP = RECOGNITION.match.maxCandidatesPerGroup;
 
 export interface RawSlot1Row {
     leftSpId: number;
@@ -155,6 +203,14 @@ export async function fetchSlot1Rows(userId: string, priorityReceiptId?: number,
 
     const candidateChainIds = [...new Set((candidateRows as any[]).map((r: any) => Number(r.chainId)))];
 
+    // Vocabulary bridge (Issue H): attach canonical receipt-name aliases to anchors +
+    // candidates so scoring can match the way each chain PRINTS a product, not just its
+    // catalog name. Targeted fetch (only the SPs in play); no-op until aliases exist.
+    const aliasBySp = await fetchCanonicalAliasesForSps([
+        ...(anchorRows as any[]).map((a: any) => Number(a.anchorSpId)),
+        ...(candidateRows as any[]).map((c: any) => Number(c.spId)),
+    ]);
+
     // ── Step 3: score anchors vs candidates, keep best per canonical pair ─────
     const best = new Map<string, { score: number; row: RawSlot1Row }>();
 
@@ -168,9 +224,11 @@ export async function fetchSlot1Rows(userId: string, priorityReceiptId?: number,
             let bestCand: any = null;
 
             for (const cand of candidates) {
-                const score = crossChainNameSimilarity(
+                const score = bestCrossChainSimilarity(
                     String(anchor.anchorProductName),
+                    aliasBySp.get(Number(anchor.anchorSpId)) ?? [],
                     String(cand.productName),
+                    aliasBySp.get(Number(cand.spId)) ?? [],
                 );
                 if (score > bestScore) {
                     bestScore = score;
@@ -183,6 +241,23 @@ export async function fetchSlot1Rows(userId: string, priorityReceiptId?: number,
                 continue;
             }
             swipeLog(`[Slot1]   anchor "${anchor.anchorProductName}" (${anchor.anchorChainName}) → best match "${bestCand.productName}" (${bestCand.chainName}) score=${bestScore.toFixed(3)}`);
+            // Log 4 — vocab bridge: flag (always, ungated) when a LEARNED alias, not the
+            // catalog names, is what carried this cross-chain pair over the threshold. No-op
+            // until canonical aliases exist, so it stays silent on a cold vocabulary.
+            const bridge = bestCrossChainSimilarityDetailed(
+                String(anchor.anchorProductName), aliasBySp.get(Number(anchor.anchorSpId)) ?? [],
+                String(bestCand.productName), aliasBySp.get(Number(bestCand.spId)) ?? [],
+            );
+            if (bridge.viaAlias) {
+                const aliasNeeded = bridge.catalogScore < SLOT1_CROSS_CHAIN_MIN_SCORE;
+                console.log(
+                    `[VOCAB] slot-1 bridge: "${anchor.anchorProductName}" ↔ "${bestCand.productName}" — top score via learned alias "${bridge.aText}" ≈ "${bridge.bText}" (${bridge.score.toFixed(3)}); ` +
+                    `catalog names alone ${bridge.catalogScore.toFixed(3)} ` +
+                    (aliasNeeded
+                        ? `< ${SLOT1_CROSS_CHAIN_MIN_SCORE} — alias was NEEDED to surface this pair`
+                        : `≥ ${SLOT1_CROSS_CHAIN_MIN_SCORE} — alias only raised the score, catalog names would have surfaced it too`),
+                );
+            }
 
             const anchorSpId = Number(anchor.anchorSpId);
             const candSpId = Number(bestCand.spId);

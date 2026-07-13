@@ -20,6 +20,7 @@ jest.setTimeout(20000);
 
 const RECOVERED_USER = 'rectest-rec0-0000-0000-000000000000';
 const FRESH_USER     = 'rectest-fresh-000-0000-000000000000';
+const DECOY_USER     = 'rectest-dcoy-0000-0000-000000000000';   // a 3rd user used to force a date+total collision
 const FP             = 'recovery-test-fingerprint';
 
 const CHAIN_A_ID = 901;
@@ -37,8 +38,8 @@ async function cleanup() {
         await conn.query(`DELETE FROM UserProductScore WHERE userId IN (?, ?)`, [RECOVERED_USER, FRESH_USER]);
         await conn.query(`DELETE FROM Basket WHERE userId IN (?, ?)`, [RECOVERED_USER, FRESH_USER]);
         await conn.query(`DELETE FROM ShoppingList WHERE userId IN (?, ?)`, [RECOVERED_USER, FRESH_USER]);
-        await conn.query(`DELETE FROM Receipt WHERE userId IN (?, ?)`, [RECOVERED_USER, FRESH_USER]);
-        await conn.query(`DELETE FROM User WHERE id IN (?, ?)`, [RECOVERED_USER, FRESH_USER]);
+        await conn.query(`DELETE FROM Receipt WHERE userId IN (?, ?, ?)`, [RECOVERED_USER, FRESH_USER, DECOY_USER]);
+        await conn.query(`DELETE FROM User WHERE id IN (?, ?, ?)`, [RECOVERED_USER, FRESH_USER, DECOY_USER]);
         await conn.query(`DELETE FROM Store WHERE id IN (?, ?)`, [STORE_A_ID, STORE_B_ID]);
         await conn.query(`DELETE FROM StoreChain WHERE id IN (?, ?)`, [CHAIN_A_ID, CHAIN_B_ID]);
         await conn.query(`SET foreign_key_checks = 1`);
@@ -58,20 +59,23 @@ interface SeedReceipt {
     userId: string;
     storeId: number;
     receiptNo: string;
+    receiptNos?: string[];   // the functional identifier column; defaults to [receiptNo]
     date: string;       // YYYY-MM-DD
     total: number;
 }
 
 async function seedReceipt(r: SeedReceipt): Promise<number> {
+    const receiptNos = r.receiptNos ?? [r.receiptNo];
     const parsedData = JSON.stringify({
-        footer: { receiptNo: r.receiptNo, date: r.date, total: r.total },
+        footer: { receiptNo: r.receiptNo, receiptNos, date: r.date, total: r.total },
         products: [],
     });
+    // receiptNo is a generated column (receiptNoCanonical = receiptNos[0]); only insert receiptNos.
     const [res]: any = await pool.query(
         `INSERT INTO Receipt
-            (userId, storeId, filePath, fileType, processingStatus, receiptNo, receiptDate, parsedData)
+            (userId, storeId, filePath, fileType, processingStatus, receiptNos, receiptDate, parsedData)
          VALUES (?, ?, '/dev/null', 'image/jpeg', 'completed', ?, ?, ?)`,
-        [r.userId, r.storeId, r.receiptNo, r.date, parsedData],
+        [r.userId, r.storeId, JSON.stringify(receiptNos), r.date, parsedData],
     );
     return Number(res.insertId);
 }
@@ -95,9 +99,9 @@ describe('POST /api/users/recover', () => {
         try {
             await conn.query(`SET foreign_key_checks = 0`);
             await conn.query(`DELETE FROM AccountRecoveryAttempt WHERE deviceFingerprint = ?`, [FP]);
-            await conn.query(`DELETE FROM Receipt WHERE userId IN (?, ?)`, [RECOVERED_USER, FRESH_USER]);
+            await conn.query(`DELETE FROM Receipt WHERE userId IN (?, ?, ?)`, [RECOVERED_USER, FRESH_USER, DECOY_USER]);
             await conn.query(`DELETE FROM Basket WHERE userId IN (?, ?)`, [RECOVERED_USER, FRESH_USER]);
-            await conn.query(`DELETE FROM User WHERE id = ?`, [FRESH_USER]);
+            await conn.query(`DELETE FROM User WHERE id IN (?, ?)`, [FRESH_USER, DECOY_USER]);
             await conn.query(`SET foreign_key_checks = 1`);
             // Re-create the recovered user fresh (points re-stamped).
             await conn.query(`INSERT INTO User (id, points) VALUES (?, 100) ON DUPLICATE KEY UPDATE points = 100`, [RECOVERED_USER]);
@@ -178,6 +182,51 @@ describe('POST /api/users/recover', () => {
             [FP],
         );
         expect(attempts[0].failureReason).toBe('no-match');
+    });
+
+    it('AMBIGUITY TIEBREAKER — a STRONG receiptNo overlap resolves a date+total collision to the right user', async () => {
+        // RECOVERED user's 3 receipts (strong, structured ids) across both chains.
+        await seedReceipt({ userId: RECOVERED_USER, storeId: STORE_A_ID, receiptNo: '168/645/104148', date: '2026-03-01', total: 10.00 });
+        await seedReceipt({ userId: RECOVERED_USER, storeId: STORE_B_ID, receiptNo: '9/100/55555', date: '2026-03-02', total: 20.00 });
+        await seedReceipt({ userId: RECOVERED_USER, storeId: STORE_A_ID, receiptNo: '8/200/77777', date: '2026-03-03', total: 30.00 });
+        // A DECOY user whose receipt collides with the first on date+total but has a DIFFERENT id.
+        await pool.query(`INSERT INTO User (id, points) VALUES (?, 0)`, [DECOY_USER]);
+        await seedReceipt({ userId: DECOY_USER, storeId: STORE_A_ID, receiptNo: '999/999/99999', date: '2026-03-01', total: 10.00 });
+        await pool.query(`INSERT INTO Basket (userId, status, name) VALUES (?, 'draft', 'fresh-basket')`, [FRESH_USER]);
+
+        const res = await request(app)
+            .post('/api/users/recover')
+            .send({
+                deviceFingerprint: FP,
+                freshUserId: FRESH_USER,
+                receipts: [
+                    { receiptNo: '168/645/104148', date: '2026-03-01', total: 10.00 }, // date+total collides w/ DECOY → strong id picks RECOVERED
+                    { receiptNo: '9/100/55555', date: '2026-03-02', total: 20.00 },
+                    { receiptNo: '8/200/77777', date: '2026-03-03', total: 30.00 },
+                ],
+            });
+        expect(res.body).toEqual({ status: 'success', recoveredUserId: RECOVERED_USER });
+    });
+
+    it('AMBIGUITY TIEBREAKER — a collision with NO strong overlap still fails (a short value never tiebreaks)', async () => {
+        await seedReceipt({ userId: RECOVERED_USER, storeId: STORE_A_ID, receiptNo: '3157', date: '2026-03-01', total: 10.00 }); // weak id
+        await seedReceipt({ userId: RECOVERED_USER, storeId: STORE_B_ID, receiptNo: '9/100/55555', date: '2026-03-02', total: 20.00 });
+        await seedReceipt({ userId: RECOVERED_USER, storeId: STORE_A_ID, receiptNo: '8/200/77777', date: '2026-03-03', total: 30.00 });
+        await pool.query(`INSERT INTO User (id, points) VALUES (?, 0)`, [DECOY_USER]);
+        await seedReceipt({ userId: DECOY_USER, storeId: STORE_A_ID, receiptNo: '4242', date: '2026-03-01', total: 10.00 }); // weak, collides
+
+        const res = await request(app)
+            .post('/api/users/recover')
+            .send({
+                deviceFingerprint: FP,
+                freshUserId: FRESH_USER,
+                receipts: [
+                    { receiptNo: '3157', date: '2026-03-01', total: 10.00 }, // weak → can't tiebreak the collision
+                    { receiptNo: '9/100/55555', date: '2026-03-02', total: 20.00 },
+                    { receiptNo: '8/200/77777', date: '2026-03-03', total: 30.00 },
+                ],
+            });
+        expect(res.body).toEqual({ status: 'failed' });
     });
 
     it('rejects with status=failed when all 3 receipts are from a single chain', async () => {

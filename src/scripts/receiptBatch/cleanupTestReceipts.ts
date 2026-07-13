@@ -103,26 +103,30 @@ const run = async () => {
         );
         console.log(`Deleted Receipt rows: ${receiptDel.affectedRows}`);
 
-        // 4. Orphan StoreProducts — zero remaining Price rows.
-        //    isFallback=1 SPs are scraped and get a pity-pass: never delete those,
-        //    even if temporarily priceless.
+        // 4. Orphan StoreProducts — zero remaining Price rows. Scraped SPs keep
+        //    their scrape-sourced prices (we only deleted batch-receipt prices),
+        //    so the NOT EXISTS guard already protects them. (isFallback is a
+        //    Price column, not a StoreProduct one — referencing sp.isFallback
+        //    here errored.)
         if (spIds.length > 0) {
             const [spDel]: any = await conn.query(
                 `DELETE sp FROM StoreProduct sp
                   WHERE sp.id IN (?)
-                    AND sp.isFallback = 0
                     AND NOT EXISTS (SELECT 1 FROM Price pr WHERE pr.storeProductId = sp.id)`,
                 [spIds]
             );
             console.log(`Deleted orphan StoreProducts: ${spDel.affectedRows}`);
         }
 
-        // 5. Orphan Products — zero remaining StoreProducts.
+        // 5. Orphan Products — zero remaining StoreProducts AND not referenced
+        //    as another Product's baseProductId (that self-FK is RESTRICT and
+        //    would otherwise abort the delete).
         if (productIds.length > 0) {
             const [pDel]: any = await conn.query(
                 `DELETE p FROM Product p
                   WHERE p.id IN (?)
-                    AND NOT EXISTS (SELECT 1 FROM StoreProduct sp WHERE sp.productId = p.id)`,
+                    AND NOT EXISTS (SELECT 1 FROM StoreProduct sp WHERE sp.productId = p.id)
+                    AND NOT EXISTS (SELECT 1 FROM Product child WHERE child.baseProductId = p.id)`,
                 [productIds]
             );
             console.log(`Deleted orphan Products: ${pDel.affectedRows}`);

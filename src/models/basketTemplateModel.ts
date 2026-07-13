@@ -163,6 +163,13 @@ export const setTemplateCover = async (
     await pool.query(`UPDATE BasketTemplate SET ${sets.join(', ')} WHERE id = ?`, params);
 };
 
+/** Owning userId of a basket template (null if missing) — for the ownership middleware
+ *  that replaces the spoofable x-user-id callerId() on template routes. */
+export const getBasketTemplateOwnerId = async (id: number): Promise<string | null> => {
+    const [rows]: any = await pool.query('SELECT userId FROM BasketTemplate WHERE id = ? LIMIT 1', [id]);
+    return rows[0] ? String(rows[0].userId) : null;
+};
+
 export const getTemplateById = async (id: number): Promise<BasketTemplateRow | null> => {
     const [rows]: any = await pool.query(
         `SELECT * FROM BasketTemplate WHERE id = ? LIMIT 1`,

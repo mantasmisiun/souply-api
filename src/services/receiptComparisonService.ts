@@ -1,6 +1,7 @@
 import pool from '../config/db.js';
 import { getReceiptById } from '../models/receiptModel.js';
 import { getStoreById, getClosestStorePerChainToStore, ClosestChainStore } from '../models/storeModel.js';
+import { unitFamily } from './canonicalUnit.js';
 
 interface ParsedReceiptItem {
     storeProductId: number | null;
@@ -174,7 +175,26 @@ const calculateItemTotalSync = (
     if (best.isWeighable) {
         return round2(normalizedQty * bestPricePerUnit);
     }
-    const packsNeeded = Math.ceil(normalizedQty / best.normalizedAmount);
+    // Pack rounding `ceil(qty / packSize)` only makes sense when the request
+    // and the SP's pack size are the same kind of unit. When the pack is a
+    // weight/volume (fluid family) but the request is NOT — e.g. a "1 vnt"
+    // receipt line priced against a "0.010 g" Šafranas pack — `packSize` is a
+    // sub-gram weight, and dividing gives ceil(1 / 0.010) = 100 packs = €229,
+    // which detonates the whole comparison. In that case the quantity is a
+    // COUNT of items, so buy `quantity` whole packs instead. (Count-family
+    // packs like a 10-vnt egg tray still divide correctly via the else branch.)
+    const inFam = unitFamily(inputUnit);
+    const packFam = unitFamily(best.unit);
+    const packsNeeded = (packFam === 'fluid' && inFam !== 'fluid')
+        ? Math.max(1, Math.ceil(quantity))
+        : Math.max(1, Math.ceil(normalizedQty / best.normalizedAmount));
+    if (packsNeeded > 50) {
+        console.warn(
+            `[receiptComparison] suspicious packsNeeded=${packsNeeded} ` +
+            `(qty=${quantity} ${inputUnit ?? '?'} vs pack ${best.normalizedAmount} ${best.unit ?? '?'}) ` +
+            `→ €${round2(packsNeeded * best.effectivePrice)}; check for a unit/pack-size data error`,
+        );
+    }
     return round2(packsNeeded * best.effectivePrice);
 };
 
@@ -426,6 +446,18 @@ export const getReceiptComparison = async (
 
     const currentBasket = baskets.get(currentStore.id)!;
 
+    // Receipt-level combo/set-deal discount (footer.comboDiscount, e.g. IKI's bare
+    // "RINKINYS -1,90"): the VISITED store's real paid total is that much lower than the
+    // line sum. Applied to the visited basket ONLY — whether another chain runs the same
+    // set deal is unknown, so alternatives stay conservative (mirrors the promo-imputation
+    // reasoning above). Without this the visited chain looks ~comboDiscount more expensive
+    // than reality (receipt-229: 4.03 vs true 2.13 → "IKI most expensive").
+    const comboRaw = Number(parsedData?.footer?.comboDiscount);
+    const comboDiscount = Number.isFinite(comboRaw) && comboRaw > 0
+        ? Math.min(round2(comboRaw), currentBasket.total)
+        : 0;
+    if (comboDiscount > 0) currentBasket.total = round2(currentBasket.total - comboDiscount);
+
     const alternatives: ComparisonChainResult[] = alternativeStores.map((altStore) => {
         const b = baskets.get(altStore.storeId)!;
         return {
@@ -460,6 +492,9 @@ export const getReceiptComparison = async (
             knownItems: currentBasket.knownItems,
             imputedItems: currentBasket.imputedItems,
             flatItems: currentBasket.flatItems,
+            // Additive: the applied combo/set-deal discount, so the UI can annotate the row
+            // ("įsk. rinkinio nuolaidą −1,90 €"). Absent/0 on receipts without one.
+            comboDiscount: comboDiscount > 0 ? comboDiscount : undefined,
             chainLogoUrl: currentStore.logoUrl || null,
         },
         alternatives,
