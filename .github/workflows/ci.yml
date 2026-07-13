@@ -25,6 +25,10 @@ jobs:
           repository: mantasmisiun/souply-shared
           path: shared
           token: ${{ secrets.SHARED_REPO_TOKEN }}
+          # Pair shared with the SAME environment branch as this run (PRs =
+          # the promotion target via base_ref; pushes = the pushed branch).
+          # Default was souply-shared's main — stale under new code.
+          ref: ${{ github.base_ref || github.ref_name }}
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -80,6 +84,10 @@ jobs:
           repository: mantasmisiun/souply-shared
           path: shared
           token: ${{ secrets.SHARED_REPO_TOKEN }}
+          # Pair shared with the SAME environment branch as this run (PRs =
+          # the promotion target via base_ref; pushes = the pushed branch).
+          # Default was souply-shared's main — stale under new code.
+          ref: ${{ github.base_ref || github.ref_name }}
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
