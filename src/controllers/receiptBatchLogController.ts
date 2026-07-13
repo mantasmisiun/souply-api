@@ -43,6 +43,8 @@ interface BatchLogBody {
     parsedData: any;
     dryRun: boolean;
     userId?: string;
+    /** 'ios' | 'android' — which OCR/parser combo produced this run. */
+    platform?: string;
 }
 
 /**
@@ -53,7 +55,12 @@ interface BatchLogBody {
 export const logBatchReceipt = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const body = req.body as BatchLogBody;
-        const { chain, filename, rawLines, parsedData, dryRun, userId } = body ?? {};
+        const { chain, filename, rawLines, parsedData, dryRun, userId, platform } = body ?? {};
+        // Per-platform artefact suffix so an Android run no longer OVERWRITES
+        // the iOS run's OCR snapshot (they used to clobber each other, making
+        // the other combo unreplayable). The unsuffixed files stay = latest
+        // run, preserving every existing reader.
+        const plat = platform === 'ios' || platform === 'android' ? platform : null;
         if (!chain || !filename || !parsedData) {
             res.status(400).json({ error: 'chain, filename, parsedData are required' });
             return;
@@ -82,8 +89,10 @@ export const logBatchReceipt = async (req: Request, res: Response, next: NextFun
             // failing batch receipt can be replayed/fixture-ised without
             // pasting Metro logs around.
             writeLog(logDir, 'rawLines.json', rawLines);
+            if (plat) writeLog(logDir, `rawLines.${plat}.json`, rawLines);
         }
         writeLog(logDir, 'parsedData.json', parsedData);
+        if (plat) writeLog(logDir, `parsedData.${plat}.json`, parsedData);
 
         const chainId: number | null =
             typeof parsedData?.header?.chainId === 'number'
@@ -285,6 +294,12 @@ const fmtDelta = (prev: number | undefined, now: number, digits = 0): string => 
 export const finalizeBatchReport = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const chain = String(req.body?.chain ?? '').trim();
+        // Per-combo tracking: with a platform the baseline/report land in
+        // _baseline.<platform>.json / _report.<platform>.md, so "change from
+        // previous run" always diffs like-for-like (iOS vs iOS, Android vs
+        // Android). Without a platform the legacy shared files are used.
+        const platRaw = String(req.body?.platform ?? '').trim();
+        const plat = platRaw === 'ios' || platRaw === 'android' ? platRaw : null;
         if (!chain) {
             res.status(400).json({ error: 'chain is required' });
             return;
@@ -402,7 +417,7 @@ export const finalizeBatchReport = async (req: Request, res: Response, next: Nex
         metrics.reviewableCount = reviewable.length;
 
         // Diff block only renders when a previous snapshot exists.
-        const baselinePath = path.join(chainDir, BASELINE_FILE);
+        const baselinePath = path.join(chainDir, plat ? `_baseline.${plat}.json` : BASELINE_FILE);
         let prev: ChainMetrics | null = null;
         if (fs.existsSync(baselinePath)) {
             try {
@@ -458,7 +473,7 @@ export const finalizeBatchReport = async (req: Request, res: Response, next: Nex
             rows.push(...reviewable);
         }
 
-        const reportPath = path.join(chainDir, '_report.md');
+        const reportPath = path.join(chainDir, plat ? `_report.${plat}.md` : '_report.md');
         fs.writeFileSync(reportPath, rows.join('\n'));
         // Snapshot for next run's diff. Always overwrites — each batch
         // sets the baseline for the next one.

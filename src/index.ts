@@ -186,14 +186,18 @@ if (!IS_PRODUCTION) {
     // served back by the /receipts-truth static route). truth=null deletes.
     app.post('/receipts-truth-set', express.json({ limit: '4mb' }), (req, res) => {
         try {
-            const { chain, file, truth } = req.body as { chain?: string; file?: string; truth?: any };
+            const { chain, file, truth, platform } = req.body as { chain?: string; file?: string; truth?: any; platform?: string };
             if (!chain || !file || !/^[a-z]+$/.test(chain)) {
                 res.status(400).json({ error: 'chain and file required' });
                 return;
             }
             const base = path.basename(file).replace(/\.(pdf|png|jpg|jpeg)$/i, '');
             const dir = path.resolve(process.cwd(), '../shared/receipts', chain);
-            const dest = path.join(dir, `${base}.truth.json`);
+            // PER-PLATFORM truth: Android saves land in .truth.android.json
+            // (its own OCR-flavor copy); iOS keeps the base file. Each combo
+            // is scored against a truth in its own flavor.
+            const suffix = platform === 'android' ? '.truth.android.json' : '.truth.json';
+            const dest = path.join(dir, `${base}${suffix}`);
             if (truth === null) {
                 fsSync.rmSync(dest, { force: true });
                 console.log(`[truth-set] removed ${dest}`);
