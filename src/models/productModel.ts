@@ -5,6 +5,7 @@ import {
     loadCanonicalsForProducts,
     attachCanonicalFields,
 } from '../services/productCanonical.js';
+import { attachUnitPriceBadges } from '../services/productBadge.js';
 import { RECOGNITION } from '../../../shared/recognitionConfig.js';
 
 type Connection = typeof pool | any;
@@ -89,7 +90,7 @@ export const searchProduct = async (query: string) => {
     const productsWithCat = (products as any[]).map((p: any) => ({ ...p, categoryName: catNameMap[p.categoryId] ?? null }));
     const productIds = productsWithCat.map((p: any) => p.id);
     const canonicals = await loadCanonicalsForProducts(productIds);
-    return attachCanonicalFields(productsWithCat, canonicals);
+    return attachUnitPriceBadges(attachCanonicalFields(productsWithCat, canonicals));
 };
 
 export const getProductById = async (id: number) => {
@@ -365,7 +366,7 @@ export const getProductsByCategoryWithAmounts = async (
     // basket +/- buttons to know the right step size + display unit).
     const productIds = products.map(p => Number(p.id));
     const canonicals = await loadCanonicalsForProducts(productIds);
-    const withCanon = attachCanonicalFields(products, canonicals);
+    const withCanon = await attachUnitPriceBadges(attachCanonicalFields(products, canonicals));
     return userId ? await attachPersonalChainLogos(userId, withCanon) : withCanon;
 };
 
@@ -726,6 +727,6 @@ export const getAllProductsByL2WithAmounts = async (
 
     const productIds = products.map(p => Number(p.id));
     const canonicals = await loadCanonicalsForProducts(productIds);
-    const withCanon = attachCanonicalFields(products, canonicals);
+    const withCanon = await attachUnitPriceBadges(attachCanonicalFields(products, canonicals));
     return userId ? await attachPersonalChainLogos(userId, withCanon) : withCanon;
 };
