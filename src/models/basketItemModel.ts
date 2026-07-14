@@ -28,6 +28,7 @@ export const getBasketItemsByBasketId = async (basketId: number, userId?: string
         `SELECT bi.id, bi.basketId, bi.productId,
                 bi.quantity, bi.matchMode,
                 p.name AS productName,
+                p.canonicalUnit,
                 p.globalScore,
                 (SELECT JSON_ARRAYAGG(spi.imageUrl)
                  FROM StoreProduct spi
