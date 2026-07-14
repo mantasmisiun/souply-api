@@ -113,7 +113,10 @@ export const getListItemsByShoppingListId = async (listId: number) => {
         isWeighable: row.isWeighable === 1,
         quantity: parseFloat(row.quantity),
         price: row.price ? parseFloat(row.price) : null,
-        unit: row.isWeighable ? 'kg' : 'vnt.',
+        // Preserve the store product's pack unit (l/ml/g/…) for the app's
+        // "N × 500 ml" render — fall back to vnt. only when the row has no SP
+        // unit. Weighables stay 'kg': their display path measures, not packs.
+        unit: row.isWeighable ? 'kg' : (row.unit ?? 'vnt.'),
         amount: row.amount ? parseFloat(row.amount) : null,
         requiresCoupon: row.couponLabel != null,
         couponLabel: row.couponLabel ?? null,
