@@ -1,4 +1,5 @@
 import pool from '../config/db.js';
+import { loadCanonicalsForProducts } from '../services/productCanonical.js';
 
 export type MatchMode = 'sku' | 'base';
 
@@ -28,7 +29,6 @@ export const getBasketItemsByBasketId = async (basketId: number, userId?: string
         `SELECT bi.id, bi.basketId, bi.productId,
                 bi.quantity, bi.matchMode,
                 p.name AS productName,
-                p.canonicalUnit,
                 p.globalScore,
                 (SELECT JSON_ARRAYAGG(spi.imageUrl)
                  FROM StoreProduct spi
@@ -42,8 +42,18 @@ export const getBasketItemsByBasketId = async (basketId: number, userId?: string
         [basketId]
     );
 
+    // canonicalUnit is a COMPUTED attribute (canonical service over StoreProduct
+    // amounts/units), not a Product column — attach it here, keyed by productId.
+    const canonicals = rows.length > 0
+        ? await loadCanonicalsForProducts(rows.map((r: any) => Number(r.productId)))
+        : new Map();
+    const withUnit = (r: any) => ({
+        ...r,
+        canonicalUnit: canonicals.get(Number(r.productId))?.unit ?? null,
+    });
+
     if (!userId || rows.length === 0) {
-        return rows.map((r: any) => ({ ...r, isCritical: false }));
+        return rows.map((r: any) => ({ ...withUnit(r), isCritical: false }));
     }
 
     const [userScores]: any = await pool.query(
@@ -85,7 +95,7 @@ export const getBasketItemsByBasketId = async (basketId: number, userId?: string
     }
 
     return rows.map((r: any) => ({
-        ...r,
+        ...withUnit(r),
         isCritical: isCriticalFor(Number(r.productId), Number(r.globalScore ?? 0)),
     }));
 };
