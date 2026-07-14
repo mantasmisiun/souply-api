@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from "express";
 import sharp from "sharp";
 import pool from "../config/db.js";
-import { createReceipt, getReceiptsByUserId, getReceiptById, deleteReceipt, getReceiptItemsWithDetails, updateReceiptFilePath, getReceiptByReceiptNoAndUser, getReceiptByAnyReceiptNoAndUser, completeMandatorySwipes } from "../models/receiptModel.js";
+import { createReceipt, getReceiptsByUserId, getReceiptById, deleteReceipt, getReceiptItemsWithDetails, updateReceiptFilePath, getReceiptByReceiptNoAndUser, getReceiptByAnyReceiptNoAndUser, getReceiptByAnyReceiptNoStoreDate, completeMandatorySwipes } from "../models/receiptModel.js";
 import {
     getSwipeCandidatesWithDetails,
     getVerifiedStoreProductIdsForReceipt,
@@ -249,6 +249,28 @@ export const createReceiptFromOcr = async (req: Request, res: Response, next: Ne
                     photoPending: !(typeof existing.filePath === 'string' && existing.filePath.trim().length > 0),
                 });
                 return;
+            }
+        }
+        // CROSS-USER witness overlap (upfront twin of the unique-key safety net
+        // below): the unique key only collides on the exact canonical, so a
+        // garbled canonical or synthetic-only capture on either side slips it —
+        // but both scans carry the deterministic date+time+total witness in
+        // receiptNos. Bounded by store + day, so the check is a handful of rows.
+        {
+            const dupStoreId = parsedData.header?.storeId ?? null;
+            const dupDate = parsedData.footer?.date ?? null;
+            if (candidateReceiptNos.length && dupStoreId != null && dupDate) {
+                const other = await getReceiptByAnyReceiptNoStoreDate(
+                    candidateReceiptNos, Number(dupStoreId), String(dupDate), String(userId),
+                );
+                if (other) {
+                    res.status(409).json({
+                        error: 'duplicate',
+                        crossAccount: true,
+                        message: 'Receipt already registered to another account',
+                    });
+                    return;
+                }
             }
         }
         // Ensure the User row exists before the FK-dependent Receipt insert.

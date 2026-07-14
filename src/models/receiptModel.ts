@@ -168,6 +168,39 @@ export const getReceiptByAnyReceiptNoAndUser = async (
     return rows[0] || null;
 };
 
+/**
+ * CROSS-USER witness overlap: the same physical receipt uploaded from two identities
+ * only collides on the DB unique key when both scans captured the IDENTICAL canonical.
+ * A garbled canonical on one side (r175 "24/626/17680" vs r191 "24/626/117680") or a
+ * synthetic-only capture (r189) shares no key — but the receiptNos witness sets overlap
+ * (the deterministic date+time+total synthetic rides in both). Bounded by store + day so
+ * the JSON scan only ever touches that store's receipts for that date.
+ */
+export const getReceiptByAnyReceiptNoStoreDate = async (
+    receiptNos: string[],
+    storeId: number,
+    date: string,
+    excludeUserId?: string,
+) => {
+    const ids = [...new Set(receiptNos.filter((v) => typeof v === 'string' && v.trim() && isDistinctiveReceiptNo(v)))];
+    if (ids.length === 0) return null;
+    const jsonClauses = ids.map(() => 'JSON_CONTAINS(receiptNos, JSON_QUOTE(?))').join(' OR ');
+    const params: any[] = [storeId, date];
+    if (excludeUserId) params.push(excludeUserId);
+    params.push(ids, ...ids);
+    const [rows]: any = await pool.query(
+        `SELECT * FROM Receipt
+         WHERE storeId = ?
+           AND DATE(receiptDate) = ?
+           ${excludeUserId ? 'AND userId != ?' : ''}
+           AND processingStatus IN ("completed", "failed")
+           AND (receiptNoCanonical IN (?) OR ${jsonClauses})
+         LIMIT 1`,
+        params,
+    );
+    return rows[0] || null;
+};
+
 export const getReceiptItemsWithDetails = async (receiptId: number, locale: Locale = 'lt') => {
     // Read from ReceiptItem (ReceiptItem migration): EVERY line, matched or not — the old
     // INNER JOIN Price dropped unmatched lines, which under the no-mint policy is most of the
