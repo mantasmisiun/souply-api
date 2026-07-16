@@ -63,6 +63,7 @@ describe('trip minting at persist time', () => {
     it('lists on the basket JOIN its trip (a split shares one trip)', async () => {
         const la = await asUser(app, USER).post('/api/shopping-lists').send({ storeId: STORE_A, basketId });
         expect([200, 201]).toContain(la.status);
+        expect(la.body.tripId).toBe(tripId); // clients land back on the trip
         listA = la.body.id ?? la.body.listId;
         const lb = await asUser(app, USER).post('/api/shopping-lists').send({ storeId: STORE_B, basketId });
         expect([200, 201]).toContain(lb.status);

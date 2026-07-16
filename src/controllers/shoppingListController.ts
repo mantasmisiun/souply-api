@@ -95,8 +95,9 @@ export const addShoppingList = async (req: Request, res: Response, next: NextFun
             await conn.beginTransaction();
             const id = await createShoppingList(userId, storeId, basketId ?? null, conn);
             // 2.0: the list joins its basket's trip (a split's rows share it)
-            // or mints its own when standalone.
-            await ensureTripForList(id, userId, basketId ?? null, conn);
+            // or mints its own when standalone. Returned so clients can land
+            // back on the trip surface after creating the list(s).
+            const tripId = await ensureTripForList(id, userId, basketId ?? null, conn);
             // Owner membership row — same transaction so the list
             // and its owner either both exist or neither does.
             await addShoppingListMember(id, userId, 'owner', conn);
@@ -155,7 +156,7 @@ export const addShoppingList = async (req: Request, res: Response, next: NextFun
                 }
             }
             await conn.commit();
-            res.status(201).json({ id, userId, storeId, basketId: basketId ?? null });
+            res.status(201).json({ id, userId, storeId, basketId: basketId ?? null, tripId });
         } catch (e) {
             await conn.rollback();
             throw e;
