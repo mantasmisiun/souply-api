@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { requireUser } from '../middleware/sessionAuth.js';
-import { listTrips, archiveTripById, unarchiveTripById } from '../controllers/tripController.js';
+import { listTrips, archiveTripById, unarchiveTripById, fetchTripStats } from '../controllers/tripController.js';
 
 /**
  * Souply 2.0 Phase 4 — the Apsipirkimai tab's trip API. Self-scoped via
@@ -11,6 +11,7 @@ import { listTrips, archiveTripById, unarchiveTripById } from '../controllers/tr
 const router = Router();
 
 router.get('/trips', requireUser, listTrips);
+router.get('/trips/:id/stats', requireUser, fetchTripStats);
 router.post('/trips/:id/archive', requireUser, archiveTripById);
 router.post('/trips/:id/unarchive', requireUser, unarchiveTripById);
 

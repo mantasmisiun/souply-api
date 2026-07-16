@@ -10,9 +10,9 @@ import { ensureTripForReceipt, relinkReceiptToListTrip } from '../src/services/t
  */
 
 const USER = 'trplk-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
-const CHAIN_ID = 9963;
-const STORE_A = 99631;
-const STORE_B = 99632;
+const CHAIN_ID = 9964;
+const STORE_A = 99641;
+const STORE_B = 99642;
 
 const q = async (sql: string, params: any[] = []) => (await pool.query(sql, params) as any)[0];
 
@@ -127,6 +127,24 @@ describe('trip minting at persist time', () => {
         await asUser(app, USER).post(`/api/shopping-lists/${listB}/unskip-receipt`).send({});
         r = await asUser(app, USER).get('/api/trips');
         expect(r.body.find((t: any) => t.id === tripId).stage).toBe(4);
+    });
+
+    it('per-trip stats aggregate from ReceiptItem (spend, chain, member split)', async () => {
+        // The earlier test linked ONE receipt (on listA) into the trip. Give
+        // it two items: 2×1.50 regular + 1×0.80 promo (promo price wins).
+        const [receipt] = await q('SELECT id FROM Receipt WHERE userId = ? AND tripId = ?', [USER, tripId]);
+        await q("INSERT INTO ReceiptItem (receiptId, lineIdx, name, price, quantity) VALUES (?, 0, 'a', 1.50, 2)", [receipt.id]);
+        await q("INSERT INTO ReceiptItem (receiptId, lineIdx, name, price, promoPrice, quantity) VALUES (?, 1, 'b', 1.20, 0.80, 1)", [receipt.id]);
+
+        const r = await asUser(app, USER).get(`/api/trips/${tripId}/stats`);
+        expect(r.status).toBe(200);
+        expect(r.body.receiptCount).toBe(1);
+        expect(r.body.totalSpent).toBeCloseTo(3.80); // 2×1.50 + 0.80
+        expect(r.body.chainBreakdown).toHaveLength(1);
+        expect(r.body.chainBreakdown[0].chainName).toBe('TripLink Chain');
+        expect(r.body.memberSpend).toHaveLength(1);
+        expect(r.body.memberSpend[0].userId).toBe(USER);
+        expect(r.body.memberSpend[0].receiptCount).toBe(1);
     });
 
     it('archive/unarchive round-trip via the member-gated endpoints', async () => {
