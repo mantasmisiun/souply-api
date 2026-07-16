@@ -19,6 +19,7 @@ import { awardReceiptPoints } from './userPointsService.js';
 import { initMandatorySwipeSession, MANDATORY_SWIPES_PER_RECEIPT } from './swipeSessionService.js';
 import { RECOGNITION } from '../../../shared/recognitionConfig.js';
 import { computeItemConfidence, type ItemConfidenceInput } from './itemConfidence.js';
+import { logInteraction, collectReceiptBuySpIds } from '../models/productInteractionModel.js';
 import { computeNeedsHuman } from './queueRanking.js';
 import { prewarmMandatoryQueue } from './mandatoryQueueService.js';
 import { isMislabeledWeighableKg } from '../utils/productMatcher.js';
@@ -800,6 +801,25 @@ export const persistReceiptPrices = async (
             prewarmMandatoryQueue(userId, receiptId).catch((e) =>
                 console.warn(`[persistReceiptPrices] mandatory-queue prewarm failed for receipt ${receiptId}:`, e),
             );
+            // Souply 2.0 receipt_buy (weight 5, the strongest ranking signal):
+            // one interaction per S1/S2 resolved line, INITIAL SAVE ONLY (the
+            // autosave PUT re-sends the same products; reparse never re-fires).
+            // Post-commit fire-and-forget — ranking must never fail a save.
+            void (async () => {
+                try {
+                    const buySpIds = collectReceiptBuySpIds(parsedData?.products ?? []);
+                    if (buySpIds.length === 0) return;
+                    const [prodRows]: any = await pool.query(
+                        'SELECT id, productId FROM StoreProduct WHERE id IN (?)', [buySpIds]);
+                    const bySp = new Map<number, number>(prodRows.map((r: any) => [Number(r.id), Number(r.productId)]));
+                    for (const spId of buySpIds) {
+                        const productId = bySp.get(spId);
+                        if (productId) await logInteraction(userId, productId, 'receipt_buy');
+                    }
+                } catch (e) {
+                    console.warn(`[persistReceiptPrices] receipt_buy logging failed for receipt ${receiptId}:`, e);
+                }
+            })();
         }
     } catch (error) {
         await connection.rollback();

@@ -60,10 +60,12 @@ const run = async () => {
     }
 
     // ── 3. Orphan receipts → ad-hoc trips (born archived, score-exempt) ──
+    // Receipt has NO createdAt column (prod schema) — receiptDate is the only
+    // timestamp; fall back to NOW() via null when even that is missing.
     const [orphans]: any = await pool.query(
-        `SELECT id, userId, createdAt, receiptDate FROM Receipt WHERE tripId IS NULL`);
+        `SELECT id, userId, receiptDate FROM Receipt WHERE tripId IS NULL`);
     for (const r of orphans) {
-        const anchor = r.receiptDate ?? r.createdAt;
+        const anchor = r.receiptDate ?? null;
         const tripId = await createTrip(r.userId, {
             isAdHoc: true,
             scoreExempt: true,

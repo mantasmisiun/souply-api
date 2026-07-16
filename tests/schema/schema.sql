@@ -477,7 +477,7 @@ CREATE TABLE `ProductInteraction` (
   `id` bigint(20) NOT NULL AUTO_INCREMENT,
   `userId` varchar(36) NOT NULL,
   `productId` int(11) NOT NULL,
-  `type` enum('basket_add','list_add','list_check') NOT NULL,
+  `type` enum('basket_add','list_add','list_check','receipt_buy') NOT NULL,
   `createdAt` datetime NOT NULL DEFAULT current_timestamp(),
   PRIMARY KEY (`id`),
   KEY `idx_pi_user_product` (`userId`,`productId`),
