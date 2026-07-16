@@ -10,6 +10,8 @@ import {
     getShareTokenStatus,
     claimShareToken,
     linkReceiptToShoppingList,
+    skipListReceipt,
+    unskipListReceipt,
 } from '../controllers/shoppingListController.js';
 import { requireUser, requireSelfUserParam } from '../middleware/sessionAuth.js';
 import { requireListMember, requireListOwner } from '../middleware/resourceAuth.js';
@@ -121,6 +123,9 @@ router.post('/shopping-lists/:id/duplicate', requireUser, member, duplicateList)
 // Link an uploaded/scanned receipt to a completed list row (post-completion
 // receipt upload flow + duplicate silent-link).
 router.post('/shopping-lists/:id/link-receipt', requireUser, member, linkReceiptToShoppingList);
+// 2.0 mini-cycles: close/reopen a slot without a receipt ("Nepirkau čia").
+router.post('/shopping-lists/:id/skip-receipt', requireUser, member, skipListReceipt);
+router.post('/shopping-lists/:id/unskip-receipt', requireUser, member, unskipListReceipt);
 
 // Sharing: creator mints a token, scanner claims it. The /status route
 // is polled by the creator-side QR modal (~1.5s cadence) to detect a

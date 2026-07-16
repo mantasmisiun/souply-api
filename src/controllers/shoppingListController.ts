@@ -449,3 +449,26 @@ export const duplicateList = async (req: Request, res: Response, next: NextFunct
         next(error);
     }
 };
+
+
+/**
+ * Souply 2.0 per-store mini-cycles — "Nepirkau čia": close a completed
+ * slot WITHOUT a receipt (stage derivation treats skipped slots as closed,
+ * so skipping the last open slot moves the trip to stage 5). Unskip
+ * reopens the slot (the user found the receipt after all).
+ */
+export const skipListReceipt = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const id = Number(req.params.id);
+        await pool.query('UPDATE ShoppingList SET receiptSkippedAt = NOW() WHERE id = ? AND receiptSkippedAt IS NULL', [id]);
+        res.json({ id, receiptSkipped: true });
+    } catch (error) { next(error); }
+};
+
+export const unskipListReceipt = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const id = Number(req.params.id);
+        await pool.query('UPDATE ShoppingList SET receiptSkippedAt = NULL WHERE id = ?', [id]);
+        res.json({ id, receiptSkipped: false });
+    } catch (error) { next(error); }
+};

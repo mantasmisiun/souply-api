@@ -111,6 +111,23 @@ describe('trip minting at persist time', () => {
         expect(gone).toHaveLength(0);
     });
 
+    it('"Nepirkau čia" closes slots — skipping every open slot lands stage 5', async () => {
+        // Lists are completed (stage 4 from the earlier test) and only ONE
+        // receipt arrived (listA). Skip the other slot → all slots closed.
+        const rows = await q('SELECT id FROM ShoppingList WHERE basketId = ? ORDER BY id', [basketId]);
+        const listB = rows.find((r: any) => r.id !== listA).id;
+
+        const skip = await asUser(app, USER).post(`/api/shopping-lists/${listB}/skip-receipt`).send({});
+        expect(skip.status).toBe(200);
+        let r = await asUser(app, USER).get('/api/trips');
+        expect(r.body.find((t: any) => t.id === tripId).stage).toBe(5);
+
+        // Unskip reopens the slot → back to stage 4.
+        await asUser(app, USER).post(`/api/shopping-lists/${listB}/unskip-receipt`).send({});
+        r = await asUser(app, USER).get('/api/trips');
+        expect(r.body.find((t: any) => t.id === tripId).stage).toBe(4);
+    });
+
     it('archive/unarchive round-trip via the member-gated endpoints', async () => {
         const a = await asUser(app, USER).post(`/api/trips/${tripId}/archive`).send({});
         expect(a.status).toBe(200);
