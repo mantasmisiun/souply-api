@@ -14,6 +14,7 @@
  *
  * Run: npm run backfill:trips   (dev → staging → prod, after trip_foundation.sql)
  */
+import '../config/env.js';
 import pool from '../config/db.js';
 import { createTrip } from '../models/tripModel.js';
 
