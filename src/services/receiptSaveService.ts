@@ -3,6 +3,7 @@ import {
     batchGetBaselinePriceAverages,
     batchGetLatestPricesForReceiptItems,
 } from '../models/priceModel.js';
+import { snapshotReceiptComparison } from './comparisonSnapshotService.js';
 import { updateReceiptDetails, updateReceiptStore, updateReceiptSavedAmount } from '../models/receiptModel.js';
 import { comboDiscountOf, computeReceiptSavings } from './statsService.js';
 import {
@@ -797,6 +798,12 @@ export const persistReceiptPrices = async (
         // this save, so the card set is knowable NOW — by the time the user reaches the
         // swipe screen the GET serves the snapshot instead of a multi-second live build.
         // Initial save only (the autosave PUT re-sends the same products).
+        // 2.0 frozen savings deltas: snapshot the comparable-store comparison
+        // with as-of-now prices on EVERY product-changing save (initial,
+        // autosave, reparse). Fire-and-forget — a save never fails on this.
+        snapshotReceiptComparison(receiptId).catch((e) =>
+            console.warn(`[persistReceiptPrices] comparison snapshot failed for receipt ${receiptId}:`, e?.message),
+        );
         if (isInitialSave) {
             prewarmMandatoryQueue(userId, receiptId).catch((e) =>
                 console.warn(`[persistReceiptPrices] mandatory-queue prewarm failed for receipt ${receiptId}:`, e),

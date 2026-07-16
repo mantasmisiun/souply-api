@@ -1,5 +1,6 @@
 import pool from '../config/db.js';
 import { computeReceiptSavings } from './statsService.js';
+import { tripSavingsDeltas, type TripSavingsDeltas } from './comparisonSnapshotService.js';
 
 /**
  * Souply 2.0 Phase 5 (first slice) — per-trip stats: spend, category donut,
@@ -12,6 +13,9 @@ import { computeReceiptSavings } from './statsService.js';
 
 export interface TripStats {
     tripId: number;
+    /** Frozen comparable-store deltas (null until snapshots exist). */
+    savedVsMedian: number | null;
+    couldHaveSaved: number | null;
     receiptCount: number;
     totalSpent: number;
     savings: number;
@@ -31,9 +35,13 @@ export const getTripStats = async (tripId: number): Promise<TripStats> => {
     );
     const empty: TripStats = {
         tripId, receiptCount: 0, totalSpent: 0, savings: 0,
+        savedVsMedian: null, couldHaveSaved: null,
         categoryBreakdown: [], chainBreakdown: [], memberSpend: [],
     };
     if (receipts.length === 0) return empty;
+    const deltas: TripSavingsDeltas = await tripSavingsDeltas(tripId);
+    empty.savedVsMedian = deltas.savedVsMedian;
+    empty.couldHaveSaved = deltas.couldHaveSaved;
     const receiptIds = receipts.map((r: any) => Number(r.id));
 
     const [itemRows]: any = await pool.query(
@@ -106,6 +114,8 @@ export const getTripStats = async (tripId: number): Promise<TripStats> => {
 
     return {
         tripId,
+        savedVsMedian: deltas.savedVsMedian,
+        couldHaveSaved: deltas.couldHaveSaved,
         receiptCount: receipts.length,
         totalSpent: round2(totalSpent),
         savings: round2(savings),
