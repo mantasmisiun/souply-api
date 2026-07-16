@@ -944,3 +944,19 @@ CREATE TABLE `TripMember` (
   PRIMARY KEY (`tripId`,`userId`),
   KEY `idx_tripmember_user` (`userId`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+
+-- Souply 2.0 search vocabulary (sql/storeproduct_translation.sql)
+CREATE TABLE `StoreProductTranslation` (
+  `id` int(10) unsigned NOT NULL AUTO_INCREMENT,
+  `storeProductId` int(11) NOT NULL,
+  `lang` char(2) NOT NULL,
+  `text` varchar(255) NOT NULL,
+  `normalized` varchar(255) NOT NULL,
+  `source` enum('machine','human') NOT NULL DEFAULT 'machine',
+  `createdAt` datetime NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_spt` (`storeProductId`,`lang`,`normalized`),
+  KEY `idx_spt_search` (`lang`,`normalized`),
+  KEY `idx_spt_sp` (`storeProductId`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

@@ -29,7 +29,8 @@
     "test": "NODE_ENV=test NODE_OPTIONS=--experimental-vm-modules jest --runInBand --forceExit",
     "prepare": "node .husky/install.mjs",
     "ocr:confusions": "tsx src/scripts/mineOcrConfusions.ts",
-    "backfill:trips": "tsx src/scripts/backfillTrips.ts"
+    "backfill:trips": "tsx src/scripts/backfillTrips.ts",
+    "import:translations": "tsx src/scripts/importSpTranslations.ts"
   },
   "keywords": [],
   "author": "",

@@ -6,6 +6,7 @@ import {
     attachCanonicalFields,
 } from '../services/productCanonical.js';
 import { attachUnitPriceBadges } from '../services/productBadge.js';
+import { stemQuery } from '../utils/searchStem.js';
 import { RECOGNITION } from '../../../shared/recognitionConfig.js';
 
 type Connection = typeof pool | any;
@@ -71,9 +72,13 @@ const PRODUCT_WITH_IMAGES_SELECT = `
 
 export const searchProduct = async (query: string) => {
     const fuzzy = buildFuzzyNameClause(query, 'p.name');
-    const [products]: any = await pool.query(
+    const stems = stemQuery(query);
+    const CAT_GATE = `JOIN Category cat ON cat.id = p.categoryId AND cat.name NOT LIKE 'Nepriskirt%'`;
+
+    // ── Arm 1 (rank 0): full-token name match — today's behavior, highest rank.
+    const [exact]: any = await pool.query(
         `${BROWSE_SELECT}
-         JOIN Category cat ON cat.id = p.categoryId AND cat.name NOT LIKE 'Nepriskirt%'
+         ${CAT_GATE}
          WHERE ${fuzzy.sql}
            AND p.mergedIntoId IS NULL
          GROUP BY p.id
@@ -81,6 +86,72 @@ export const searchProduct = async (query: string) => {
          LIMIT 50`,
         fuzzy.params,
     );
+
+    // ── Arm 2 (rank 1): STEMMED name match — inflection recall ("saldi" →
+    // "saldžios", "sojos" → "sojų"). Same AND-composition keeps precision.
+    let stemmed: any[] = [];
+    if (stems.length > 0 && exact.length < 50) {
+        const stemSql = stems.map(() => `p.name COLLATE utf8mb4_unicode_ci LIKE ?`).join(' AND ');
+        [stemmed] = await pool.query(
+            `${BROWSE_SELECT}
+             ${CAT_GATE}
+             WHERE ${stemSql}
+               AND p.mergedIntoId IS NULL
+             GROUP BY p.id
+             ORDER BY p.globalScore DESC
+             LIMIT 50`,
+            stems.map((s) => `%${s}%`),
+        ) as any;
+    }
+
+    // ── Arm 3 (rank 2): VOCABULARY — receipt aliases (user-confirmed OCR
+    // namings) + translations/synonyms (StoreProductTranslation; the arm that
+    // makes "soy sauce" and "batatai" find "Sojų padažas"/"Saldžiosios
+    // bulvės"). Product ids resolved first, then hydrated via BROWSE_SELECT.
+    let vocab: any[] = [];
+    if (stems.length > 0 && exact.length + stemmed.length < 50) {
+        const aliasSql = stems.map(() => `sar.normalizedAlias COLLATE utf8mb4_unicode_ci LIKE ?`).join(' AND ');
+        const trSql = stems.map(() => `spt.normalized COLLATE utf8mb4_unicode_ci LIKE ?`).join(' AND ');
+        const stemLikes = stems.map((s) => `%${s}%`);
+        const [vocabIds]: any = await pool.query(
+            `SELECT DISTINCT productId FROM (
+                SELECT sp.productId
+                FROM StoreProductReceiptAlias sar
+                JOIN StoreProduct sp ON sp.id = sar.storeProductId
+                WHERE sar.status = 'canonical' AND ${aliasSql}
+                UNION
+                SELECT sp.productId
+                FROM StoreProductTranslation spt
+                JOIN StoreProduct sp ON sp.id = spt.storeProductId
+                WHERE ${trSql}
+             ) v LIMIT 50`,
+            [...stemLikes, ...stemLikes],
+        );
+        if (vocabIds.length > 0) {
+            [vocab] = await pool.query(
+                `${BROWSE_SELECT}
+                 ${CAT_GATE}
+                 WHERE p.id IN (?)
+                   AND p.mergedIntoId IS NULL
+                 GROUP BY p.id
+                 ORDER BY p.globalScore DESC`,
+                [vocabIds.map((r: any) => r.productId)],
+            ) as any;
+        }
+    }
+
+    // Merge rank-ordered, dedup by product id, cap 50.
+    const seen = new Set<number>();
+    const products: any[] = [];
+    for (const arm of [exact, stemmed, vocab]) {
+        for (const p of arm) {
+            if (seen.has(p.id)) continue;
+            seen.add(p.id);
+            products.push(p);
+            if (products.length >= 50) break;
+        }
+        if (products.length >= 50) break;
+    }
     if (products.length === 0) return [];
     const categoryIds = [...new Set((products as any[]).map((p: any) => p.categoryId).filter(Boolean))];
     const [catRows]: any = categoryIds.length
