@@ -104,46 +104,73 @@ export const searchProduct = async (query: string) => {
         ) as any;
     }
 
-    // ── Arm 3 (rank 2): VOCABULARY — receipt aliases (user-confirmed OCR
-    // namings) + translations/synonyms (StoreProductTranslation; the arm that
-    // makes "soy sauce" and "batatai" find "Sojų padažas"/"Saldžiosios
-    // bulvės"). Product ids resolved first, then hydrated via BROWSE_SELECT.
-    let vocab: any[] = [];
-    if (stems.length > 0 && exact.length + stemmed.length < 50) {
-        const aliasSql = stems.map(() => `sar.normalizedAlias COLLATE utf8mb4_unicode_ci LIKE ?`).join(' AND ');
-        const trSql = stems.map(() => `spt.normalized COLLATE utf8mb4_unicode_ci LIKE ?`).join(' AND ');
-        const stemLikes = stems.map((s) => `%${s}%`);
-        const [vocabIds]: any = await pool.query(
-            `SELECT DISTINCT productId FROM (
-                SELECT sp.productId
-                FROM StoreProductReceiptAlias sar
-                JOIN StoreProduct sp ON sp.id = sar.storeProductId
-                WHERE sar.status = 'canonical' AND ${aliasSql}
-                UNION
-                SELECT sp.productId
-                FROM StoreProductTranslation spt
-                JOIN StoreProduct sp ON sp.id = spt.storeProductId
-                WHERE ${trSql}
-             ) v LIMIT 50`,
-            [...stemLikes, ...stemLikes],
+    // Arms 3–5 all resolve PRODUCT ids through a sub-lookup, then hydrate via
+    // BROWSE_SELECT. Shared helper keeps them uniform; each arm only runs while
+    // earlier arms left room (common searches stay a single query).
+    const stemLikes = stems.map((s) => `%${s}%`);
+    const hydrate = async (ids: number[]): Promise<any[]> => {
+        if (ids.length === 0) return [];
+        const [rows]: any = await pool.query(
+            `${BROWSE_SELECT}
+             ${CAT_GATE}
+             WHERE p.id IN (?)
+               AND p.mergedIntoId IS NULL
+             GROUP BY p.id
+             ORDER BY p.globalScore DESC`,
+            [ids],
         );
-        if (vocabIds.length > 0) {
-            [vocab] = await pool.query(
-                `${BROWSE_SELECT}
-                 ${CAT_GATE}
-                 WHERE p.id IN (?)
-                   AND p.mergedIntoId IS NULL
-                 GROUP BY p.id
-                 ORDER BY p.globalScore DESC`,
-                [vocabIds.map((r: any) => r.productId)],
-            ) as any;
-        }
+        return rows;
+    };
+    const idArm = async (subquery: string, params: any[]): Promise<any[]> => {
+        const [idRows]: any = await pool.query(`${subquery} LIMIT 50`, params);
+        return hydrate(idRows.map((r: any) => r.productId));
+    };
+    let found = exact.length + stemmed.length;
+
+    // ── Arm 3 (rank 2): STORE-PRODUCT NAME — SP names diverge from cluster
+    // head names often enough to deserve their own rung.
+    let spName: any[] = [];
+    if (stems.length > 0 && found < 50) {
+        const spSql = stems.map(() => `sp.storeProductName COLLATE utf8mb4_unicode_ci LIKE ?`).join(' AND ');
+        spName = await idArm(
+            `SELECT DISTINCT sp.productId FROM StoreProduct sp WHERE ${spSql}`,
+            stemLikes,
+        );
+        found += spName.length;
+    }
+
+    // ── Arm 4 (rank 3): TRANSLATIONS/SYNONYMS — "soy sauce"/"batatai" →
+    // "Sojų padažas"/"Saldžiosios bulvės".
+    let translations: any[] = [];
+    if (stems.length > 0 && found < 50) {
+        const trSql = stems.map(() => `spt.normalized COLLATE utf8mb4_unicode_ci LIKE ?`).join(' AND ');
+        translations = await idArm(
+            `SELECT DISTINCT sp.productId
+             FROM StoreProductTranslation spt
+             JOIN StoreProduct sp ON sp.id = spt.storeProductId
+             WHERE ${trSql}`,
+            stemLikes,
+        );
+        found += translations.length;
+    }
+
+    // ── Arm 5 (rank 4): RECEIPT VOCABULARY — user-confirmed OCR namings.
+    let aliases: any[] = [];
+    if (stems.length > 0 && found < 50) {
+        const aliasSql = stems.map(() => `sar.normalizedAlias COLLATE utf8mb4_unicode_ci LIKE ?`).join(' AND ');
+        aliases = await idArm(
+            `SELECT DISTINCT sp.productId
+             FROM StoreProductReceiptAlias sar
+             JOIN StoreProduct sp ON sp.id = sar.storeProductId
+             WHERE sar.status = 'canonical' AND ${aliasSql}`,
+            stemLikes,
+        );
     }
 
     // Merge rank-ordered, dedup by product id, cap 50.
     const seen = new Set<number>();
     const products: any[] = [];
-    for (const arm of [exact, stemmed, vocab]) {
+    for (const arm of [exact, stemmed, spName, translations, aliases]) {
         for (const p of arm) {
             if (seen.has(p.id)) continue;
             seen.add(p.id);

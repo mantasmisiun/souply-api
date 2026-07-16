@@ -85,6 +85,13 @@ describe('three-arm search', () => {
         expect(results.map((r) => r.id)).toContain(productBatat);
     });
 
+    it('SP-name arm: token only present in the store product name', async () => {
+        // "250ml" exists only on the SP ("Sojų padažas KIKKOMAN 250ml"),
+        // not the product name — arm 3 must catch it.
+        const results = await search('kikkoman 250ml');
+        expect(results.map((r) => r.id)).toContain(productSoy);
+    });
+
     it('exact name matches rank above vocabulary-only matches', async () => {
         const results = await search('sojų padažas');
         const ids = results.map((r) => r.id);
