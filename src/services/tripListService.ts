@@ -13,6 +13,10 @@ export interface TripSlotSummary {
     storeId: number;
     storeName: string | null;
     chainName: string | null;
+    chainId: number | null;
+    address: string | null;
+    latitude: number | null;
+    longitude: number | null;
     listStatus: 'active' | 'completed';
     hasReceipt: boolean;
     receiptSkipped: boolean;
@@ -63,7 +67,8 @@ export const listTripsForUser = async (userId: string, limit = 100): Promise<Tri
 
     const [lists]: any = await pool.query(
         `SELECT sl.tripId, sl.id, sl.storeId, sl.status, sl.receiptSkippedAt, sl.createdAt,
-                s.name AS storeName, sc.name AS chainName,
+                s.name AS storeName, s.address, s.latitude, s.longitude, s.chainId,
+                sc.name AS chainName,
                 (SELECT COUNT(*) FROM ShoppingListItem sli WHERE sli.listId = sl.id) AS itemCount,
                 (SELECT COUNT(*) FROM ShoppingListItem sli WHERE sli.listId = sl.id AND sli.isChecked = 1) AS checkedCount,
                 (SELECT COUNT(*) FROM Receipt r WHERE r.shoppingListId = sl.id) AS receiptCount
@@ -95,6 +100,10 @@ export const listTripsForUser = async (userId: string, limit = 100): Promise<Tri
             storeId: l.storeId,
             storeName: l.storeName ?? null,
             chainName: l.chainName ?? null,
+            chainId: l.chainId ?? null,
+            address: l.address ?? null,
+            latitude: l.latitude != null ? Number(l.latitude) : null,
+            longitude: l.longitude != null ? Number(l.longitude) : null,
             listStatus: l.status === 'completed' ? 'completed' : 'active',
             hasReceipt: Number(l.receiptCount) > 0,
             receiptSkipped: l.receiptSkippedAt != null,
