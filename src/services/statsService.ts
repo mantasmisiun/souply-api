@@ -176,7 +176,7 @@ export const getUserStats = async (userId: string, locale: Locale = 'lt') => {
     // spId → [{price, qty, month}] collected from all receipt items with a
     // matched SP. `month` (local `YYYY-MM`, null when the receipt has no date)
     // lets savings be bucketed per calendar month for the this-month figure.
-    const spPriceList = new Map<number, Array<{ price: number; qty: number; month: string | null }>>();
+    const spPriceList = new Map<number, Array<{ price: number; qty: number; month: string | null; day: number | null }>>();
     // productId → the user's personal orphan rescue (Nepriskirta → real category
     // via their own "same" votes). Empty when there are no matched SPs.
     let rescueByProduct = new Map<number, { categoryId: number | null; leafName: string | null; l2Name: string | null }>();
@@ -319,7 +319,7 @@ export const getUserStats = async (userId: string, locale: Locale = 'lt') => {
                 // Accumulate for savings — only matched SPs with a known productId.
                 if (spId && unitPrice > 0 && spToProductId.has(spId)) {
                     const list = spPriceList.get(spId) ?? [];
-                    list.push({ price: unitPrice, qty, month });
+                    list.push({ price: unitPrice, qty, month, day: md ? md.getDate() : null });
                     spPriceList.set(spId, list);
                 }
             }
@@ -338,6 +338,21 @@ export const getUserStats = async (userId: string, locale: Locale = 'lt') => {
     // show the current-month figure and its change vs last month. Same
     // avg-vs-paid formula as the all-time total — only the grouping differs.
     const monthSavingsMap: Record<string, number> = {};
+    // MTD baseline: last month's savings only through the SAME day-of-month,
+    // so a half-elapsed month isn't compared against a complete one (the chip
+    // would otherwise point down all month). The cutoff is clamped to last
+    // month's real length — on May 31 vs April (30d) or March 30 vs February
+    // (28/29d) the whole shorter month counts, which is the standard
+    // month-to-date convention.
+    const nowM = new Date();
+    const thisMonthKey = `${nowM.getFullYear()}-${String(nowM.getMonth() + 1).padStart(2, '0')}`;
+    const lastM = new Date(nowM.getFullYear(), nowM.getMonth() - 1, 1);
+    const lastMonthKey = `${lastM.getFullYear()}-${String(lastM.getMonth() + 1).padStart(2, '0')}`;
+    // Day 0 of the current month = last day of the previous month (handles
+    // 28/29/30/31 automatically, leap years included).
+    const daysInLastMonth = new Date(nowM.getFullYear(), nowM.getMonth(), 0).getDate();
+    const mtdCutoffDay = Math.min(nowM.getDate(), daysInLastMonth);
+    let lastMonthMtdSavings = 0;
     if (spPriceList.size > 0) {
         // spPriceList only contains spIds that are in spToProductId (guarded above).
         const productIds = [...new Set(
@@ -374,29 +389,30 @@ export const getUserStats = async (userId: string, locale: Locale = 'lt') => {
                 if (!productId) continue;
                 const avg = productAvgPrice.get(productId);
                 if (!avg || avg <= 0) continue;
-                for (const { price, qty, month } of purchases) {
+                for (const { price, qty, month, day } of purchases) {
                     const saved = (avg - price) * qty;
                     totalSavings += saved;
-                    if (month) monthSavingsMap[month] = (monthSavingsMap[month] ?? 0) + saved;
+                    if (month) {
+                        monthSavingsMap[month] = (monthSavingsMap[month] ?? 0) + saved;
+                        if (month === lastMonthKey && day != null && day <= mtdCutoffDay) {
+                            lastMonthMtdSavings += saved;
+                        }
+                    }
                 }
             }
         }
     }
     totalSavings = Math.round(totalSavings * 100) / 100;
 
-    // This-month savings + change vs last month. Local calendar months (same
-    // convention as Pass 2's `month` keys), NOT toISOString(). savingsChangePct
-    // is null when last month has no savings baseline to compare against.
-    const nowM = new Date();
-    const thisMonthKey = `${nowM.getFullYear()}-${String(nowM.getMonth() + 1).padStart(2, '0')}`;
-    const lastM = new Date(nowM.getFullYear(), nowM.getMonth() - 1, 1);
-    const lastMonthKey = `${lastM.getFullYear()}-${String(lastM.getMonth() + 1).padStart(2, '0')}`;
+    // This-month savings + change vs the SAME PERIOD last month (keys and the
+    // MTD cutoff computed above, before the accumulation loop). Local calendar
+    // months, NOT toISOString().
     const savingsThisMonth = Math.round((monthSavingsMap[thisMonthKey] ?? 0) * 100) / 100;
-    // Last month's figure is returned raw so the client can show a €-delta
-    // "vs last month" chip. A percentage change was intentionally dropped: it's
-    // unstable for a signed savings metric (sign flips + tiny denominators make
-    // e.g. a 14-cent baseline read as "-101%"). A € delta is always honest.
-    const savingsLastMonth = Math.round((monthSavingsMap[lastMonthKey] ?? 0) * 100) / 100;
+    // The baseline is month-to-date-clamped (day ≤ mtdCutoffDay) so the €-delta
+    // chip compares like with like all month long. A percentage change was
+    // intentionally dropped: it's unstable for a signed savings metric (sign
+    // flips + tiny denominators make e.g. a 14-cent baseline read as "-101%").
+    const savingsLastMonth = Math.round(lastMonthMtdSavings * 100) / 100;
 
     const storeBreakdown = Object.entries(storeMap)
         .map(([chainName, total]) => ({

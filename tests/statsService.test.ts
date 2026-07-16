@@ -254,6 +254,41 @@ describe('getUserStats', () => {
         expect(result.totalSavings).toBeCloseTo(0.50);
     });
 
+    it('savingsLastMonth is clamped to the same period last month (MTD baseline)', async () => {
+        // Three receipts on the same product (avg 2.00):
+        //   A: THIS month day 2      → saved 0.50 (this-month bucket)
+        //   B: LAST month day 1      → saved 0.30 (always inside the MTD window)
+        //   C: LAST month, final day → saved 0.20 (inside only when the cutoff
+        //      reaches the end of last month, i.e. today is month-end-ish)
+        const now = new Date();
+        const lastM = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+        const daysInLastMonth = new Date(now.getFullYear(), now.getMonth(), 0).getDate();
+        const cutoff = Math.min(now.getDate(), daysInLastMonth);
+        const d = (base: Date, day: number) =>
+            `${base.getFullYear()}-${String(base.getMonth() + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+
+        const mk = (id: number, date: string, price: string) => ({
+            id,
+            receiptDate: date,
+            parsedData: { products: [{ price, quantity: '1', storeProductId: 10 }] },
+            chainName: 'Maxima',
+        });
+        setupPoolWithSp(
+            [
+                mk(1, d(now, 2), '1.50'),
+                mk(2, d(lastM, 1), '1.70'),
+                mk(3, d(lastM, daysInLastMonth), '1.80'),
+            ],
+            [{ spId: 10, productId: 100, categoryName: 'Pienas' }],
+            [{ productId: 100, avg_price: '2.00' }],
+        );
+
+        const result = await getUserStats('user1');
+        expect(result.savingsThisMonth).toBeCloseTo(0.50);
+        const expected = 0.30 + (cutoff >= daysInLastMonth ? 0.20 : 0);
+        expect(result.savingsLastMonth).toBeCloseTo(expected);
+    });
+
     it('returns negative totalSavings when receipt price exceeds market avg', async () => {
         const parsedData = { products: [{ price: '2.50', quantity: '1', storeProductId: 10 }] };
         setupPoolWithSp(
