@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { addUser, fetchUserById, updateUserLastActive, fetchUserProfile, fetchUserEquivalences, putUserEquivalence, deleteUserEquivalence, fetchUserProductMergeMap, fetchUserStats, fetchUserVoteHistory, editUserVotePair, deleteSelfAccount } from '../controllers/userController.js';
+import { addUser, fetchUserById, updateUserLastActive, fetchUserProfile, fetchTabBadges, fetchUserEquivalences, putUserEquivalence, deleteUserEquivalence, fetchUserProductMergeMap, fetchUserStats, fetchUserVoteHistory, editUserVotePair, deleteSelfAccount } from '../controllers/userController.js';
 import { recoverAccount } from '../controllers/accountRecoveryController.js';
 import { requireUser, requireSelfUserParam } from '../middleware/sessionAuth.js';
 
@@ -113,6 +113,7 @@ router.delete('/users/:id', ...self, deleteSelfAccount);
  */
 router.patch('/users/:id/last-active', ...self, updateUserLastActive);
 router.get('/users/:id/profile', ...self, fetchUserProfile);
+router.get('/users/:id/tab-badges', ...self, fetchTabBadges);
 router.get('/users/:id/equivalences', ...self, fetchUserEquivalences);
 router.put('/users/:id/equivalences', ...self, putUserEquivalence);
 router.delete('/users/:id/equivalences', ...self, deleteUserEquivalence);
