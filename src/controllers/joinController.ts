@@ -87,7 +87,9 @@ export const previewJoin = async (req: Request, res: Response, next: NextFunctio
     try {
         const token = await loadInvite(String(req.params.code));
         if (!token) { res.status(404).json({ error: 'not found' }); return; }
-        const userId = req.authUserId!;
+        // Anonymous previews (souply.lt landing, pre-install) get the public
+        // fields; membership fields only when a user is attached.
+        const userId = req.authUserId ?? null;
 
         if (token.scope === 'trip') {
             const trip = await getTripById(token.targetId);
@@ -98,7 +100,7 @@ export const previewJoin = async (req: Request, res: Response, next: NextFunctio
                 scope: 'trip',
                 name: trip.name,
                 memberCount: Number(members[0].n),
-                alreadyMember: await isTripMember(trip.id, userId),
+                alreadyMember: userId ? await isTripMember(trip.id, userId) : false,
             });
             return;
         }
@@ -110,9 +112,9 @@ export const previewJoin = async (req: Request, res: Response, next: NextFunctio
             scope: 'household',
             name: households[0].name,
             memberCount: members.length,
-            alreadyMember: await isHouseholdMember(token.targetId, userId),
+            alreadyMember: userId ? await isHouseholdMember(token.targetId, userId) : false,
             // The claim will 409 if the user must leave their current household first.
-            hasOwnHousehold: (await getHouseholdForUser(userId)) != null,
+            hasOwnHousehold: userId ? (await getHouseholdForUser(userId)) != null : false,
         });
     } catch (error) { next(error); }
 };

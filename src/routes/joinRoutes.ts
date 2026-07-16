@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { requireUser } from '../middleware/sessionAuth.js';
+import { requireUser, optionalUser } from '../middleware/sessionAuth.js';
 import { requireTripMember } from '../middleware/resourceAuth.js';
 import {
     createOwnHousehold, getOwnHousehold, leaveOwnHousehold, createHouseholdInvite,
@@ -24,7 +24,9 @@ router.post('/households/mine/invites', requireUser, createHouseholdInvite);
 router.post('/trips/:id/invites', requireUser, requireTripMember('id'), createTripInvite);
 
 // Join flow (token = capability)
-router.get('/join/:code/preview', requireUser, previewJoin);
+// Preview is ANONYMOUS-friendly (the souply.lt landing shows it before install);
+// membership fields appear only for authenticated callers.
+router.get('/join/:code/preview', optionalUser, previewJoin);
 router.post('/join/:code/claim', requireUser, claimJoin);
 
 export default router;
