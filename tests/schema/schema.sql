@@ -1002,3 +1002,53 @@ CREATE TABLE `InviteClaim` (
   `claimedAt` datetime NOT NULL DEFAULT current_timestamp(),
   PRIMARY KEY (`tokenId`,`userId`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+DROP TABLE IF EXISTS `TripLineLink`;
+CREATE TABLE `TripLineLink` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `tripId` int(11) NOT NULL,
+  `listItemId` int(11) NOT NULL,
+  `receiptItemId` int(11) NOT NULL,
+  `kind` enum('manual','suppressed') NOT NULL DEFAULT 'manual',
+  `createdByUserId` char(36) NOT NULL,
+  `createdAt` datetime NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_tll_pair` (`listItemId`,`receiptItemId`),
+  KEY `idx_tll_trip` (`tripId`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+DROP TABLE IF EXISTS `ReceiptComparisonSnapshot`;
+CREATE TABLE `ReceiptComparisonSnapshot` (
+  `receiptId` int(11) NOT NULL,
+  `paidTotal` decimal(10,2) NOT NULL,
+  `medianAltTotal` decimal(10,2) DEFAULT NULL,
+  `cheapestAltTotal` decimal(10,2) DEFAULT NULL,
+  `altCount` int(11) NOT NULL DEFAULT 0,
+  `computedAt` datetime NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`receiptId`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+DROP TABLE IF EXISTS `PushToken`;
+CREATE TABLE `PushToken` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `userId` char(36) NOT NULL,
+  `token` varchar(255) NOT NULL,
+  `platform` enum('ios','android') NOT NULL,
+  `createdAt` datetime NOT NULL DEFAULT current_timestamp(),
+  `updatedAt` datetime NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_pushtoken` (`token`),
+  KEY `idx_pushtoken_user` (`userId`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+DROP TABLE IF EXISTS `Notification`;
+CREATE TABLE `Notification` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `userId` char(36) NOT NULL,
+  `type` varchar(40) NOT NULL,
+  `payload` longtext DEFAULT NULL,
+  `readAt` datetime DEFAULT NULL,
+  `createdAt` datetime NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`id`),
+  KEY `idx_notification_user` (`userId`,`readAt`,`createdAt`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

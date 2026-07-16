@@ -147,6 +147,55 @@ describe('trip minting at persist time', () => {
         expect(r.body.memberSpend[0].receiptCount).toBe(1);
     });
 
+    it('planning score: coverage/discipline/precision + manual link/unlink', async () => {
+        // Plan: listA gets TWO items (products 501, 502); the receipt (already
+        // in the trip, from the stats test) carries product 501 at 3.00 and an
+        // unmatched line at 0.80. Auto pair on 501 → coverage 0.5,
+        // discipline 3.00/3.80, precision 1.
+        await q("INSERT INTO Category (id, name) VALUES (9970, 'Score Cat') ON DUPLICATE KEY UPDATE name=VALUES(name)");
+        await q("INSERT INTO Product (id, name, categoryId) VALUES (501,'Score Milk', 9970), (502,'Score Bread', 9970) ON DUPLICATE KEY UPDATE name=VALUES(name)");
+        await q("INSERT INTO StoreProduct (id, chainId, productId, storeProductName) VALUES (95011, ?, 501, 'Score Milk SP') ON DUPLICATE KEY UPDATE productId=VALUES(productId)", [CHAIN_ID]);
+        const [receipt] = await q('SELECT id FROM Receipt WHERE userId = ? AND tripId = ?', [USER, tripId]);
+        // Re-point the stats-test items: line a → product 501, line b stays unmatched.
+        await q("UPDATE ReceiptItem SET matchedSpId = 95011, price = 1.50, promoPrice = NULL, quantity = 2 WHERE receiptId = ? AND lineIdx = 0", [receipt.id]);
+        const li1 = await q("INSERT INTO ShoppingListItem (listId, productId, quantity) VALUES (?, 501, 2)", [listA]);
+        const li2 = await q("INSERT INTO ShoppingListItem (listId, productId, quantity) VALUES (?, 502, 1)", [listA]);
+
+        let r = await asUser(app, USER).get(`/api/trips/${tripId}/score`);
+        expect(r.status).toBe(200);
+        expect(r.body.coverage).toBeCloseTo(0.5);
+        expect(r.body.discipline).toBeCloseTo(3.0 / 3.8, 2);
+        expect(r.body.precision).toBeCloseTo(1);
+        expect(r.body.pairs).toHaveLength(1);
+        expect(r.body.unmatchedListItems).toHaveLength(1);
+        expect(r.body.unmatchedReceiptItems).toHaveLength(1);
+        const expected = Math.round(100 * (0.4 * 0.5 + 0.4 * (3.0 / 3.8) + 0.2 * 1));
+        expect(r.body.score).toBe(expected);
+
+        // MANUAL link of the leftover pair (bread ↔ the 0.80 line, both sides
+        // category-less → plausibility passes) lifts coverage to ~0.95.
+        const link = await asUser(app, USER).post(`/api/trips/${tripId}/line-links`).send({
+            listItemId: li2.insertId, receiptItemId: r.body.unmatchedReceiptItems[0].receiptItemId, action: 'link',
+        });
+        expect(link.status).toBe(200);
+        expect(link.body.pairs).toHaveLength(2);
+        expect(link.body.coverage).toBeCloseTo(0.95); // (1 + 0.9)/2
+
+        // Unlink restores the previous state (manual row deleted).
+        const unlink = await asUser(app, USER).post(`/api/trips/${tripId}/line-links`).send({
+            listItemId: li2.insertId, receiptItemId: link.body.pairs[0].receiptItemId === li2.insertId ? 0 : link.body.pairs.find((p:any)=>p.source==='manual').receiptItemId, action: 'unlink',
+        });
+        expect(unlink.status).toBe(200);
+
+        // Monthly series includes this month with a numeric score.
+        const monthly = await asUser(app, USER).get('/api/planning-score/monthly');
+        expect(monthly.status).toBe(200);
+        const nowKey = new Date().toISOString().slice(0, 7);
+        const m = monthly.body.find((x: any) => x.month === nowKey);
+        expect(m).toBeTruthy();
+        expect(typeof m.score).toBe('number');
+    });
+
     it('archive/unarchive round-trip via the member-gated endpoints', async () => {
         const a = await asUser(app, USER).post(`/api/trips/${tripId}/archive`).send({});
         expect(a.status).toBe(200);
