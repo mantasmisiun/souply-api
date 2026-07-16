@@ -21,3 +21,6 @@ receipts/maxima/
 receipts/norfa/
 receipts/rimi/
 receipts/iki/
+.env*
+!.env.example
+!.env.production.example
