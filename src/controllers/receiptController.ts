@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from "express";
 import sharp from "sharp";
 import pool from "../config/db.js";
+import { isTripMember } from "../models/tripModel.js";
 import { createReceipt, getReceiptsByUserId, getReceiptById, deleteReceipt, getReceiptItemsWithDetails, updateReceiptFilePath, getReceiptByReceiptNoAndUser, getReceiptByAnyReceiptNoAndUser, getReceiptByAnyReceiptNoStoreDate, completeMandatorySwipes } from "../models/receiptModel.js";
 import {
     getSwipeCandidatesWithDetails,
@@ -264,6 +265,20 @@ export const createReceiptFromOcr = async (req: Request, res: Response, next: Ne
                     candidateReceiptNos, Number(dupStoreId), String(dupDate), String(userId),
                 );
                 if (other) {
+                    // Souply 2.0 SAME-TRIP EXEMPTION: a fellow trip member
+                    // re-uploading the same physical receipt is EXPECTED
+                    // ("either can upload") — hand back the existing receipt
+                    // so the client links it instead of erroring out.
+                    if (other.tripId != null && (await isTripMember(Number(other.tripId), String(userId)))) {
+                        res.status(409).json({
+                            error: 'duplicate',
+                            sameTrip: true,
+                            tripId: Number(other.tripId),
+                            receiptId: Number(other.id),
+                            message: 'Receipt already uploaded by a trip member',
+                        });
+                        return;
+                    }
                     res.status(409).json({
                         error: 'duplicate',
                         crossAccount: true,

@@ -37,9 +37,18 @@ const run = async () => {
         if (!name || !en) { skipped++; continue; }
 
         // Fan out to EVERY SP sharing this exact name (export deduped by name).
-        const [sps]: any = await pool.query(
+        let [sps]: any = await pool.query(
             'SELECT id FROM StoreProduct WHERE storeProductName = ?', [name]);
-        if (sps.length === 0) { skipped++; continue; }
+        if (sps.length === 0) {
+            // Rescue rows whose names got mangled in CSV transit (embedded
+            // newlines split the export line): trust the spId directly.
+            const spId = Number(parts[0]);
+            if (Number.isFinite(spId) && spId > 0) {
+                const [byId]: any = await pool.query('SELECT id FROM StoreProduct WHERE id = ?', [spId]);
+                sps = byId;
+            }
+            if (sps.length === 0) { skipped++; continue; }
+        }
 
         const values: any[] = [];
         for (const sp of sps) {
