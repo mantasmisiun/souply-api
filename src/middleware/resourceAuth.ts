@@ -1,4 +1,5 @@
 import type { Request, Response, NextFunction } from 'express';
+import pool from '../config/db.js';
 import { getBasketOwnerId, getBasketItemOwnerId } from '../models/basketModel.js';
 import { getBasketTemplateOwnerId } from '../models/basketTemplateModel.js';
 import { getShoppingListById, getListOwnerUserId } from '../models/shoppingListModel.js';
@@ -34,6 +35,23 @@ function ownerGuard(lookup: (id: number) => Promise<string | null>, paramName: s
 }
 
 export const requireBasketOwner = (paramName: 'id' | 'basketId' = 'id') => ownerGuard(getBasketOwnerId, paramName);
+
+/** Souply 2.0 MEMBER guard for trips: any TripMember may act (owner-only ops
+ *  pass role='owner'). Same 404-over-403 probing defense as the list guards.
+ *  Every trip-scoped route MUST use this — the authz sweep rules apply. */
+export const requireTripMember = (paramName: 'id' | 'tripId' = 'id', role?: 'owner') =>
+    async function (req: Request, res: Response, next: NextFunction): Promise<void> {
+        const tripId = num(req.params[paramName]);
+        if (!Number.isFinite(tripId) || tripId <= 0) { res.status(400).json({ error: 'invalid trip id' }); return; }
+        if (!req.authUserId) { res.status(401).json({ error: 'auth-required' }); return; }
+        const [rows]: any = await pool.query(
+            'SELECT role FROM TripMember WHERE tripId = ? AND userId = ? LIMIT 1',
+            [tripId, req.authUserId],
+        );
+        if (!rows.length) { res.status(404).json({ error: 'not found' }); return; }
+        if (role === 'owner' && rows[0].role !== 'owner') { res.status(403).json({ error: 'forbidden' }); return; }
+        next();
+    };
 export const requireBasketItemOwner = (paramName = 'id') => ownerGuard(getBasketItemOwnerId, paramName);
 export const requireBasketTemplateOwner = (paramName: 'id' | 'templateId' = 'id') => ownerGuard(getBasketTemplateOwnerId, paramName);
 

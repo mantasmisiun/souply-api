@@ -6,6 +6,7 @@ import { runRimiPromoScraper } from './rimi/index.js';
 import { runLidlPromoScraper } from './lidl/index.js';
 import { runScraperWithRetry } from './shared/runWithRetry.js';
 import { recalcGlobalScores } from '../models/productInteractionModel.js';
+import { sweepTripAutoArchive } from '../services/tripArchiveService.js';
 import { refreshDiscountedSummary } from '../models/productModel.js';
 import { propagateCrossChainImages } from '../services/imagePropagationService.js';
 import { sendDailyReceiptIssuesReport } from '../services/adminDailyReportService.js';
@@ -56,6 +57,13 @@ cron.schedule('0 6 * * 4', () => run('Thu', [{ name: 'Norfa', fn: runNorfaPromoS
 
 // Saturday 06:00 — Lidl weekend "super savaitgalis" starts
 cron.schedule('0 6 * * 6', () => run('Sat', [{ name: 'Lidl', fn: runLidlPromoScraper }]), { timezone: 'Europe/Vilnius' });
+
+// Hourly — Souply 2.0 trip auto-archive (48 h forming / 7 d planned; set-based,
+// two UPDATEs). Hourly keeps the notification dot honest within the hour of a
+// threshold crossing without any per-trip scheduling.
+cron.schedule('15 * * * *', () => {
+    sweepTripAutoArchive().catch(e => console.error('[Scheduler] Trip archive sweep failed:', e.message));
+}, { timezone: 'Europe/Vilnius' });
 
 // Nightly 03:00 — keep globalScore fresh for anonymous browse
 cron.schedule('0 3 * * *', () => {
