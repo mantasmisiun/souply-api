@@ -153,6 +153,7 @@ CREATE TABLE `Basket` (
   `hasBeenCalculated` tinyint(1) NOT NULL DEFAULT 0,
   `userEditedAfterCreation` tinyint(1) NOT NULL DEFAULT 0,
   `cheapestTotal` decimal(10,2) DEFAULT NULL,
+  `tripId` int(11) DEFAULT NULL,
   PRIMARY KEY (`id`),
   KEY `idx_basket_user_status_updated` (`userId`,`status`,`updatedAt`),
   KEY `idx_b_source_template` (`sourceTemplateId`),
@@ -503,6 +504,8 @@ CREATE TABLE `Receipt` (
   `hasBurstSwipes` tinyint(1) NOT NULL DEFAULT 0,
   `savedAmount` decimal(10,2) NOT NULL DEFAULT 0.00,
   `adminEditedAt` datetime DEFAULT NULL,
+  `tripId` int(11) DEFAULT NULL,
+  `uploaderUserId` char(36) DEFAULT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `unique_receipt` (`receiptNoCanonical`,`storeId`,`receiptDate`),
   KEY `storeId` (`storeId`),
@@ -625,6 +628,8 @@ CREATE TABLE `ShoppingList` (
   `createdAt` datetime DEFAULT current_timestamp(),
   `status` varchar(20) NOT NULL DEFAULT 'active',
   `basketId` int(11) DEFAULT NULL,
+  `tripId` int(11) DEFAULT NULL,
+  `receiptSkippedAt` datetime DEFAULT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_sl_basket_store` (`basketId`,`storeId`),
   KEY `storeId` (`storeId`),
@@ -913,3 +918,29 @@ CREATE TABLE `UserStoreProductEquivalence` (
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*M!100616 SET NOTE_VERBOSITY=@OLD_NOTE_VERBOSITY */;
 
+
+
+-- Souply 2.0 trip aggregate (sql/trip_foundation.sql)
+CREATE TABLE `Trip` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `createdByUserId` char(36) NOT NULL,
+  `householdId` int(11) DEFAULT NULL,
+  `name` varchar(255) DEFAULT NULL,
+  `isAdHoc` tinyint(1) NOT NULL DEFAULT 0,
+  `scoreExempt` tinyint(1) NOT NULL DEFAULT 0,
+  `archivedAt` datetime DEFAULT NULL,
+  `createdAt` datetime NOT NULL DEFAULT current_timestamp(),
+  `updatedAt` datetime NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  PRIMARY KEY (`id`),
+  KEY `idx_trip_user` (`createdByUserId`,`archivedAt`),
+  KEY `idx_trip_household` (`householdId`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE `TripMember` (
+  `tripId` int(11) NOT NULL,
+  `userId` char(36) NOT NULL,
+  `role` enum('owner','member') NOT NULL DEFAULT 'member',
+  `joinedAt` datetime NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`tripId`,`userId`),
+  KEY `idx_tripmember_user` (`userId`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
