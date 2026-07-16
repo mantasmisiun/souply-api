@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import pool from '../config/db.js';
+import { ensureTripForBasket } from '../services/tripLinkService.js';
 import { createBasket, getBasketsByUserId, getBasketById, updateBasketUpdatedAt, updateBasketStatus, updateBasketSavedAmount, deleteBasket, updateBasketName, getUserDraftBasketId, markBasketCalculated, updateBasketCheapestTotal } from '../models/basketModel.js';
 import { copiedSourceTemplateId } from '../util/basketCopy.js';
 
@@ -32,6 +33,7 @@ export const copyBasket = async (req: Request, res: Response, next: NextFunction
         try {
             await conn.beginTransaction();
             const newId = await createBasket(userId, newSourceTemplateId, conn);
+            await ensureTripForBasket(newId, userId, conn);
             const [items]: any = await conn.query(
                 `SELECT productId, quantity, matchMode, anchorAmount, anchorUnit FROM BasketItem WHERE basketId = ?`,
                 [sourceId],
@@ -78,6 +80,8 @@ export const addBasket = async (req: Request, res: Response, next: NextFunction)
             return;
         }
         const id = await createBasket(userId);
+        // 2.0: every basket lives inside a trip from birth (idempotent).
+        await ensureTripForBasket(id, userId);
         res.status(201).json({ id, userId, existing: false });
     } catch (error) {
         next(error);

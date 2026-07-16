@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
+import { ensureTripForBasket } from '../services/tripLinkService.js';
 import pool from '../config/db.js';
 import {
     createTemplate,
@@ -711,6 +712,7 @@ export const instantiateTemplate = async (req: Request, res: Response, next: Nex
 
             // Step 2: createFresh — new basket + copy items
             const newBasketId = await createBasket(userId, templateId, conn as any);
+            await ensureTripForBasket(newBasketId, userId, conn as any);
             const items = await getTemplateItems(templateId);
             if (items.length > 0) {
                 const values = items.map((it: any) => [

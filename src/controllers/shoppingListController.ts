@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
+import { ensureTripForList, relinkReceiptToListTrip } from '../services/tripLinkService.js';
 import pool from '../config/db.js';
 import {
     createShoppingList,
@@ -93,6 +94,9 @@ export const addShoppingList = async (req: Request, res: Response, next: NextFun
         try {
             await conn.beginTransaction();
             const id = await createShoppingList(userId, storeId, basketId ?? null, conn);
+            // 2.0: the list joins its basket's trip (a split's rows share it)
+            // or mints its own when standalone.
+            await ensureTripForList(id, userId, basketId ?? null, conn);
             // Owner membership row — same transaction so the list
             // and its owner either both exist or neither does.
             await addShoppingListMember(id, userId, 'owner', conn);
@@ -268,6 +272,9 @@ export const linkReceiptToShoppingList = async (req: Request, res: Response, nex
             return;
         }
         await linkReceiptToList(receiptId, id);
+        // 2.0: move the receipt onto the LIST's trip (dropping the churn
+        // ad-hoc trip the bare upload may have minted seconds earlier).
+        await relinkReceiptToListTrip(receiptId, id);
         res.json({ success: true });
     } catch (error) {
         next(error);

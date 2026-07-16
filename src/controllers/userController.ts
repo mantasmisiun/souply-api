@@ -6,6 +6,7 @@ import { createUser, getUserById, updateLastActive } from '../models/userModel.j
 import { getUserPointsProfile } from '../services/userPointsService.js';
 import { hasPendingMandatorySwipes, shouldShowBurstWarning } from '../services/swipeSessionService.js';
 import { getPendingMandatorySwipeCount } from '../models/receiptModel.js';
+import { listTripsForUser } from '../services/tripListService.js';
 import { getEquivalencesForUser, upsertEquivalence, deleteEquivalence, getUserProductMergeMap, type EquivalenceVerdict } from '../models/userEquivalenceModel.js';
 import { getUserStats } from '../services/statsService.js';
 import { getVoteHistory, orderPair, type MatchVote } from '../models/storeProductMatchModel.js';
@@ -89,43 +90,19 @@ export const updateUserLastActive = async (req: Request, res: Response, next: Ne
 
 /**
  * Souply 2.0 tab badges — ONE call replacing the client's 3-fetch poller.
- * `trips` approximates "non-archived trips in stages 1-4" from the pre-trip
- * data model (Phase 4 swaps the internals to the Trip table, same shape):
- *   - active baskets (draft/compared/inProgress), shared household container excluded
- *   - standalone active lists (no basket)
- *   - completed list GROUPS still awaiting a receipt (split counts once)
- * deduped so a basket and its lists count as one unit.
+ * Phase 4: `trips` now counts REAL trips (non-archived, derived stage 1-4)
+ * via the batched trip list — every basket/list/receipt mints its trip at
+ * persist time (tripLinkService), so the Trip table is authoritative.
  */
 export const fetchTabBadges = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const id = String(req.params.id);
-        const [basketRows, listRows, pendingSwipeCount] = await Promise.all([
-            pool.query(
-                `SELECT id FROM Basket
-                  WHERE userId = ? AND status <> 'completed' AND householdId IS NULL`,
-                [id],
-            ).then(([r]: any) => r as { id: number }[]),
-            pool.query(
-                `SELECT sl.id, sl.basketId, sl.status,
-                        (SELECT COUNT(*) FROM Receipt r WHERE r.shoppingListId = sl.id) AS receiptCount
-                   FROM ShoppingList sl
-                  WHERE sl.userId = ? AND sl.status IN ('active', 'completed')`,
-                [id],
-            ).then(([r]: any) => r as { id: number; basketId: number | null; status: string; receiptCount: number }[]),
+        const [trips, pendingSwipeCount] = await Promise.all([
+            listTripsForUser(id),
             getPendingMandatorySwipeCount(id),
         ]);
-
-        const units = new Set<string>();
-        for (const b of basketRows) units.add(`b${b.id}`);
-        for (const l of listRows) {
-            if (l.status === 'active' && l.basketId == null) units.add(`l${l.id}`);
-            // Completed but receipt-less → the stage-4 "įkelti kvitą" unit.
-            if (l.status === 'completed' && Number(l.receiptCount) === 0) {
-                units.add(l.basketId != null ? `b${l.basketId}` : `l${l.id}`);
-            }
-        }
-
-        res.json({ trips: units.size, pendingSwipes: pendingSwipeCount });
+        const active = trips.filter(t => t.archivedAt == null && t.stage < 5).length;
+        res.json({ trips: active, pendingSwipes: pendingSwipeCount });
     } catch (error) {
         next(error);
     }

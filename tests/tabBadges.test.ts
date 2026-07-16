@@ -24,6 +24,8 @@ beforeAll(async () => {
         await q('DELETE FROM HouseholdMember WHERE userId = ?', [u]);
         await q('DELETE FROM ShoppingList WHERE userId = ?', [u]);
         await q('DELETE FROM Basket WHERE userId = ?', [u]);
+        await q('DELETE FROM TripMember WHERE userId = ?', [u]);
+        await q('DELETE FROM Trip WHERE createdByUserId = ?', [u]);
         await q('INSERT INTO User (id, isAdmin, points) VALUES (?,0,0) ON DUPLICATE KEY UPDATE points=0', [u]);
     }
     await q('DELETE FROM Household WHERE createdByUserId IN (?,?)', [USER, OTHER]);
@@ -38,6 +40,8 @@ afterAll(async () => {
         await q('DELETE FROM HouseholdMember WHERE userId = ?', [u]);
         await q('DELETE FROM ShoppingList WHERE userId = ?', [u]);
         await q('DELETE FROM Basket WHERE userId = ?', [u]);
+        await q('DELETE FROM TripMember WHERE userId = ?', [u]);
+        await q('DELETE FROM Trip WHERE createdByUserId = ?', [u]);
     }
     await q('DELETE FROM Household WHERE createdByUserId IN (?,?)', [USER, OTHER]);
     await (pool as any).end();
@@ -69,8 +73,11 @@ describe('GET /users/:id/tab-badges', () => {
         let r = await badges();
         expect(r.body.trips).toBe(1);
 
-        // Standalone active list (no basket) → separate unit.
-        await q("INSERT INTO ShoppingList (userId, storeId, status) VALUES (?,?, 'active')", [USER, STORE_A]);
+        // Standalone active list (no basket) → separate unit. Created via
+        // the ENDPOINT (raw SQL would skip the Phase-4 trip minting the
+        // Trip-based badge now counts).
+        const sl = await asUser(app, USER).post('/api/shopping-lists').send({ storeId: STORE_A });
+        expect([200, 201]).toContain(sl.status);
         r = await badges();
         expect(r.body.trips).toBe(2);
     });

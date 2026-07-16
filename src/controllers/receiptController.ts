@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from "express";
+import { ensureTripForReceipt } from '../services/tripLinkService.js';
 import sharp from "sharp";
 import pool from "../config/db.js";
 import { isTripMember } from "../models/tripModel.js";
@@ -329,6 +330,12 @@ export const createReceiptFromOcr = async (req: Request, res: Response, next: Ne
             // generateDefaultTemplate() for the full guard chain.
             generateDefaultTemplate(String(userId)).catch(e =>
                 console.warn('[defaultTemplate] generation failed:', e?.message),
+            );
+            // 2.0: a bare upload becomes an AD-HOC trip (born stage 5,
+            // scoreExempt). List uploads get re-pointed at the list's trip by
+            // the link endpoint moments later (relinkReceiptToListTrip).
+            ensureTripForReceipt(receiptId, String(userId), null).catch(e =>
+                console.warn('[tripLink] ad-hoc trip mint failed:', e?.message),
             );
         } catch (err: any) {
             // Best-effort cleanup of the orphaned Receipt row on ANY persist failure —
