@@ -2,6 +2,8 @@ import type { Request, Response, NextFunction } from 'express';
 import { getInviteByCode, inviteIsLive, recordInviteClaim, getOrCreateInviteToken } from '../models/inviteModel.js';
 import { getTripById, isTripMember } from '../models/tripModel.js';
 import pool from '../config/db.js';
+import { notifyUser } from '../services/notificationService.js';
+import { getTripMemberIds } from '../models/tripModel.js';
 import {
     createHousehold, getHouseholdForUser, getHouseholdMembers, isHouseholdMember,
     joinHousehold, leaveHousehold,
@@ -70,7 +72,29 @@ export const createTripInvite = async (req: Request, res: Response, next: NextFu
     try {
         const tripId = Number(req.params.id);
         const token = await getOrCreateInviteToken('trip', tripId, req.authUserId!);
-        res.json({ code: token.code });
+        // ADDRESSED invite (handle/email): registered users only (spec). The
+        // response is 200-shaped IDENTICALLY whether or not the target exists —
+        // no handle/email existence oracle; delivery rides the inbox + push.
+        const handle = typeof req.body?.handle === 'string' ? req.body.handle.trim().replace(/^@/, '') : null;
+        const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : null;
+        if (handle || email) {
+            void (async () => {
+                try {
+                    const [rows]: any = handle
+                        ? await pool.query('SELECT id FROM User WHERE username = ? LIMIT 1', [handle])
+                        : await pool.query('SELECT id FROM User WHERE email = ? LIMIT 1', [email]);
+                    const target = rows[0]?.id;
+                    if (target && target !== req.authUserId) {
+                        await notifyUser(target, 'trip_invite', {
+                            title: 'Kvietimas į apsipirkimą',
+                            body: 'Tave pakvietė į bendrą apsipirkimą.',
+                            route: `/join/${token.code}`,
+                        });
+                    }
+                } catch {}
+            })();
+        }
+        res.json({ code: token.code, addressed: !!(handle || email) });
     } catch (error) { next(error); }
 };
 
@@ -136,6 +160,20 @@ export const claimJoin = async (req: Request, res: Response, next: NextFunction)
                 "INSERT IGNORE INTO TripMember (tripId, userId, role) VALUES (?, ?, 'member')",
                 [trip.id, userId]);
             await recordInviteClaim(token.id, userId);
+            // Doorbell the EXISTING members (not the joiner) — fire-and-forget.
+            void (async () => {
+                try {
+                    const members = await getTripMemberIds(trip.id);
+                    for (const m of members) {
+                        if (m === userId) continue;
+                        await notifyUser(m, 'trip_member_joined', {
+                            title: 'Naujas narys',
+                            body: 'Prie apsipirkimo prisijungė naujas narys.',
+                            route: `/trip/${trip.id}`,
+                        });
+                    }
+                } catch {}
+            })();
             res.json({ scope: 'trip', tripId: trip.id, alreadyMember: false });
             return;
         }
@@ -154,6 +192,19 @@ export const claimJoin = async (req: Request, res: Response, next: NextFunction)
         }
         await joinHousehold(token.targetId, userId);
         await recordInviteClaim(token.id, userId);
+        void (async () => {
+            try {
+                const members = await getHouseholdMembers(token.targetId);
+                for (const m of members) {
+                    if (m.userId === userId) continue;
+                    await notifyUser(m.userId, 'household_member_joined', {
+                        title: 'Šeimos sąrašas',
+                        body: 'Prie šeimos sąrašo prisijungė naujas narys.',
+                        route: '/(tabs)/basket',
+                    });
+                }
+            } catch {}
+        })();
         res.json({ scope: 'household', householdId: token.targetId, alreadyMember: false });
     } catch (error) { next(error); }
 };

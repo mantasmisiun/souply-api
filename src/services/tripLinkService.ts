@@ -1,6 +1,7 @@
 import type { Connection } from 'mysql2/promise';
 import pool from '../config/db.js';
-import { createTrip } from '../models/tripModel.js';
+import { createTrip, getTripMemberIds } from '../models/tripModel.js';
+import { notifyUser } from './notificationService.js';
 
 /**
  * Souply 2.0 Phase 4 — trip minting at PERSIST time. The backfill
@@ -103,6 +104,20 @@ export const relinkReceiptToListTrip = async (receiptId: number, listId: number)
     const oldTrip = receipt.tripId;
     if (oldTrip === listTrip) return;
     await pool.query('UPDATE Receipt SET tripId = ? WHERE id = ?', [listTrip, receiptId]);
+    // Trip members (minus the uploader) hear the slot close — fire-and-forget.
+    void (async () => {
+        try {
+            const members = await getTripMemberIds(listTrip);
+            for (const m of members) {
+                if (m === receipt.userId) continue;
+                await notifyUser(m, 'trip_receipt_in', {
+                    title: 'Kvitas įkeltas',
+                    body: 'Apsipirkimo kvitas jau įkeltas.',
+                    route: `/trip/${listTrip}`,
+                });
+            }
+        } catch {}
+    })();
     if (oldTrip != null) {
         // GC the churn ad-hoc trip if nothing else references it.
         const [[t]]: any = await pool.query('SELECT isAdHoc FROM Trip WHERE id = ?', [oldTrip]);
