@@ -9,7 +9,7 @@ import {
     updateShoppingListBasket,
     getShoppingListByBasketId,
     getShoppingListByBasketAndStore,
-    getBasketIdByListId,
+    getBasketIdByListId, allBasketListsCompleted,
     duplicateShoppingList,
     linkReceiptToList,
 } from '../models/shoppingListModel.js';
@@ -214,7 +214,12 @@ export const changeShoppingListStatus = async (req: Request, res: Response, next
             await checkAllItemsByListId(id);
             await updateShoppingListStatus(id, status);
             const basketId = await getBasketIdByListId(id);
-            if (basketId) await updateBasketStatus(basketId, 'completed');
+            // SPLIT-SAFE: a 2/3-store basket completes only when EVERY store's
+            // list is completed — completing the FIRST store used to mark the
+            // whole basket terminal while the other store was still shoppable.
+            if (basketId && (await allBasketListsCompleted(basketId))) {
+                await updateBasketStatus(basketId, 'completed');
+            }
         } else {
             // 'active' — used when reopening a completed list.
             await updateShoppingListStatus(id, status);

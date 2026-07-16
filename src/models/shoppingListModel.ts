@@ -128,6 +128,16 @@ export const duplicateShoppingList = async (id: number, userId: string): Promise
     return newId;
 };
 
+/** True when EVERY list of the basket is completed — the basket (trip) is only
+ *  terminal when the whole split is done, not when its first store finishes. */
+export const allBasketListsCompleted = async (basketId: number): Promise<boolean> => {
+    const [rows]: any = await pool.query(
+        'SELECT COUNT(*) AS open FROM ShoppingList WHERE basketId = ? AND status <> "completed"',
+        [basketId]
+    );
+    return Number(rows[0]?.open ?? 0) === 0;
+};
+
 export const getBasketIdByListId = async (listId: number): Promise<number | null> => {
     const [rows]: any = await pool.query(
         'SELECT basketId FROM ShoppingList WHERE id = ?',
