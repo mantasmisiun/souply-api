@@ -154,7 +154,9 @@ CREATE TABLE `Basket` (
   `userEditedAfterCreation` tinyint(1) NOT NULL DEFAULT 0,
   `cheapestTotal` decimal(10,2) DEFAULT NULL,
   `tripId` int(11) DEFAULT NULL,
+  `householdId` int(11) DEFAULT NULL,
   PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_basket_household` (`householdId`),
   KEY `idx_basket_user_status_updated` (`userId`,`status`,`updatedAt`),
   KEY `idx_b_source_template` (`sourceTemplateId`),
   CONSTRAINT `Basket_ibfk_1` FOREIGN KEY (`userId`) REFERENCES `User` (`id`) ON DELETE CASCADE
@@ -959,4 +961,44 @@ CREATE TABLE `StoreProductTranslation` (
   UNIQUE KEY `uq_spt` (`storeProductId`,`lang`,`normalized`),
   KEY `idx_spt_search` (`lang`,`normalized`),
   KEY `idx_spt_sp` (`storeProductId`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+
+-- Souply 2.0 households + invites (sql/household_invites.sql)
+CREATE TABLE `Household` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `createdByUserId` char(36) NOT NULL,
+  `name` varchar(255) DEFAULT NULL,
+  `createdAt` datetime NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE `HouseholdMember` (
+  `userId` char(36) NOT NULL,
+  `householdId` int(11) NOT NULL,
+  `role` enum('owner','member') NOT NULL DEFAULT 'member',
+  `joinedAt` datetime NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`userId`),
+  KEY `idx_hm_household` (`householdId`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE `InviteToken` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `code` char(12) NOT NULL,
+  `scope` enum('trip','household') NOT NULL,
+  `targetId` int(11) NOT NULL,
+  `createdByUserId` char(36) NOT NULL,
+  `revokedAt` datetime DEFAULT NULL,
+  `expiresAt` datetime DEFAULT NULL,
+  `createdAt` datetime NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_invite_code` (`code`),
+  KEY `idx_invite_target` (`scope`,`targetId`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE `InviteClaim` (
+  `tokenId` int(11) NOT NULL,
+  `userId` char(36) NOT NULL,
+  `claimedAt` datetime NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`tokenId`,`userId`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

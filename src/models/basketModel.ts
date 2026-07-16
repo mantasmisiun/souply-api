@@ -114,6 +114,7 @@ export const getUserDraftBasketId = async (userId: string): Promise<number | nul
     const [rows]: any = await pool.query(
         `SELECT id FROM Basket
           WHERE userId = ? AND status = 'draft'
+            AND householdId IS NULL -- the shared container is NOT the personal draft
           ORDER BY updatedAt DESC
           LIMIT 1`,
         [userId]

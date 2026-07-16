@@ -15,6 +15,7 @@ import { errorHandler } from './middleware/errorHandler.js';
 import { resolveLocale } from './middleware/locale.js';
 import { versionGate } from './middleware/versionGate.js';
 import appRoutes from './routes/appRoutes.js';
+import joinRoutes from './routes/joinRoutes.js';
 import userRoutes from './routes/userRoutes.js';
 import basketRoutes from './routes/basketRoutes.js';
 import basketItemRoutes from './routes/basketItemRoutes.js';
@@ -117,6 +118,7 @@ app.use('/api/geocode', publicLimiter);
 app.use('/api/auth/oauth', publicLimiter);
 
 app.use('/api', appRoutes);
+app.use('/api', joinRoutes);
 app.use('/api', storeRoutes);
 app.use('/api', categoryRoutes);
 app.use('/api', productRoutes);
