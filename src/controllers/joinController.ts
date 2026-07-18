@@ -6,7 +6,7 @@ import { notifyUser } from '../services/notificationService.js';
 import { getTripMemberIds } from '../models/tripModel.js';
 import {
     createHousehold, getHouseholdForUser, getHouseholdMembers, isHouseholdMember,
-    joinHousehold, leaveHousehold,
+    joinHousehold, leaveHousehold, removeMemberFromHousehold,
 } from '../models/householdModel.js';
 
 /**
@@ -51,6 +51,15 @@ export const leaveOwnHousehold = async (req: Request, res: Response, next: NextF
     try {
         const left = await leaveHousehold(req.authUserId!);
         if (!left) { res.status(404).json({ error: 'not found' }); return; }
+        res.status(204).send();
+    } catch (error) { next(error); }
+};
+
+
+export const removeHouseholdMemberCtl = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const removed = await removeMemberFromHousehold(req.authUserId!, String(req.params.memberId));
+        if (!removed) { res.status(404).json({ error: 'not found' }); return; }
         res.status(204).send();
     } catch (error) { next(error); }
 };

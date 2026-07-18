@@ -71,6 +71,20 @@ export const joinHousehold = async (householdId: number, userId: string): Promis
         [userId, householdId]);
 };
 
+
+/** Owner-only member removal. Returns false when the caller isn't the owner,
+ *  the target isn't a member of the caller's household, or the target IS the
+ *  owner (owners leave via leaveHousehold, never get removed). */
+export const removeMemberFromHousehold = async (ownerUserId: string, memberUserId: string): Promise<boolean> => {
+    if (ownerUserId === memberUserId) return false;
+    const own = await getHouseholdForUser(ownerUserId);
+    if (!own || own.role !== 'owner') return false;
+    const [result]: any = await pool.query(
+        "DELETE FROM HouseholdMember WHERE householdId = ? AND userId = ? AND role <> 'owner'",
+        [own.id, memberUserId]);
+    return result.affectedRows > 0;
+};
+
 /** Leave; when the LAST member leaves, the household + its shared basket go too. */
 export const leaveHousehold = async (userId: string): Promise<boolean> => {
     const current = await getHouseholdForUser(userId);

@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { requireUser, optionalUser } from '../middleware/sessionAuth.js';
 import { requireTripMember } from '../middleware/resourceAuth.js';
 import {
-    createOwnHousehold, getOwnHousehold, leaveOwnHousehold, createHouseholdInvite,
+    createOwnHousehold, getOwnHousehold, leaveOwnHousehold, removeHouseholdMemberCtl, createHouseholdInvite,
     createTripInvite, previewJoin, claimJoin,
 } from '../controllers/joinController.js';
 
@@ -18,6 +18,7 @@ const router = Router();
 router.post('/households', requireUser, createOwnHousehold);
 router.get('/households/mine', requireUser, getOwnHousehold);
 router.delete('/households/mine/membership', requireUser, leaveOwnHousehold);
+router.delete('/households/mine/members/:memberId', requireUser, removeHouseholdMemberCtl);
 router.post('/households/mine/invites', requireUser, createHouseholdInvite);
 
 // Trip invites (any member may mint the QR)
