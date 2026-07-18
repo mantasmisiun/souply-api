@@ -74,10 +74,19 @@ export const addBasket = async (req: Request, res: Response, next: NextFunction)
         // a create request before either has updated the client's cached
         // draftBasketId. The frontend still serializes creates via an
         // in-flight promise (basketUtils.ts), but this is the backstop.
-        const existing = await getUserDraftBasketId(userId);
-        if (existing !== null) {
-            res.status(200).json({ id: existing, userId, existing: true });
-            return;
+        //
+        // `forceNew` opts OUT of the idempotency: the user EXPLICITLY chose
+        // "new basket" in the chooser, so we mint a fresh draft even when one
+        // exists. The previous draft is kept (offered as its own chooser row
+        // until it ages out) — multiple concurrent personal drafts are allowed
+        // in the 2.0 chooser model.
+        const forceNew = req.body?.forceNew === true;
+        if (!forceNew) {
+            const existing = await getUserDraftBasketId(userId);
+            if (existing !== null) {
+                res.status(200).json({ id: existing, userId, existing: true });
+                return;
+            }
         }
         const id = await createBasket(userId);
         // 2.0: every basket lives inside a trip from birth (idempotent).
