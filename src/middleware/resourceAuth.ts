@@ -56,14 +56,46 @@ export const requireBasketItemOwner = (paramName = 'id') => ownerGuard(getBasket
 export const requireBasketTemplateOwner = (paramName: 'id' | 'templateId' = 'id') => ownerGuard(getBasketTemplateOwnerId, paramName);
 
 /** OWNER guard reading the id from req.body[field] (routes with no path id, e.g. POST). */
+/** A basket is writable by its OWNER — or, for a household's SHARED basket
+ *  (Basket.householdId set), by ANY member of that household (2.0 family
+ *  basket: every member adds/edits items). */
+const basketWritableBy = async (basketId: number, userId: string): Promise<'ok' | 'not-found' | 'forbidden'> => {
+    const [rows]: any = await pool.query('SELECT userId, householdId FROM Basket WHERE id = ? LIMIT 1', [basketId]);
+    const basket = rows[0];
+    if (!basket) return 'not-found';
+    if (basket.userId === userId) return 'ok';
+    if (basket.householdId != null) {
+        const [m]: any = await pool.query(
+            'SELECT 1 FROM HouseholdMember WHERE householdId = ? AND userId = ? LIMIT 1',
+            [basket.householdId, userId]);
+        if (m.length > 0) return 'ok';
+    }
+    return 'forbidden';
+};
+
 export const requireBasketOwnerFromBody = (field = 'basketId') =>
     async function (req: Request, res: Response, next: NextFunction): Promise<void> {
         const id = num(req.body?.[field]);
         if (!Number.isFinite(id) || id <= 0) { res.status(400).json({ error: `invalid ${field}` }); return; }
         if (!req.authUserId) { res.status(401).json({ error: 'auth-required' }); return; }
-        const owner = await getBasketOwnerId(id);
-        if (owner === null) { res.status(404).json({ error: 'not found' }); return; }
-        if (owner !== req.authUserId) { res.status(403).json({ error: 'forbidden' }); return; }
+        const verdict = await basketWritableBy(id, req.authUserId);
+        if (verdict === 'not-found') { res.status(404).json({ error: 'not found' }); return; }
+        if (verdict === 'forbidden') { res.status(403).json({ error: 'forbidden' }); return; }
+        next();
+    };
+
+/** Item-level guard honouring the same shared-basket rule: resolve the
+ *  item's basket, then apply basketWritableBy. */
+export const requireBasketItemWritable = (paramName = 'id') =>
+    async function (req: Request, res: Response, next: NextFunction): Promise<void> {
+        const itemId = num(req.params[paramName]);
+        if (!Number.isFinite(itemId) || itemId <= 0) { res.status(400).json({ error: 'invalid id' }); return; }
+        if (!req.authUserId) { res.status(401).json({ error: 'auth-required' }); return; }
+        const [rows]: any = await pool.query('SELECT basketId FROM BasketItem WHERE id = ? LIMIT 1', [itemId]);
+        if (!rows[0]) { res.status(404).json({ error: 'not found' }); return; }
+        const verdict = await basketWritableBy(Number(rows[0].basketId), req.authUserId);
+        if (verdict === 'not-found') { res.status(404).json({ error: 'not found' }); return; }
+        if (verdict === 'forbidden') { res.status(403).json({ error: 'forbidden' }); return; }
         next();
     };
 

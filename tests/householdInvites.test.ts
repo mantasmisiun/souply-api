@@ -41,6 +41,9 @@ afterAll(async () => {
         await q('DELETE FROM Trip WHERE createdByUserId = ?', [u]);
     }
     await q('DELETE FROM Household WHERE createdByUserId IN (?,?,?)', [OWNER, JOINER, THIRD]);
+    await q('DELETE FROM BasketItem WHERE productId = 601');
+    await q('DELETE FROM Product WHERE id = 601');
+    await q('DELETE FROM Category WHERE id = 9971');
     await (pool as any).end();
 });
 
@@ -121,6 +124,32 @@ describe('household lifecycle', () => {
         const [rows]: any = await pool.query(
             'SELECT COUNT(*) AS n FROM Basket WHERE userId = ? AND householdId IS NOT NULL', [THIRD]);
         expect(Number(rows[0].n)).toBe(0);
+    });
+});
+
+describe('family basket writes', () => {
+    it('household members can add/edit items in the shared basket; strangers cannot', async () => {
+        // OWNER + JOINER are still in the lifecycle household — reuse it.
+        const mine = await asUser(app, OWNER).get('/api/households/mine');
+        expect(mine.status).toBe(200);
+        const shared = mine.body.sharedBasketId;
+
+        await q("INSERT INTO Category (id, name) VALUES (9971, 'HH Cat') ON DUPLICATE KEY UPDATE name=VALUES(name)");
+        await q("INSERT INTO Product (id, name, categoryId) VALUES (601, 'HH Milk', 9971) ON DUPLICATE KEY UPDATE name=VALUES(name)");
+
+        // MEMBER (non-creator) adds an item to the shared basket.
+        const add = await asUser(app, JOINER).post('/api/basket-items')
+            .send({ basketId: shared, productId: 601, quantity: 1 });
+        expect([200, 201]).toContain(add.status);
+
+        // ...and can edit it.
+        const upd = await asUser(app, JOINER).put(`/api/basket-items/${add.body.id}`).send({ quantity: 2 });
+        expect(upd.status).toBe(200);
+
+        // A NON-member is still forbidden.
+        const stranger = await asUser(app, THIRD).post('/api/basket-items')
+            .send({ basketId: shared, productId: 601, quantity: 1 });
+        expect(stranger.status).toBe(403);
     });
 });
 

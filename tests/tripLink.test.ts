@@ -42,6 +42,10 @@ afterAll(async () => {
     await q('DELETE FROM Basket WHERE userId = ?', [USER]);
     await q('DELETE FROM TripMember WHERE userId = ?', [USER]);
     await q('DELETE FROM Trip WHERE createdByUserId = ?', [USER]);
+    await q('DELETE FROM TripLineLink WHERE createdByUserId = ?', [USER]);
+    await q('DELETE FROM StoreProduct WHERE id = 95011');
+    await q('DELETE FROM Product WHERE id IN (501, 502)');
+    await q('DELETE FROM Category WHERE id = 9970');
     await (pool as any).end();
 });
 

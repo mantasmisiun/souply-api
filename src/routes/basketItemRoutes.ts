@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { addBasketItem, fetchBasketItemsByBasketId, updateBasketItem, removeBasketItem, convertBasketMode } from '../controllers/basketItemController.js';
 import { requireUser } from '../middleware/sessionAuth.js';
-import { requireBasketOwner, requireBasketOwnerFromBody, requireBasketItemOwner } from '../middleware/resourceAuth.js';
+import { requireBasketOwner, requireBasketOwnerFromBody, requireBasketItemWritable } from '../middleware/resourceAuth.js';
 
 const router = Router();
 
@@ -95,7 +95,7 @@ router.post('/baskets/:basketId/convert-mode', requireUser, requireBasketOwner('
  *         description: Basket item updated successfully
  */
 // PUT /api/basket-items/:id - Update the quantity of a basket item
-router.put('/basket-items/:id', requireUser, requireBasketItemOwner('id'), updateBasketItem);
+router.put('/basket-items/:id', requireUser, requireBasketItemWritable('id'), updateBasketItem);
 
 /**
  * @swagger
@@ -115,6 +115,6 @@ router.put('/basket-items/:id', requireUser, requireBasketItemOwner('id'), updat
  *         description: Basket item removed successfully
  */
 // DELETE /api/basket-items/:id - Remove an item from a basket
-router.delete('/basket-items/:id', requireUser, requireBasketItemOwner('id'), removeBasketItem);
+router.delete('/basket-items/:id', requireUser, requireBasketItemWritable('id'), removeBasketItem);
 
 export default router;
