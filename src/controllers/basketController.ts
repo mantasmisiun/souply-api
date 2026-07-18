@@ -100,7 +100,7 @@ export const addBasket = async (req: Request, res: Response, next: NextFunction)
 export const fetchBasketsByUserId = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const userId = String(req.params.userId);
-        const baskets = await getBasketsByUserId(userId);
+        const baskets = await getBasketsByUserId(userId, req.locale);
         res.json(baskets);
     } catch (error) {
         next(error);

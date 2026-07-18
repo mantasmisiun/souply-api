@@ -77,7 +77,7 @@ export const listTemplates = async (req: Request, res: Response, next: NextFunct
         const userId = String(req.params.userId);
         // Only the owner may list their templates.
         if (callerId(req) !== userId) { res.status(403).json({ error: 'forbidden' }); return; }
-        const templates = await getTemplatesByUserId(userId);
+        const templates = await getTemplatesByUserId(userId, req.locale);
         res.json(templates);
     } catch (e) { next(e); }
 };

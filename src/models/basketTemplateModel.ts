@@ -185,11 +185,21 @@ export const getTemplateById = async (id: number): Promise<BasketTemplateRow | n
  * (private + unlisted + public). Public-profile / discovery queries live
  * in a separate model fn once Pass B ships.
  */
-export const getTemplatesByUserId = async (userId: string) => {
+export const getTemplatesByUserId = async (userId: string, locale: Locale = 'lt') => {
+    // `~|~`-joined preview of the template's most-recently-added product names
+    // (localized, newest-first, cap 5) — same shape as the basket chooser rows.
+    const { nameSql } = localizedProductNameSql(locale, { productAlias: 'ppv' });
+    const itemPreview = `(SELECT SUBSTRING_INDEX(
+                GROUP_CONCAT(CONVERT(${nameSql} USING utf8mb4) ORDER BY btipv.id DESC SEPARATOR '~|~'),
+                '~|~', 5)
+          FROM BasketTemplateItem btipv
+          JOIN Product ppv ON ppv.id = btipv.productId
+         WHERE btipv.templateId = bt.id)`;
     const [rows]: any = await pool.query(
         `SELECT bt.*,
                 (SELECT COUNT(*) FROM BasketTemplateItem bti
-                  WHERE bti.templateId = bt.id) AS itemCount
+                  WHERE bti.templateId = bt.id) AS itemCount,
+                ${itemPreview} AS itemPreview
            FROM BasketTemplate bt
           WHERE bt.userId = ?
           ORDER BY bt.updatedAt DESC`,

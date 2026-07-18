@@ -1,5 +1,29 @@
 import pool from '../config/db.js';
 import type { Connection } from 'mysql2/promise';
+import { localizedProductNameSql, type Locale } from '../middleware/locale.js';
+
+/**
+ * A `~|~`-joined preview of a basket's most-recently-added product names
+ * (localized, newest-first, capped at 5) for the basket-chooser rows. `~|~` is
+ * a separator no product name contains; the client splits on it. Reusable so
+ * the templates preview keys on the same shape.
+ */
+export const itemPreviewSql = (locale: Locale, basketIdExpr: string): string => {
+    const { nameSql } = localizedProductNameSql(locale, { productAlias: 'ppv' });
+    // A correlated derived table can't reference the outer basket id in MariaDB,
+    // so cap with SUBSTRING_INDEX over a newest-first GROUP_CONCAT instead (the
+    // concat is ordered by item id DESC, so the first 5 slots are the newest —
+    // safe even if GROUP_CONCAT truncates the tail at its length limit).
+    // CONVERT(... USING utf8mb4) normalises collation — EN names come from a
+    // utf8mb4_bin translations column and GROUP_CONCAT-ing them against the
+    // uca1400 separator literal otherwise errors "illegal mix of collations".
+    return `(SELECT SUBSTRING_INDEX(
+                GROUP_CONCAT(CONVERT(${nameSql} USING utf8mb4) ORDER BY bipv.id DESC SEPARATOR '~|~'),
+                '~|~', 5)
+          FROM BasketItem bipv
+          JOIN Product ppv ON ppv.id = bipv.productId
+         WHERE bipv.basketId = ${basketIdExpr})`;
+};
 
 export const createBasket = async (userId: string, sourceTemplateId: number | null = null, conn?: Connection) => {
     const db = (conn ?? pool) as any;
@@ -122,7 +146,7 @@ export const getUserDraftBasketId = async (userId: string): Promise<number | nul
     return rows[0]?.id ?? null;
 };
 
-export const getBasketsByUserId = async (userId: string) => {
+export const getBasketsByUserId = async (userId: string, locale: Locale = 'lt') => {
     // Pull the selected-store total for inProgress / completed baskets so
     // the Krepselis card can show what the user actually spent at their
     // chosen shop. `cheapestTotal` is the persisted result of the most
@@ -151,7 +175,8 @@ export const getBasketsByUserId = async (userId: string) => {
                 t.coverColor   AS templateCoverColor,
                 t.coverImage   AS templateCoverImage,
                 u.username     AS templateCreatorHandle,
-                t.name         AS templateName
+                t.name         AS templateName,
+                ${itemPreviewSql(locale, 'Basket.id')} AS itemPreview
          FROM Basket
          LEFT JOIN BasketItem ON Basket.id = BasketItem.basketId
          LEFT JOIN BasketTemplate t ON t.id = Basket.sourceTemplateId
