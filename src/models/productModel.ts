@@ -6,9 +6,9 @@ import {
     attachCanonicalFields,
 } from '../services/productCanonical.js';
 import { attachUnitPriceBadges } from '../services/productBadge.js';
-import { stemQuery } from '../utils/searchStem.js';
 import { RECOGNITION } from '../../../shared/recognitionConfig.js';
 import { localizedProductNameSql, type Locale } from '../middleware/locale.js';
+import { productSearchClauses } from '../utils/productSearchMatch.js';
 
 type Connection = typeof pool | any;
 
@@ -75,43 +75,43 @@ const productWithImagesSelect = (locale: Locale): string => {
 };
 
 export const searchProduct = async (query: string, locale: Locale = 'lt') => {
-    const fuzzy = buildFuzzyNameClause(query, 'p.name');
-    const stems = stemQuery(query);
+    // Match signals come from the ONE shared source (utils/productSearchMatch) so
+    // /products/search and the Discounts filter never drift apart. Here we use
+    // them for RANKING: name (rank 0) → stemmed name (rank 1) → SP name /
+    // translations / aliases (ranks 2–4), each its own query, merged by rank.
+    const sc = productSearchClauses(query, { nameCol: 'p.name', idCol: 'p.id' });
     const CAT_GATE = `JOIN Category cat ON cat.id = p.categoryId AND cat.name NOT LIKE 'Nepriskirt%'`;
 
     // ── Arm 1 (rank 0): full-token name match — today's behavior, highest rank.
     const [exact]: any = await pool.query(
         `${browseSelect(locale)}
          ${CAT_GATE}
-         WHERE ${fuzzy.sql}
+         WHERE ${sc.nameFuzzy.sql}
            AND p.mergedIntoId IS NULL
          GROUP BY p.id
          ORDER BY p.globalScore DESC
          LIMIT 50`,
-        fuzzy.params,
+        sc.nameFuzzy.params,
     );
 
     // ── Arm 2 (rank 1): STEMMED name match — inflection recall ("saldi" →
-    // "saldžios", "sojos" → "sojų"). Same AND-composition keeps precision.
+    // "saldžios", "sojos" → "sojų").
     let stemmed: any[] = [];
-    if (stems.length > 0 && exact.length < 50) {
-        const stemSql = stems.map(() => `p.name COLLATE utf8mb4_unicode_ci LIKE ?`).join(' AND ');
+    if (sc.nameStem && exact.length < 50) {
         [stemmed] = await pool.query(
             `${browseSelect(locale)}
              ${CAT_GATE}
-             WHERE ${stemSql}
+             WHERE ${sc.nameStem.sql}
                AND p.mergedIntoId IS NULL
              GROUP BY p.id
              ORDER BY p.globalScore DESC
              LIMIT 50`,
-            stems.map((s) => `%${s}%`),
+            sc.nameStem.params,
         ) as any;
     }
 
-    // Arms 3–5 all resolve PRODUCT ids through a sub-lookup, then hydrate via
-    // BROWSE_SELECT. Shared helper keeps them uniform; each arm only runs while
-    // earlier arms left room (common searches stay a single query).
-    const stemLikes = stems.map((s) => `%${s}%`);
+    // Arms 3–5 resolve PRODUCT ids via the shared match module, then hydrate
+    // through BROWSE_SELECT. Each arm only runs while earlier arms left room.
     const hydrate = async (ids: number[]): Promise<any[]> => {
         if (ids.length === 0) return [];
         const [rows]: any = await pool.query(
@@ -129,52 +129,20 @@ export const searchProduct = async (query: string, locale: Locale = 'lt') => {
         const [idRows]: any = await pool.query(`${subquery} LIMIT 50`, params);
         return hydrate(idRows.map((r: any) => r.productId));
     };
+
     let found = exact.length + stemmed.length;
-
-    // ── Arm 3 (rank 2): STORE-PRODUCT NAME — SP names diverge from cluster
-    // head names often enough to deserve their own rung.
-    let spName: any[] = [];
-    if (stems.length > 0 && found < 50) {
-        const spSql = stems.map(() => `sp.storeProductName COLLATE utf8mb4_unicode_ci LIKE ?`).join(' AND ');
-        spName = await idArm(
-            `SELECT DISTINCT sp.productId FROM StoreProduct sp WHERE ${spSql}`,
-            stemLikes,
-        );
-        found += spName.length;
-    }
-
-    // ── Arm 4 (rank 3): TRANSLATIONS/SYNONYMS — "soy sauce"/"batatai" →
-    // "Sojų padažas"/"Saldžiosios bulvės".
-    let translations: any[] = [];
-    if (stems.length > 0 && found < 50) {
-        const trSql = stems.map(() => `spt.normalized COLLATE utf8mb4_unicode_ci LIKE ?`).join(' AND ');
-        translations = await idArm(
-            `SELECT DISTINCT sp.productId
-             FROM StoreProductTranslation spt
-             JOIN StoreProduct sp ON sp.id = spt.storeProductId
-             WHERE ${trSql}`,
-            stemLikes,
-        );
-        found += translations.length;
-    }
-
-    // ── Arm 5 (rank 4): RECEIPT VOCABULARY — user-confirmed OCR namings.
-    let aliases: any[] = [];
-    if (stems.length > 0 && found < 50) {
-        const aliasSql = stems.map(() => `sar.normalizedAlias COLLATE utf8mb4_unicode_ci LIKE ?`).join(' AND ');
-        aliases = await idArm(
-            `SELECT DISTINCT sp.productId
-             FROM StoreProductReceiptAlias sar
-             JOIN StoreProduct sp ON sp.id = sar.storeProductId
-             WHERE sar.status = 'canonical' AND ${aliasSql}`,
-            stemLikes,
-        );
+    const vocabArms: any[][] = [];
+    for (const arm of sc.rankedIdArms) {
+        if (found >= 50) { vocabArms.push([]); continue; }
+        const rows = await idArm(arm.sql, arm.params);
+        vocabArms.push(rows);
+        found += rows.length;
     }
 
     // Merge rank-ordered, dedup by product id, cap 50.
     const seen = new Set<number>();
     const products: any[] = [];
-    for (const arm of [exact, stemmed, spName, translations, aliases]) {
+    for (const arm of [exact, stemmed, ...vocabArms]) {
         for (const p of arm) {
             if (seen.has(p.id)) continue;
             seen.add(p.id);
@@ -765,11 +733,12 @@ export const getDiscountedProducts = async (opts: {
         params.push(opts.l2CategoryId);
     }
     if (opts.search) {
-        // Filter still matches the baked LT name (the summary is single-locale);
-        // only the DISPLAYED name/image switch to EN below.
-        const fuzzy = buildFuzzyNameClause(opts.search, 'd.name');
-        conditions.push(`(${fuzzy.sql})`);
-        params.push(...fuzzy.params);
+        // On par with /products/search: the SAME shared match module (name +
+        // stems + SP names + translations + aliases), so English queries and
+        // synonyms hit here too — keyed on the summary's productId.
+        const sc = productSearchClauses(opts.search, { nameCol: 'd.name', idCol: 'd.productId' });
+        conditions.push(sc.matchAny.sql);
+        params.push(...sc.matchAny.params);
     }
 
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
