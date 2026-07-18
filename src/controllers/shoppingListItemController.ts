@@ -55,7 +55,7 @@ export const fetchListItemsByShoppingListId = async (req: Request, res: Response
             res.status(400).json({ error: 'Invalid shopping list ID' });
             return;
         }
-        const items = await getListItemsByShoppingListId(listId);
+        const items = await getListItemsByShoppingListId(listId, req.locale);
         res.json(items);
     } catch (error) {
         next(error);

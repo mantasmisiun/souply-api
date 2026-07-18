@@ -27,7 +27,7 @@ export const addBasketItem = async (req: Request, res: Response, next: NextFunct
             return;
         }
 
-        const product = await getProductById(productId);
+        const product = await getProductById(productId, req.locale);
         if (!product) {
             res.status(404).json({ error: 'Product not found' });
             return;
@@ -60,7 +60,7 @@ export const fetchBasketItemsByBasketId = async (req: Request, res: Response, ne
             return;
         }
         const basket = await getBasketById(basketId);
-        const items = await getBasketItemsByBasketId(basketId, basket?.userId ?? null);
+        const items = await getBasketItemsByBasketId(basketId, basket?.userId ?? null, req.locale);
         res.json(items);
     } catch (error) {
         next(error);

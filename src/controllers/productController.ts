@@ -11,7 +11,7 @@ export const addProduct = async (req: Request, res: Response, next: NextFunction
         const id = await createProduct(categoryId, baseProductId || null, name);
         // Re-read so the response reflects any baseProductId the model
         // auto-assigned when the caller passed null.
-        const created = await getProductById(id);
+        const created = await getProductById(id, req.locale);
         res.status(201).json(created);
     } catch (error) {
         next(error);
@@ -25,7 +25,7 @@ export const searchProducts = async (req: Request, res: Response, next: NextFunc
             res.status(400).json({ error: 'Search query is required' });
             return;
         }
-        const products = await searchProduct(query);
+        const products = await searchProduct(query, req.locale);
         res.json(products);
     } catch (error) {
         next(error);
@@ -39,7 +39,7 @@ export const fetchProductById = async (req: Request, res: Response, next: NextFu
             res.status(400).json({ error: 'Invalid product ID' });
             return;
         }
-        const product = await getProductById(id);
+        const product = await getProductById(id, req.locale);
         if (!product) {
             res.status(404).json({ error: 'Product not found' });
             return;
@@ -57,7 +57,7 @@ export const fetchProductsByCategory = async (req: Request, res: Response, next:
             res.status(400).json({ error: 'Invalid category ID' });
             return;
         }
-        const products = await getProductsByCategory(categoryId);
+        const products = await getProductsByCategory(categoryId, req.locale);
         res.json(products);
     } catch (error) {
         next(error);
@@ -75,7 +75,7 @@ export const fetchProductsByCategoryWithAmounts = async (req: Request, res: Resp
         }
         const mode = parseMode(req.query.mode);
         const userId = typeof req.query.userId === 'string' ? req.query.userId : undefined;
-        const products = await getProductsByCategoryWithAmounts(categoryId, mode, userId);
+        const products = await getProductsByCategoryWithAmounts(categoryId, mode, userId, req.locale);
         res.json(products);
     } catch (error) {
         next(error);
@@ -91,7 +91,7 @@ export const fetchAllProductsByL2WithAmounts = async (req: Request, res: Respons
         }
         const mode = parseMode(req.query.mode);
         const userId = typeof req.query.userId === 'string' ? req.query.userId : undefined;
-        const products = await getAllProductsByL2WithAmounts(categoryId, mode, userId);
+        const products = await getAllProductsByL2WithAmounts(categoryId, mode, userId, req.locale);
         res.json(products);
     } catch (error) {
         next(error);
@@ -111,13 +111,15 @@ export const fetchDiscountedProducts = async (req: Request, res: Response, next:
         // same hash; any scrape/cron refresh bumps it. Lets the client skip
         // the JSON body on pull-to-refresh when nothing has changed.
         const ts = await getDiscountsSummaryUpdatedAt();
-        const etag = `W/"d-${ts}-${l2CategoryId ?? ''}-${search ?? ''}-${limit ?? ''}-${offset}"`;
+        // Locale is part of the key: EN and LT bodies differ (names/images), so
+        // they must never share a cache entry.
+        const etag = `W/"d-${ts}-${req.locale}-${l2CategoryId ?? ''}-${search ?? ''}-${limit ?? ''}-${offset}"`;
         if (req.headers['if-none-match'] === etag) {
             res.status(304).end();
             return;
         }
 
-        const products = await getDiscountedProducts({ l2CategoryId, search, limit, offset });
+        const products = await getDiscountedProducts({ l2CategoryId, search, limit, offset, locale: req.locale });
         res.setHeader('ETag', etag);
         res.setHeader('Cache-Control', 'public, max-age=300, stale-while-revalidate=3600');
         res.json(products);

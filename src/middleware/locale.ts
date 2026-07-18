@@ -95,3 +95,67 @@ export function localizedCategoryNameSql(
         translationAlias: tr,
     };
 }
+
+export interface LocalizedProductSql {
+    /** Expression resolving to the localized product DISPLAY name. */
+    nameSql: string;
+    /** Expression resolving to the JSON array of image URLs. In EN the
+     *  name-donor SP's photo leads so name + image can never diverge. */
+    imageUrlsSql: string;
+}
+
+/**
+ * Locale-aware product NAME + IMAGE resolution — the product counterpart of
+ * `localizedCategoryNameSql`.
+ *
+ * Products don't have a translation column; English lives per-StoreProduct in
+ * `StoreProductTranslation(lang='en', text)`. `Product.name` is the shortest of
+ * the SPs' Lithuanian names, so the English analogue is the shortest of the
+ * SPs' English `text`s.
+ *
+ * LT (default) is a strict NO-OP — the stored `p.name` and the plain image
+ * aggregate, byte-identical to the pre-i18n queries (no join, no added cost).
+ *
+ * EN returns, as parameter-free expressions (locale is a validated enum, never
+ * user text, so `'en'` is inlined — no `?` bind needed):
+ *   - `nameSql`: the shortest `spt.text` across the product's SPs, COALESCE
+ *     fallback to `p.name` for the rare SP with no `lang='en'` row.
+ *   - `imageUrlsSql`: the image aggregate ORDER-BY'd so the SAME donor SP's
+ *     `imageUrl` is first (the client reads index 0) — the "name and photo
+ *     can't diverge" invariant.
+ *
+ * `productAlias` is the Product row alias in the host query (usually `p`). The
+ * internal subquery aliases (`spt`, `sp2`, `spi`) are scoped to the subqueries
+ * and won't clash with the outer query's `sp`.
+ */
+export function localizedProductNameSql(
+    locale: Locale,
+    opts: { productAlias?: string; idExpr?: string; nameExpr?: string } = {},
+): LocalizedProductSql {
+    const p = opts.productAlias ?? 'p';
+    // The product's id + its LT display name in the host query. Both are
+    // overridable so this works over a denormalized table (e.g. the discounts
+    // summary keys on `productId` and carries a baked `name` column).
+    const id = opts.idExpr ?? `${p}.id`;
+    const ltName = opts.nameExpr ?? `${p}.name`;
+    const plainImages =
+        `(SELECT JSON_ARRAYAGG(spi.imageUrl) FROM StoreProduct spi ` +
+        `WHERE spi.productId = ${id} AND spi.imageUrl IS NOT NULL)`;
+    if (locale !== 'en') {
+        return { nameSql: ltName, imageUrlsSql: plainImages };
+    }
+    // The SP donating the shortest English name — reused for name + image lead.
+    const donorPick =
+        `FROM StoreProductTranslation spt ` +
+        `JOIN StoreProduct sp2 ON sp2.id = spt.storeProductId ` +
+        `WHERE sp2.productId = ${id} AND spt.lang = 'en' ` +
+        `ORDER BY CHAR_LENGTH(spt.text), spt.text, sp2.id LIMIT 1`;
+    return {
+        nameSql: `COALESCE((SELECT spt.text ${donorPick}), ${ltName})`,
+        imageUrlsSql:
+            `(SELECT JSON_ARRAYAGG(spi.imageUrl ORDER BY ` +
+            `(spi.id = (SELECT sp2.id ${donorPick})) DESC, spi.id) ` +
+            `FROM StoreProduct spi ` +
+            `WHERE spi.productId = ${id} AND spi.imageUrl IS NOT NULL)`,
+    };
+}

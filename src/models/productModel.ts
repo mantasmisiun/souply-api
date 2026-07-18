@@ -8,6 +8,7 @@ import {
 import { attachUnitPriceBadges } from '../services/productBadge.js';
 import { stemQuery } from '../utils/searchStem.js';
 import { RECOGNITION } from '../../../shared/recognitionConfig.js';
+import { localizedProductNameSql, type Locale } from '../middleware/locale.js';
 
 type Connection = typeof pool | any;
 
@@ -63,21 +64,24 @@ export const createProduct = async (
     return result.insertId;
 };
 
-const PRODUCT_WITH_IMAGES_SELECT = `
-    p.id, p.categoryId, p.baseProductId, p.name,
-    (SELECT JSON_ARRAYAGG(spi.imageUrl)
-     FROM StoreProduct spi
-     WHERE spi.productId = p.id AND spi.imageUrl IS NOT NULL) AS imageUrls
+// Locale-aware: LT is a no-op (p.name + plain image aggregate); EN resolves the
+// shortest English SP translation and leads the images with that SP's photo.
+const productWithImagesSelect = (locale: Locale): string => {
+    const loc = localizedProductNameSql(locale);
+    return `
+    p.id, p.categoryId, p.baseProductId, ${loc.nameSql} AS name,
+    ${loc.imageUrlsSql} AS imageUrls
 `;
+};
 
-export const searchProduct = async (query: string) => {
+export const searchProduct = async (query: string, locale: Locale = 'lt') => {
     const fuzzy = buildFuzzyNameClause(query, 'p.name');
     const stems = stemQuery(query);
     const CAT_GATE = `JOIN Category cat ON cat.id = p.categoryId AND cat.name NOT LIKE 'Nepriskirt%'`;
 
     // ── Arm 1 (rank 0): full-token name match — today's behavior, highest rank.
     const [exact]: any = await pool.query(
-        `${BROWSE_SELECT}
+        `${browseSelect(locale)}
          ${CAT_GATE}
          WHERE ${fuzzy.sql}
            AND p.mergedIntoId IS NULL
@@ -93,7 +97,7 @@ export const searchProduct = async (query: string) => {
     if (stems.length > 0 && exact.length < 50) {
         const stemSql = stems.map(() => `p.name COLLATE utf8mb4_unicode_ci LIKE ?`).join(' AND ');
         [stemmed] = await pool.query(
-            `${BROWSE_SELECT}
+            `${browseSelect(locale)}
              ${CAT_GATE}
              WHERE ${stemSql}
                AND p.mergedIntoId IS NULL
@@ -111,7 +115,7 @@ export const searchProduct = async (query: string) => {
     const hydrate = async (ids: number[]): Promise<any[]> => {
         if (ids.length === 0) return [];
         const [rows]: any = await pool.query(
-            `${BROWSE_SELECT}
+            `${browseSelect(locale)}
              ${CAT_GATE}
              WHERE p.id IN (?)
                AND p.mergedIntoId IS NULL
@@ -191,9 +195,9 @@ export const searchProduct = async (query: string) => {
     return attachUnitPriceBadges(attachCanonicalFields(productsWithCat, canonicals));
 };
 
-export const getProductById = async (id: number) => {
+export const getProductById = async (id: number, locale: Locale = 'lt') => {
     const [products]: any = await pool.query(
-        `${BROWSE_SELECT} WHERE p.id = ? GROUP BY p.id`,
+        `${browseSelect(locale)} WHERE p.id = ? GROUP BY p.id`,
         [id]
     );
     const product = products[0] || null;
@@ -202,9 +206,9 @@ export const getProductById = async (id: number) => {
     return attachCanonicalFields([product], canonicals)[0];
 };
 
-export const getProductsByCategory = async (categoryId: number) => {
+export const getProductsByCategory = async (categoryId: number, locale: Locale = 'lt') => {
     const [products]: any = await pool.query(
-        `SELECT ${PRODUCT_WITH_IMAGES_SELECT} FROM Product p WHERE p.categoryId = ?`,
+        `SELECT ${productWithImagesSelect(locale)} FROM Product p WHERE p.categoryId = ?`,
         [categoryId]
     );
     return products;
@@ -247,9 +251,9 @@ export const searchProductsForAdmin = async (
     }));
 };
 
-export const getProductByName = async (name: string) => {
+export const getProductByName = async (name: string, locale: Locale = 'lt') => {
     const [rows]: any = await pool.query(
-        `SELECT ${PRODUCT_WITH_IMAGES_SELECT} FROM Product p WHERE p.name = ?`,
+        `SELECT ${productWithImagesSelect(locale)} FROM Product p WHERE p.name = ?`,
         [name]
     );
     return rows[0] || null;
@@ -289,11 +293,11 @@ const AMOUNT_NORMALIZED_EXPR = `
     END
 `;
 
-const BROWSE_SELECT = `
-    SELECT p.id, p.name, p.categoryId, p.globalScore,
-        (SELECT JSON_ARRAYAGG(spi.imageUrl)
-         FROM StoreProduct spi
-         WHERE spi.productId = p.id AND spi.imageUrl IS NOT NULL) AS imageUrls,
+const browseSelect = (locale: Locale): string => {
+    const loc = localizedProductNameSql(locale);
+    return `
+    SELECT p.id, ${loc.nameSql} AS name, p.categoryId, p.globalScore,
+        ${loc.imageUrlsSql} AS imageUrls,
         -- chainLogos: one {chainId,logoUrl} per distinct chain the product
         -- is sold in. Written as a correlated subquery inside IN(...) rather
         -- than a correlated DERIVED TABLE because MariaDB (prod engine) does
@@ -310,6 +314,7 @@ const BROWSE_SELECT = `
      FROM Product p
      LEFT JOIN StoreProduct sp ON sp.productId = p.id
 `;
+};
 
 /**
  * Fetch globally merged loser products that the user has personally voted
@@ -322,9 +327,10 @@ async function fetchPersonallyRestoredProducts(
     categoryFilter: string,
     categoryParams: any[],
     baseFilter: string,
+    locale: Locale = 'lt',
 ): Promise<any[]> {
     const [rows]: any = await pool.query(
-        `${BROWSE_SELECT}
+        `${browseSelect(locale)}
          WHERE ${categoryFilter}
            AND p.mergedIntoId IS NOT NULL
            AND EXISTS (
@@ -423,13 +429,14 @@ export const getProductsByCategoryWithAmounts = async (
     categoryId: number,
     mode: BrowseMode = 'base',
     userId?: string,
+    locale: Locale = 'lt',
 ) => {
     const baseFilter = mode === 'base' ? 'AND p.baseProductId IS NULL' : '';
 
     let products: any[];
     if (userId) {
         [products] = await pool.query(
-            `${BROWSE_SELECT}
+            `${browseSelect(locale)}
              LEFT JOIN UserProductScore ups ON ups.userId = ? AND ups.productId = p.id
              WHERE p.categoryId = ?
                AND p.mergedIntoId IS NULL
@@ -440,7 +447,7 @@ export const getProductsByCategoryWithAmounts = async (
         ) as any;
     } else {
         [products] = await pool.query(
-            `${BROWSE_SELECT}
+            `${browseSelect(locale)}
              WHERE p.categoryId = ?
                AND p.mergedIntoId IS NULL
                ${baseFilter}
@@ -456,6 +463,7 @@ export const getProductsByCategoryWithAmounts = async (
             'p.categoryId = ?',
             [categoryId],
             baseFilter,
+            locale,
         );
         products.push(...restored);
     }
@@ -747,16 +755,19 @@ export const getDiscountedProducts = async (opts: {
     search?: string;
     limit?: number;
     offset?: number;
+    locale?: Locale;
 } = {}) => {
     const conditions: string[] = [];
     const params: any[] = [];
 
     if (opts.l2CategoryId != null) {
-        conditions.push('l2CategoryId = ?');
+        conditions.push('d.l2CategoryId = ?');
         params.push(opts.l2CategoryId);
     }
     if (opts.search) {
-        const fuzzy = buildFuzzyNameClause(opts.search, 'name');
+        // Filter still matches the baked LT name (the summary is single-locale);
+        // only the DISPLAYED name/image switch to EN below.
+        const fuzzy = buildFuzzyNameClause(opts.search, 'd.name');
         conditions.push(`(${fuzzy.sql})`);
         params.push(...fuzzy.params);
     }
@@ -766,14 +777,23 @@ export const getDiscountedProducts = async (opts: {
         ? `LIMIT ${Number(opts.limit)} OFFSET ${Number(opts.offset ?? 0)}`
         : '';
 
+    // LT reads the baked name/imageUrls (zero cost). EN overlays the shortest
+    // EN name + donor-first images via the shared resolver, keyed on the
+    // summary's productId (its baked `name` is the COALESCE fallback).
+    const en = opts.locale === 'en'
+        ? localizedProductNameSql('en', { productAlias: 'd', idExpr: 'd.productId', nameExpr: 'd.name' })
+        : null;
+    const nameCol = en ? `${en.nameSql} AS name` : 'd.name';
+    const imageCol = en ? `${en.imageUrlsSql} AS imageUrls` : 'd.imageUrls';
+
     const [rows]: any = await pool.query(
-        `SELECT productId AS id, name, categoryId, l2CategoryId,
-                imageUrls, chainLogos, minAmount, maxAmount, unit, hasWeighable,
-                bestDiscountPct, realDiscountPct, cheapestChainId,
-                canonicalUnit, canonicalStep, canonicalFamily
-           FROM DiscountedProductSummary
+        `SELECT d.productId AS id, ${nameCol}, d.categoryId, d.l2CategoryId,
+                ${imageCol}, d.chainLogos, d.minAmount, d.maxAmount, d.unit, d.hasWeighable,
+                d.bestDiscountPct, d.realDiscountPct, d.cheapestChainId,
+                d.canonicalUnit, d.canonicalStep, d.canonicalFamily
+           FROM DiscountedProductSummary d
            ${where}
-           ORDER BY COALESCE(realDiscountPct, bestDiscountPct) DESC
+           ORDER BY COALESCE(d.realDiscountPct, d.bestDiscountPct) DESC
            ${limitClause}`,
         params,
     );
@@ -784,6 +804,7 @@ export const getAllProductsByL2WithAmounts = async (
     l2CategoryId: number,
     mode: BrowseMode = 'base',
     userId?: string,
+    locale: Locale = 'lt',
 ) => {
     const baseFilter = mode === 'base' ? 'AND p.baseProductId IS NULL' : '';
     const l2Filter = '(p.categoryId IN (SELECT id FROM Category WHERE parentCategoryId = ?) OR p.categoryId = ?)';
@@ -792,7 +813,7 @@ export const getAllProductsByL2WithAmounts = async (
     let products: any[];
     if (userId) {
         [products] = await pool.query(
-            `${BROWSE_SELECT}
+            `${browseSelect(locale)}
              LEFT JOIN UserProductScore ups ON ups.userId = ? AND ups.productId = p.id
              WHERE ${l2Filter}
                AND p.mergedIntoId IS NULL
@@ -803,7 +824,7 @@ export const getAllProductsByL2WithAmounts = async (
         ) as any;
     } else {
         [products] = await pool.query(
-            `${BROWSE_SELECT}
+            `${browseSelect(locale)}
              WHERE ${l2Filter}
                AND p.mergedIntoId IS NULL
                ${baseFilter}
@@ -819,6 +840,7 @@ export const getAllProductsByL2WithAmounts = async (
             l2Filter,
             l2Params,
             baseFilter,
+            locale,
         );
         products.push(...restored);
     }

@@ -1,5 +1,6 @@
 import pool from '../config/db.js';
 import { loadCanonicalsForProducts } from '../services/productCanonical.js';
+import { localizedProductNameSql, type Locale } from '../middleware/locale.js';
 
 export type MatchMode = 'sku' | 'base';
 
@@ -24,15 +25,14 @@ export const getBasketItemById = async (id: number) => {
     return rows[0] || null;
 };
 
-export const getBasketItemsByBasketId = async (basketId: number, userId?: string | null) => {
+export const getBasketItemsByBasketId = async (basketId: number, userId?: string | null, locale: Locale = 'lt') => {
+    const loc = localizedProductNameSql(locale);
     const [rows]: any = await pool.query(
         `SELECT bi.id, bi.basketId, bi.productId,
                 bi.quantity, bi.matchMode,
-                p.name AS productName,
+                ${loc.nameSql} AS productName,
                 p.globalScore,
-                (SELECT JSON_ARRAYAGG(spi.imageUrl)
-                 FROM StoreProduct spi
-                 WHERE spi.productId = p.id AND spi.imageUrl IS NOT NULL) AS imageUrls,
+                ${loc.imageUrlsSql} AS imageUrls,
                 (SELECT COALESCE(MAX(sp.isWeighable), 0)
                  FROM StoreProduct sp
                  WHERE sp.productId = p.id) AS isWeighable

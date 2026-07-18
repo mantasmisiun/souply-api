@@ -88,7 +88,7 @@ export const fetchTemplate = async (req: Request, res: Response, next: NextFunct
         // preview goes through GET /t/:slug instead.
         const template = await loadOwnedTemplate(req, res);
         if (!template) return;
-        const items = await getTemplateItems(Number(req.params.id));
+        const items = await getTemplateItems(Number(req.params.id), req.locale);
         res.json({ ...template, items });
     } catch (e) { next(e); }
 };
@@ -363,7 +363,7 @@ export const buildDefault = async (req: Request, res: Response, next: NextFuncti
             return;
         }
         const template = await getTemplateById(result.templateId);
-        const items = await getTemplateItems(result.templateId);
+        const items = await getTemplateItems(result.templateId, req.locale);
         res.status(201).json({ ...template, items });
     } catch (e) { next(e); }
 };
@@ -420,7 +420,7 @@ export const fetchTemplateItems = async (req: Request, res: Response, next: Next
     try {
         const template = await loadOwnedTemplate(req, res);
         if (!template) return;
-        const items = await getTemplateItems(Number(req.params.id));
+        const items = await getTemplateItems(Number(req.params.id), req.locale);
         res.json(items);
     } catch (e) { next(e); }
 };

@@ -1,6 +1,7 @@
 import pool from '../config/db.js';
 import type { Connection } from 'mysql2/promise';
 import { clampSavings } from '../util/savings.js';
+import { localizedProductNameSql, type Locale } from '../middleware/locale.js';
 
 export interface BasketTemplateRow {
     id: number;
@@ -275,7 +276,8 @@ export const addCollectiveSavings = async (id: number, eur: number, conn?: Conne
 
 // ── Items ──────────────────────────────────────────────────────────────────
 
-export const getTemplateItems = async (templateId: number) => {
+export const getTemplateItems = async (templateId: number, locale: Locale = 'lt') => {
+    const loc = localizedProductNameSql(locale);
     // `isWeighable` is derived from the matched StoreProduct rows — if
     // ANY chain sells this Product by weight, treat it as weighable on
     // the client. Mirrors how `getBasketItemsByBasketId` exposes the
@@ -283,17 +285,14 @@ export const getTemplateItems = async (templateId: number) => {
     // unit, decimal keyboard, 0.1 stepper).
     const [rows]: any = await pool.query(
         `SELECT bti.*,
-                p.name AS productName,
-                (SELECT JSON_ARRAYAGG(spi.imageUrl)
-                   FROM StoreProduct spi
-                  WHERE spi.productId = bti.productId
-                    AND spi.imageUrl IS NOT NULL) AS imageUrls,
+                ${loc.nameSql} AS productName,
+                ${loc.imageUrlsSql} AS imageUrls,
                 (SELECT COALESCE(MAX(sp.isWeighable), 0)
                    FROM StoreProduct sp
                   WHERE sp.productId = bti.productId) AS isWeighable,
                 -- Drift: the live Product no longer matches what the creator
-                -- saw at save time (admin re-merge/split, rename). Lets the
-                -- client show the frozen snapshot + a "changed" hint.
+                -- saw at save time (admin re-merge/split, rename). Compares the
+                -- CANONICAL (LT) name — snapshots are LT, locale is display-only.
                 (bti.snapName IS NOT NULL AND bti.snapName <> p.name) AS hasDrifted
            FROM BasketTemplateItem bti
            JOIN Product p ON p.id = bti.productId

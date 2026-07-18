@@ -97,7 +97,15 @@ export const createStoreProduct = async (
     return result.insertId;
 };
 
-export const getStoreProductsByProductId = async (productId: number, userId?: string) => {
+export const getStoreProductsByProductId = async (productId: number, userId?: string, locale: Locale = 'lt') => {
+    // EN overrides each SP's display name with its own English translation
+    // (image stays the SP's own imageUrl). LT is untouched.
+    const enJoin = locale === 'en'
+        ? "LEFT JOIN StoreProductTranslation spt ON spt.storeProductId = StoreProduct.id AND spt.lang = 'en'"
+        : '';
+    const nameCol = locale === 'en'
+        ? ', COALESCE(spt.text, StoreProduct.storeProductName) AS storeProductName'
+        : '';
     // With a userId, expand to the user's personal equivalence component so a
     // product they swiped 'identical'/'similar' shows ALL its equivalent SPs —
     // including ones still parked in the hidden Nepriskirta bucket (the 688
@@ -107,9 +115,10 @@ export const getStoreProductsByProductId = async (productId: number, userId?: st
         ? await getPersonalComponentForProduct(userId, productId)
         : [productId];
     const [rows]: any = await pool.query(
-        `SELECT StoreProduct.*, StoreChain.name AS chainName, StoreChain.logoUrl
+        `SELECT StoreProduct.*, StoreChain.name AS chainName, StoreChain.logoUrl${nameCol}
          FROM StoreProduct
          JOIN StoreChain ON StoreProduct.chainId = StoreChain.id
+         ${enJoin}
          WHERE StoreProduct.productId IN (?)
            AND (StoreProduct.provisional = 0 OR StoreProduct.provisionalOwnerUserId = ?)`,
         [productIds, userId ?? '']
@@ -124,9 +133,15 @@ export const getStoreProductsByProductId = async (productId: number, userId?: st
  * variant side-by-side with its own chart, giving the user "all yogurts of
  * this base" at a glance.
  */
-export const getStoreProductsForCluster = async (productId: number, userId?: string) => {
+export const getStoreProductsForCluster = async (productId: number, userId?: string, locale: Locale = 'lt') => {
     // Follow mergedIntoId chain so a globally merged loser still shows its winner's cluster.
     const effectiveProductId = await resolveEffectiveProductId(productId);
+    const enJoin = locale === 'en'
+        ? "LEFT JOIN StoreProductTranslation spt ON spt.storeProductId = sp.id AND spt.lang = 'en'"
+        : '';
+    const nameCol = locale === 'en'
+        ? ', COALESCE(spt.text, sp.storeProductName) AS storeProductName'
+        : '';
 
     const [headRows]: any = await pool.query(
         `SELECT COALESCE(baseProductId, id) AS headId
@@ -145,10 +160,11 @@ export const getStoreProductsForCluster = async (productId: number, userId?: str
     const personalIds = userId ? await getPersonalComponentForProduct(userId, productId) : [];
 
     const [rows]: any = await pool.query(
-        `SELECT sp.*, sc.name AS chainName, sc.logoUrl
+        `SELECT sp.*, sc.name AS chainName, sc.logoUrl${nameCol}
            FROM StoreProduct sp
            JOIN StoreChain sc ON sc.id = sp.chainId
            JOIN Product p ON p.id = sp.productId
+           ${enJoin}
           WHERE ((p.id = ? OR p.baseProductId = ?) AND p.mergedIntoId IS NULL)
              OR p.id IN (?)`,
         [headId, headId, personalIds.length ? personalIds : [0]]

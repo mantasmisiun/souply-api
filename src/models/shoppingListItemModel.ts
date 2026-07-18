@@ -1,5 +1,6 @@
 import pool from '../config/db.js';
 import type { Connection } from 'mysql2/promise';
+import { localizedProductNameSql, type Locale } from '../middleware/locale.js';
 
 export const createListItem = async (
     listId: number,
@@ -52,7 +53,14 @@ export const createListItemsBatch = async (
     return res.affectedRows as number;
 };
 
-export const getListItemsByShoppingListId = async (listId: number) => {
+export const getListItemsByShoppingListId = async (listId: number, locale: Locale = 'lt') => {
+    // EN resolves the product's shortest English name (donor-first images too),
+    // keyed on the row's effective product; LT keeps the SP/product/custom
+    // COALESCE verbatim.
+    const loc = localizedProductNameSql(locale, {
+        idExpr: 'COALESCE(sp.productId, sli.productId, p.id)',
+        nameExpr: 'COALESCE(sp.storeProductName, p.name, sli.customName)',
+    });
     // Ordering:
     //   1. unchecked first (isChecked ASC)
     //   2. alphabetically by resolved name within each bucket — stable
@@ -63,11 +71,8 @@ export const getListItemsByShoppingListId = async (listId: number) => {
     // frontend can ignore these fields today.
     const [rows]: any = await pool.query(
         `SELECT sli.*,
-                COALESCE(sp.storeProductName, p.name, sli.customName) AS productName,
-                (SELECT JSON_ARRAYAGG(spi.imageUrl)
-                 FROM StoreProduct spi
-                 WHERE spi.productId = COALESCE(sp.productId, sli.productId, p.id)
-                   AND spi.imageUrl IS NOT NULL) AS imageUrls,
+                ${loc.nameSql} AS productName,
+                ${loc.imageUrlsSql} AS imageUrls,
                 sp.unit,
                 sp.amount,
                 -- Weighable is a property of the PRODUCT, not the list row. The
