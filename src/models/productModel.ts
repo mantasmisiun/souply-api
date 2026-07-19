@@ -277,7 +277,10 @@ const browseSelect = (locale: Locale): string => {
          WHERE sc2.id IN (SELECT sp2.chainId FROM StoreProduct sp2 WHERE sp2.productId = p.id)) AS chainLogos,
         CAST(MIN(${AMOUNT_NORMALIZED_EXPR}) AS UNSIGNED) as minAmount,
         CAST(MAX(${AMOUNT_NORMALIZED_EXPR}) AS UNSIGNED) as maxAmount,
-        'g' as unit,
+        -- Size-line dimension: majority-volume products label ml/l, else g/kg.
+        CASE WHEN SUM(CASE WHEN sp.unit IN ('l','ml') THEN 1 ELSE 0 END) >
+                    SUM(CASE WHEN sp.unit IN ('kg','g') THEN 1 ELSE 0 END)
+               THEN 'ml' ELSE 'g' END as unit,
         MAX(sp.isWeighable) as hasWeighable
      FROM Product p
      LEFT JOIN StoreProduct sp ON sp.productId = p.id
@@ -618,7 +621,9 @@ export const refreshDiscountedSummary = async (): Promise<void> => {
             chains.chainLogos,
             CAST(MIN(${DISCOUNT_AMOUNT_EXPR}) AS UNSIGNED) AS minAmount,
             CAST(MAX(${DISCOUNT_AMOUNT_EXPR}) AS UNSIGNED) AS maxAmount,
-            'g' AS unit,
+            CASE WHEN SUM(CASE WHEN sp.unit IN ('l','ml') THEN 1 ELSE 0 END) >
+                    SUM(CASE WHEN sp.unit IN ('kg','g') THEN 1 ELSE 0 END)
+               THEN 'ml' ELSE 'g' END AS unit,
             MAX(sp.isWeighable) AS hasWeighable,
             MAX(ROUND((1 - d.promoPrice / d.price) * 100)) AS bestDiscountPct
          FROM Product p
