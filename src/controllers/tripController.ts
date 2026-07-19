@@ -106,3 +106,64 @@ export const fetchMonthlyPlanningScore = async (req: Request, res: Response, nex
         res.json(await monthlyPlanningScores(req.authUserId!));
     } catch (error) { next(error); }
 };
+
+
+/**
+ * Receipts attached to a trip, with their parsed items — the Receipts stage
+ * screen's data (TRIP_MAP_SURFACE_PLAN.md rework: one screen per stage).
+ * Member-gated with the same 404-over-403 probing defense.
+ */
+export const fetchTripReceipts = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const tripId = Number(req.params.id);
+        if (!Number.isFinite(tripId)) { res.status(400).json({ error: 'bad id' }); return; }
+        if (!(await isTripMember(tripId, req.authUserId!))) { res.status(404).json({ error: 'not found' }); return; }
+        const [rows] = await pool.query(
+            `SELECT r.id, r.storeId, r.receiptDate, r.processingStatus,
+                    r.mandatorySwipesRequired, r.mandatorySwipesCompleted,
+                    s.name AS storeName, s.address AS storeAddress, c.name AS chainName, c.id AS chainId
+               FROM Receipt r
+               LEFT JOIN Store s ON s.id = r.storeId
+               LEFT JOIN StoreChain c ON c.id = s.chainId
+              WHERE r.tripId = ?
+              ORDER BY r.id ASC`,
+            [tripId]) as any;
+        const receipts = [] as any[];
+        for (const r of rows as any[]) {
+            const [items] = await pool.query(
+                `SELECT lineIdx, name, price, quantity, unit, matchedName, storeProductImageUrl
+                   FROM ReceiptItem WHERE receiptId = ? ORDER BY lineIdx ASC`,
+                [r.id]) as any;
+            receipts.push({ ...r, items });
+        }
+        res.json(receipts);
+    } catch (error) { next(error); }
+};
+
+/** How long after trip creation a member may still detach a wrong receipt. */
+const RECEIPT_DETACH_WINDOW_DAYS = 7;
+
+/**
+ * "Wrong receipt": DETACH a receipt from the trip (tripId → NULL — the
+ * receipt itself survives in the user's history; the slot reopens and the
+ * derived stage falls back). Time-gated so week-old trips stay immutable.
+ */
+export const detachTripReceipt = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const tripId = Number(req.params.id);
+        const receiptId = Number(req.params.receiptId);
+        if (!Number.isFinite(tripId) || !Number.isFinite(receiptId)) { res.status(400).json({ error: 'bad id' }); return; }
+        if (!(await isTripMember(tripId, req.authUserId!))) { res.status(404).json({ error: 'not found' }); return; }
+        const [[trip]] = await pool.query('SELECT createdAt FROM Trip WHERE id = ?', [tripId]) as any;
+        if (!trip) { res.status(404).json({ error: 'not found' }); return; }
+        const ageMs = Date.now() - new Date(trip.createdAt).getTime();
+        if (ageMs > RECEIPT_DETACH_WINDOW_DAYS * 24 * 60 * 60 * 1000) {
+            res.status(423).json({ error: 'detach-window-closed' }); return;
+        }
+        const [result] = await pool.query(
+            'UPDATE Receipt SET tripId = NULL, shoppingListId = NULL WHERE id = ? AND tripId = ?',
+            [receiptId, tripId]) as any;
+        if (!result.affectedRows) { res.status(404).json({ error: 'not found' }); return; }
+        res.json({ ok: true });
+    } catch (error) { next(error); }
+};
