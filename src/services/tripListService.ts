@@ -1,4 +1,6 @@
 import pool from '../config/db.js';
+import { itemPreviewSql } from '../models/basketModel.js';
+import type { Locale } from '../middleware/locale.js';
 import { deriveTripStage, type TripSlotFacts, type TripStage } from './tripStageService.js';
 
 /**
@@ -37,12 +39,16 @@ export interface TripSummary {
     /** Best-known shopping date (receipt date > list creation > trip creation)
      *  — the calendar-dot anchor per the spec. */
     anchorDate: string;
-    basket: { id: number; status: string; itemCount: number } | null;
+    basket: {
+        id: number; status: string; itemCount: number;
+        /** Newest-first item-name preview (max 5) — card subtitle rows. */
+        itemPreview: string[];
+    } | null;
     slots: TripSlotSummary[];
     receiptCount: number;
 }
 
-export const listTripsForUser = async (userId: string, limit = 100): Promise<TripSummary[]> => {
+export const listTripsForUser = async (userId: string, locale: Locale = 'lt', limit = 100): Promise<TripSummary[]> => {
     const [trips]: any = await pool.query(
         `SELECT t.* FROM Trip t
           JOIN TripMember tm ON tm.tripId = t.id
@@ -60,7 +66,8 @@ export const listTripsForUser = async (userId: string, limit = 100): Promise<Tri
 
     const [baskets]: any = await pool.query(
         `SELECT b.tripId, b.id, b.status, b.hasBeenCalculated,
-                (SELECT COUNT(*) FROM BasketItem bi WHERE bi.basketId = b.id) AS itemCount
+                (SELECT COUNT(*) FROM BasketItem bi WHERE bi.basketId = b.id) AS itemCount,
+                ${itemPreviewSql(locale, 'b.id')} AS itemPreview
            FROM Basket b WHERE b.tripId IN (?)`,
         [ids]);
     const basketByTrip = new Map<number, any>(baskets.map((b: any) => [b.tripId, b]));
@@ -136,7 +143,12 @@ export const listTripsForUser = async (userId: string, limit = 100): Promise<Tri
             stage,
             memberCount: memberCountByTrip.get(t.id) ?? 1,
             anchorDate,
-            basket: basket ? { id: basket.id, status: basket.status, itemCount: Number(basket.itemCount) || 0 } : null,
+            basket: basket ? {
+                id: basket.id, status: basket.status, itemCount: Number(basket.itemCount) || 0,
+                itemPreview: typeof basket.itemPreview === 'string' && basket.itemPreview.length > 0
+                    ? basket.itemPreview.split('~|~')
+                    : [],
+            } : null,
             slots,
             receiptCount: Number(receiptAgg?.n) || 0,
         };

@@ -7,7 +7,7 @@ import { computePlanningScore, monthlyPlanningScores } from '../services/plannin
 
 export const listTrips = async (req: Request, res: Response, next: NextFunction) => {
     try {
-        res.json(await listTripsForUser(req.authUserId!));
+        res.json(await listTripsForUser(req.authUserId!, (req as any).locale ?? 'lt'));
     } catch (error) { next(error); }
 };
 
