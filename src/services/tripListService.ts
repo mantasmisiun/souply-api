@@ -41,6 +41,8 @@ export interface TripSummary {
     anchorDate: string;
     basket: {
         id: number; status: string; itemCount: number;
+        /** User-given basket name (null = untitled, cards show the date). */
+        name: string | null;
         /** Newest-first item-name preview (max 5) — card subtitle rows. */
         itemPreview: string[];
     } | null;
@@ -65,7 +67,7 @@ export const listTripsForUser = async (userId: string, locale: Locale = 'lt', li
     const memberCountByTrip = new Map<number, number>(members.map((m: any) => [m.tripId, Number(m.n)]));
 
     const [baskets]: any = await pool.query(
-        `SELECT b.tripId, b.id, b.status, b.hasBeenCalculated,
+        `SELECT b.tripId, b.id, b.status, b.name, b.hasBeenCalculated,
                 (SELECT COUNT(*) FROM BasketItem bi WHERE bi.basketId = b.id) AS itemCount,
                 ${itemPreviewSql(locale, 'b.id')} AS itemPreview
            FROM Basket b WHERE b.tripId IN (?)`,
@@ -145,6 +147,7 @@ export const listTripsForUser = async (userId: string, locale: Locale = 'lt', li
             anchorDate,
             basket: basket ? {
                 id: basket.id, status: basket.status, itemCount: Number(basket.itemCount) || 0,
+                name: basket.name ?? null,
                 itemPreview: typeof basket.itemPreview === 'string' && basket.itemPreview.length > 0
                     ? basket.itemPreview.split('~|~')
                     : [],
