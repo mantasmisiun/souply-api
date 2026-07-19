@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
+import pool from '../config/db.js';
 import { createProduct, searchProduct, getProductById, getProductsByCategory, getProductsByCategoryWithAmounts, getAllProductsByL2WithAmounts, getDiscountedProducts, getDiscountsSummaryUpdatedAt } from '../models/productModel.js';
 
 export const addProduct = async (req: Request, res: Response, next: NextFunction) => {
@@ -30,6 +31,24 @@ export const searchProducts = async (req: Request, res: Response, next: NextFunc
     } catch (error) {
         next(error);
     }
+};
+
+/**
+ * Distinct package sizes across a Product's live SPs — the amount picker's
+ * quick-select pills. Weighable (bulk) SPs are excluded: they carry no real
+ * pack size, the picker's custom input covers them.
+ */
+export const fetchProductPackSizes = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const id = Number(req.params.id);
+        if (!Number.isFinite(id)) { res.status(400).json({ error: 'bad id' }); return; }
+        const [rows] = await pool.query(
+            `SELECT DISTINCT amount, unit FROM StoreProduct
+              WHERE productId = ? AND provisional = 0 AND isWeighable = 0
+                AND amount IS NOT NULL AND amount > 0`,
+            [id]) as any;
+        res.json((rows as any[]).map(r => ({ amount: Number(r.amount), unit: String(r.unit ?? '') })));
+    } catch (error) { next(error); }
 };
 
 export const fetchProductById = async (req: Request, res: Response, next: NextFunction) => {

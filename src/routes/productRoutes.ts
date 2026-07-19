@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { addProduct, searchProducts, fetchProductById, fetchProductsByCategory, fetchProductsByCategoryWithAmounts, fetchAllProductsByL2WithAmounts, fetchDiscountedProducts } from '../controllers/productController.js';
+import { addProduct, searchProducts, fetchProductById, fetchProductsByCategory, fetchProductsByCategoryWithAmounts, fetchAllProductsByL2WithAmounts, fetchDiscountedProducts, fetchProductPackSizes } from '../controllers/productController.js';
 
 const router = Router();
 /**
@@ -81,6 +81,7 @@ router.get('/products/discounted', fetchDiscountedProducts);
  *         description: A single product
  */
 // GET /api/products/:id - Get a single product by ID
+router.get('/products/:id/pack-sizes', fetchProductPackSizes);
 router.get('/products/:id', fetchProductById);
 
 /**
