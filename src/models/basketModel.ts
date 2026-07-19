@@ -254,7 +254,24 @@ export const updateBasketName = async (id: number, name: string) => {
 };
 
 export const deleteBasket = async (id: number) => {
+    // A forming basket owns a bare Trip (no lists, no receipts). Deleting the
+    // basket must also drop that trip so its Shopping card disappears instead
+    // of lingering as an empty forming trip. Only bare trips are removed —
+    // once a trip has lists/receipts it's history and stays.
+    const [[row]]: any = await pool.query('SELECT tripId FROM Basket WHERE id = ?', [id]);
+    const tripId = row?.tripId ?? null;
     await pool.query('DELETE FROM Basket WHERE id = ?', [id]);
+    if (tripId != null) {
+        const [[counts]]: any = await pool.query(
+            `SELECT
+                (SELECT COUNT(*) FROM ShoppingList WHERE tripId = ?) AS lists,
+                (SELECT COUNT(*) FROM Receipt WHERE tripId = ?) AS receipts`,
+            [tripId, tripId]);
+        if (Number(counts?.lists) === 0 && Number(counts?.receipts) === 0) {
+            await pool.query('DELETE FROM TripMember WHERE tripId = ?', [tripId]);
+            await pool.query('DELETE FROM Trip WHERE id = ?', [tripId]);
+        }
+    }
 };
 
 //For basket price comparison, to get productIds and their details for items in the basket
