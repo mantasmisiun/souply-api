@@ -14,8 +14,26 @@ jest.unstable_mockModule('../src/models/storeModel.js', () => ({
 }));
 
 const mockGetBasketProductIds = jest.fn<any>();
+const mockGetBasketOwnerId = jest.fn<any>().mockResolvedValue(null); // no owner → personal tier skipped
 jest.unstable_mockModule('../src/models/basketModel.js', () => ({
     getBasketProductIds: mockGetBasketProductIds,
+    getBasketOwnerId: mockGetBasketOwnerId,
+}));
+
+// Linked-set (personal + merge) expansion — default to EMPTY so the existing
+// tier tests keep their deterministic pool.query sequence. Individual tests
+// override it to exercise the personal/merge tiers.
+const mockFetchLinkedSets = jest.fn<any>().mockResolvedValue({ personal: new Map(), merge: new Map() });
+jest.unstable_mockModule('../src/models/linkedProductModel.js', () => ({
+    fetchLinkedSets: mockFetchLinkedSets,
+}));
+
+// Tier-3 now scores the chain's cached candidates (with learned aliases) via the
+// advanced matcher instead of a LIKE query. Mock the candidate source so the
+// pool.query sequence stays deterministic (default: no candidates → no substitute).
+const mockGetCachedChainCandidates = jest.fn<any>();
+jest.unstable_mockModule('../src/models/storeProductModel.js', () => ({
+    getCachedChainCandidates: mockGetCachedChainCandidates,
 }));
 
 let calculateBasketForStores: any;
@@ -25,7 +43,12 @@ beforeAll(async () => {
     calculateBasketForStores = mod.calculateBasketForStores;
 });
 
-beforeEach(() => jest.resetAllMocks());
+beforeEach(() => {
+    jest.resetAllMocks();
+    // resetAllMocks() wipes module-level defaults — re-establish the inert ones.
+    mockFetchLinkedSets.mockResolvedValue({ personal: new Map(), merge: new Map() });
+    mockGetBasketOwnerId.mockResolvedValue(null);
+});
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -128,7 +151,10 @@ function setupTiers(
     if (spRows.length > 0) {
         mockPoolQuery.mockResolvedValueOnce([priceRows]);
     }
-    mockPoolQuery.mockResolvedValueOnce([tier3Rows]);
+    // Tier-3 no longer issues a candidate pool.query — it reads the mocked
+    // getCachedChainCandidates (empty by default → no substitute, no price query).
+    void tier3Rows;
+    mockGetCachedChainCandidates.mockResolvedValue([]);
     // tier-4 prices query fires once per Product that has any SP metadata.
     if (allSps.length > 0) {
         mockPoolQuery.mockResolvedValueOnce([tier4PriceRows]);
@@ -220,6 +246,106 @@ describe('calculateBasketForStores — missing item', () => {
         expect(store.items[0].isMissing).toBe(true);
         expect(store.missingItemNames).toContain('Pienas');
         expect(store.total).toBe(0);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Tier-3 substitute (advanced matcher)
+// ---------------------------------------------------------------------------
+
+describe('calculateBasketForStores — tier-3 substitute', () => {
+    it('finds and prices a name-similar substitute via the advanced typed matcher', async () => {
+        mockGetClosestStores.mockResolvedValue([makeStore(1)]);
+        mockGetBasketProductIds.mockResolvedValue([makeBasketItem()]); // "Pienas", product 100
+        // fetchAllSpMetadata: product 100 exists (canonical/tier-4 machinery runs)…
+        mockPoolQuery.mockResolvedValueOnce([[{ id: 10, productId: 100, amount: '1', unit: 'l', isWeighable: 0 }]]);
+        // …but tier-1/2 miss at the target chain → falls to tier-3.
+        mockPoolQuery.mockResolvedValueOnce([[]]);
+        // Tier-3 candidates: a branded, name-similar SP of a DIFFERENT product, same
+        // form (packaged). The matcher must match despite the extra "Rokiškio" word.
+        mockGetCachedChainCandidates.mockResolvedValue([{
+            id: 55, productId: 999, categoryId: 5, categoryName: null, categoryL2Name: null,
+            storeProductName: 'Pienas Rokiškio 2,5%', brandName: null,
+            amount: 1, unit: 'l', isWeighable: false, aliases: [],
+        }]);
+        // Tier-3 price for the winning SP.
+        mockPoolQuery.mockResolvedValueOnce([[{ storeProductId: 55, storeId: 1, price: '1.20', promoPrice: null, isFallback: 0 }]]);
+        // Tier-4 cross-chain prices (product 100) — empty, so the substitute wins.
+        mockPoolQuery.mockResolvedValueOnce([[]]);
+
+        const [store] = await calculateBasketForStores(1);
+
+        expect(store.items[0].isSubstituted).toBe(true);
+        expect(store.items[0].isMissing).toBe(false);
+        expect(store.total).toBeGreaterThan(0);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Personal & merge tiers (evidence ladder) — "same product, different signal"
+// ---------------------------------------------------------------------------
+
+describe('calculateBasketForStores — personal & merge tiers', () => {
+    it('PERSONAL: resolves via a product the viewer voted "same" when the exact SKU is absent', async () => {
+        mockGetClosestStores.mockResolvedValue([makeStore(1)]);
+        mockGetBasketProductIds.mockResolvedValue([makeBasketItem({ productId: 100, quantity: '1' })]);
+        mockGetBasketOwnerId.mockResolvedValue('user-1');
+        // Viewer personally linked product 100 ≡ 200; no global merge.
+        mockFetchLinkedSets.mockResolvedValue({ personal: new Map([[100, new Set([200])]]), merge: new Map() });
+
+        // Call 1: fetchAllSpMetadata — basket product 100 AND its linked product 200
+        // (both fetched so the canonical unit family spans the merge group).
+        mockPoolQuery.mockResolvedValueOnce([[
+            { id: 10, productId: 100, amount: '1', unit: 'vnt', isWeighable: 0 },
+            { id: 20, productId: 200, amount: '1', unit: 'vnt', isWeighable: 0 },
+        ]]);
+        // Call 2: tier-1/2 main SP query — EMPTY (no exact/cluster SKU at the chain)
+        mockPoolQuery.mockResolvedValueOnce([[]]);
+        // Call 3: linked SP query — the personally-linked product 200's SP
+        mockPoolQuery.mockResolvedValueOnce([[makeSpDbRow({ id: 20, productId: 200, storeProductName: 'Pienas (kita SKU)' })]]);
+        // Call 4: linked price — €2 at store 1
+        mockPoolQuery.mockResolvedValueOnce([[makePriceDbRow(1, '2.00', { storeProductId: 20 })]]);
+        // Call 5: tier-4 price — empty
+        mockPoolQuery.mockResolvedValueOnce([[]]);
+
+        const [store] = await calculateBasketForStores(1);
+
+        expect(store.items[0].isMissing).toBe(false);
+        expect(store.items[0].isSubstituted).toBe(false); // personal = the product, not a substitute
+        expect(store.items[0].isCrossChainAverage).toBe(false);
+        expect(store.items[0].effectivePrice).toBeCloseTo(2.00);
+        expect(store.total).toBe(2.00); // 1 × 2.00
+    });
+
+    it('MERGE: prices the cheapest of the exact SKU and a hard-merged sibling', async () => {
+        mockGetClosestStores.mockResolvedValue([makeStore(1)]);
+        mockGetBasketProductIds.mockResolvedValue([makeBasketItem({ productId: 100, quantity: '1' })]);
+        mockGetBasketOwnerId.mockResolvedValue('user-1');
+        // Product 100 hard-merged with 200 (community-promoted); no personal link.
+        mockFetchLinkedSets.mockResolvedValue({ personal: new Map(), merge: new Map([[100, new Set([200])]]) });
+
+        // Call 1: fetchAllSpMetadata — basket product 100 AND its linked product 200.
+        mockPoolQuery.mockResolvedValueOnce([[
+            { id: 10, productId: 100, amount: '1', unit: 'vnt', isWeighable: 0 },
+            { id: 20, productId: 200, amount: '1', unit: 'vnt', isWeighable: 0 },
+        ]]);
+        // Call 2: tier-1/2 main SP — the exact SKU (product 100) IS present
+        mockPoolQuery.mockResolvedValueOnce([[makeSpDbRow({ id: 10, productId: 100 })]]);
+        // Call 3: main price — exact SKU = €5 (pricey)
+        mockPoolQuery.mockResolvedValueOnce([[makePriceDbRow(1, '5.00', { storeProductId: 10 })]]);
+        // Call 4: linked SP — the merged sibling product 200
+        mockPoolQuery.mockResolvedValueOnce([[makeSpDbRow({ id: 20, productId: 200 })]]);
+        // Call 5: linked price — merged sibling = €2 (cheaper → wins)
+        mockPoolQuery.mockResolvedValueOnce([[makePriceDbRow(1, '2.00', { storeProductId: 20 })]]);
+        // Call 6: tier-4 price — empty
+        mockPoolQuery.mockResolvedValueOnce([[]]);
+
+        const [store] = await calculateBasketForStores(1);
+
+        expect(store.items[0].isMissing).toBe(false);
+        expect(store.items[0].isSubstituted).toBe(false);
+        expect(store.items[0].effectivePrice).toBeCloseTo(2.00);
+        expect(store.total).toBe(2.00); // 1 × 2.00, sibling undercuts the exact SKU
     });
 });
 

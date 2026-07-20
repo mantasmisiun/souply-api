@@ -237,6 +237,9 @@ export const calculateBasket = async (req: Request, res: Response, next: NextFun
             storeIds: Array.isArray(rawStoreIds)
                 ? rawStoreIds.map(Number).filter((n: number) => n > 0 && Number.isFinite(n))
                 : undefined,
+            // Viewer → enables the PERSONAL merge tier. Falls back to the basket
+            // owner inside the service when absent (anon requests).
+            userId: req.authUserId,
         };
 
         const { calculateBasketForStores } = await import('../services/basketCalculationService.js');
@@ -313,7 +316,7 @@ export const getBasketStorePrices = async (req: Request, res: Response, next: Ne
         let computed: any[] = [];
         if (toCompute.length) {
             const { calculateBasketForStores } = await import('../services/basketCalculationService.js');
-            computed = await calculateBasketForStores(id, { storeIds: toCompute, lat, lng }) as any[];
+            computed = await calculateBasketForStores(id, { storeIds: toCompute, lat, lng, userId: req.authUserId }) as any[];
             for (const r of computed) {
                 const sid = Number(r?.storeId);
                 if (sid > 0) STORE_PRICE_CACHE.set(keyOf(sid), { ts: now, result: r });

@@ -1,5 +1,5 @@
 import { getClosestStores, getStoresByIdsWithDistance } from '../models/storeModel.js';
-import { getBasketProductIds } from '../models/basketModel.js';
+import { getBasketProductIds, getBasketOwnerId } from '../models/basketModel.js';
 import pool from '../config/db.js';
 import { MatchThresholds } from '../config/matchThresholds.js';
 import { toCanonicalAmount, type CanonicalMeta } from './canonicalUnit.js';
@@ -8,6 +8,10 @@ import {
     computeCanonicalByProduct,
     type SpMetaRow,
 } from './productCanonical.js';
+import { findBestProductMatches, type MatchCandidate } from '../utils/productMatcher.js';
+import { getCachedChainCandidates } from '../models/storeProductModel.js';
+import { stemQuery } from '../utils/searchStem.js';
+import { fetchLinkedSets } from '../models/linkedProductModel.js';
 
 const VILNIUS_LAT = 54.6872;
 const VILNIUS_LNG = 25.2797;
@@ -16,6 +20,11 @@ const NEPRISKIRTA_CATEGORY_ID = MatchThresholds.nepriskirtaCategoryId;
 // fallback caches when only specific stores are priced (e.g. a map-tap via
 // /store-prices). Mirrors getClosestStores(…, 10) used by the full list calc.
 const APPROX_POOL_SIZE = 12;
+// Confidence floor for an auto-applied Tier-3 substitute (the advanced typed
+// matcher's 0..1 scale — NOT the old Levenshtein ratio). Conservative: a
+// substitute enters a price total unreviewed, so it must be a solid name match.
+// Tunable.
+const TIER3_MIN_CONFIDENCE = 0.65;
 
 type MatchMode = 'sku' | 'base';
 
@@ -72,6 +81,10 @@ export interface CalculateOptions {
      *  been migrated to pass location yet. */
     lat?: number;
     lng?: number;
+    /** Owner/viewer of the basket (User.id — a UUID string). Enables the PERSONAL
+     *  merge tier (Tier-2a): products this user voted 'same' price directly, ahead
+     *  of global merges/clusters. Absent → personal tier skipped (global only). */
+    userId?: string;
     /** When provided, calculate only for these specific stores (candidate pool
      *  from client-side location filtering). Falls back to 10-closest when
      *  absent, preserving the existing single-store flow. */
@@ -103,6 +116,14 @@ interface Tier12Cache {
      *  base-mode lookups: cluster members whose Product.baseProductId
      *  equals the basket item's productId. */
     cluster: Map<number, Map<number, SpRow[]>>;
+    /** Map<storeId, Map<basketProductId, SpRow[]>> — SPs of products the
+     *  VIEWER personally voted 'same' as the basket item. Strong evidence
+     *  (the user's own merge). Keyed by the basket item's productId. */
+    personal: Map<number, Map<number, SpRow[]>>;
+    /** Map<storeId, Map<basketProductId, SpRow[]>> — SPs of products
+     *  hard-merged into the same effective Product (Product.mergedIntoId,
+     *  community Wilson-promoted). Strong evidence. Keyed by basket productId. */
+    merge: Map<number, Map<number, SpRow[]>>;
 }
 
 function addToNestedMap<K1, K2, V>(
@@ -159,15 +180,30 @@ async function fetchLatestPrices(
     return result;
 }
 
+const emptyLinked = () => ({ personal: new Map<number, Set<number>>(), merge: new Map<number, Set<number>>() });
+
 const batchFetchTier12Prices = async (
     storeIds: number[],
     chainIds: number[],
     productIds: number[],
+    linked: { personal: Map<number, Set<number>>; merge: Map<number, Set<number>> } = emptyLinked(),
 ): Promise<Tier12Cache> => {
-    const cache: Tier12Cache = { sku: new Map(), cluster: new Map() };
+    const cache: Tier12Cache = { sku: new Map(), cluster: new Map(), personal: new Map(), merge: new Map() };
     if (!storeIds.length || !productIds.length) return cache;
 
-    // Step 1: find relevant StoreProducts (tiny result for small baskets)
+    const buildSpRow = (sp: any, spId: number, spProductId: number, pd: any): SpRow => ({
+        id: spId,
+        productId: spProductId,
+        storeProductName: sp.storeProductName,
+        isWeighable: sp.isWeighable,
+        amount: sp.amount,
+        unit: sp.unit,
+        price: pd.price,
+        promoPrice: pd.promoPrice,
+        isFallback: pd.isFallback,
+    });
+
+    // Step 1: exact (sku) + cluster (baseProductId) SPs — live products only.
     const [spRows]: any = await pool.query(
         `SELECT sp.id, sp.productId, sp.storeProductName,
                 sp.isWeighable, sp.amount, sp.unit,
@@ -179,34 +215,67 @@ const batchFetchTier12Prices = async (
            AND (prod.id IN (?) OR prod.baseProductId IN (?))`,
         [chainIds, productIds, productIds],
     );
-    if (!spRows.length) return cache;
+    if (spRows.length) {
+        const spIds = (spRows as any[]).map(r => Number(r.id));
+        const priceMap = await fetchLatestPrices(spIds, storeIds);
+        for (const sp of spRows as any[]) {
+            const spId = Number(sp.id);
+            const spProductId = Number(sp.productId);
+            const baseProductId = sp.baseProductId !== null ? Number(sp.baseProductId) : null;
+            const storePrices = priceMap.get(spId);
+            if (!storePrices) continue;
+            for (const [storeId, pd] of storePrices.entries()) {
+                const spRow = buildSpRow(sp, spId, spProductId, pd);
+                addToNestedMap(cache.sku, storeId, spProductId, spRow);
+                if (baseProductId !== null && baseProductId !== spProductId) {
+                    addToNestedMap(cache.cluster, storeId, baseProductId, spRow);
+                }
+            }
+        }
+    }
 
-    // Step 2: fetch latest prices only for those SPs at those stores
-    const spIds = (spRows as any[]).map(r => Number(r.id));
-    const priceMap = await fetchLatestPrices(spIds, storeIds);
-
-    for (const sp of spRows as any[]) {
-        const spId = Number(sp.id);
-        const spProductId = Number(sp.productId);
-        const baseProductId = sp.baseProductId !== null ? Number(sp.baseProductId) : null;
-        const storePrices = priceMap.get(spId);
-        if (!storePrices) continue;
-
-        for (const [storeId, pd] of storePrices.entries()) {
-            const spRow: SpRow = {
-                id: spId,
-                productId: spProductId,
-                storeProductName: sp.storeProductName,
-                isWeighable: sp.isWeighable,
-                amount: sp.amount,
-                unit: sp.unit,
-                price: pd.price,
-                promoPrice: pd.promoPrice,
-                isFallback: pd.isFallback,
-            };
-            addToNestedMap(cache.sku, storeId, spProductId, spRow);
-            if (baseProductId !== null && baseProductId !== spProductId) {
-                addToNestedMap(cache.cluster, storeId, baseProductId, spRow);
+    // Step 2: linked-set SPs (personal + merge tiers). Invert item → linkedPid
+    // into linkedPid → owning basket items, then fetch those SPs by productId.
+    // NO mergedIntoId filter here — merge losers are exactly what we want, and
+    // the fetch is already scoped to the explicit linked ids.
+    const personalOwners = new Map<number, number[]>();
+    const mergeOwners = new Map<number, number[]>();
+    const invert = (byItem: Map<number, Set<number>>, owners: Map<number, number[]>) => {
+        for (const [basketPid, set] of byItem) {
+            for (const linkedPid of set) {
+                const arr = owners.get(linkedPid) ?? [];
+                arr.push(basketPid);
+                owners.set(linkedPid, arr);
+            }
+        }
+    };
+    invert(linked.personal, personalOwners);
+    invert(linked.merge, mergeOwners);
+    const linkedPids = [...new Set([...personalOwners.keys(), ...mergeOwners.keys()])];
+    if (linkedPids.length) {
+        const [lRows]: any = await pool.query(
+            `SELECT sp.id, sp.productId, sp.storeProductName, sp.isWeighable, sp.amount, sp.unit
+             FROM StoreProduct sp
+             WHERE sp.chainId IN (?) AND sp.productId IN (?)`,
+            [chainIds, linkedPids],
+        );
+        if (lRows.length) {
+            const lIds = (lRows as any[]).map(r => Number(r.id));
+            const lPriceMap = await fetchLatestPrices(lIds, storeIds);
+            for (const sp of lRows as any[]) {
+                const spId = Number(sp.id);
+                const spProductId = Number(sp.productId);
+                const storePrices = lPriceMap.get(spId);
+                if (!storePrices) continue;
+                for (const [storeId, pd] of storePrices.entries()) {
+                    const spRow = buildSpRow(sp, spId, spProductId, pd);
+                    for (const basketPid of personalOwners.get(spProductId) ?? []) {
+                        addToNestedMap(cache.personal, storeId, basketPid, spRow);
+                    }
+                    for (const basketPid of mergeOwners.get(spProductId) ?? []) {
+                        addToNestedMap(cache.merge, storeId, basketPid, spRow);
+                    }
+                }
             }
         }
     }
@@ -224,11 +293,20 @@ function getCheapestFromCache(
     canonical: CanonicalMeta | null,
     anchor: { amount: number; unit: string } | null = null,
 ): (SpRow & { effectivePrice: number }) | null {
+    // "Definitely the product" — the item's own SKU plus the PERSONAL (viewer
+    // voted 'same') and MERGE (hard-merged) tiers. All are the same product with
+    // strong evidence, so they're unioned and priced by cheapest. Applies in both
+    // match modes (a personal/global merge is the product regardless of sku/base).
     const direct = cache.sku.get(storeId)?.get(productId) ?? [];
+    const personal = cache.personal.get(storeId)?.get(productId) ?? [];
+    const merge = cache.merge.get(storeId)?.get(productId) ?? [];
+    // Weaker "same base" name-similarity grouping — base mode only, as before.
     const cluster = matchMode === 'base'
         ? (cache.cluster.get(storeId)?.get(productId) ?? [])
         : [];
-    return pickCheapestForQuantity([...direct, ...cluster], userQuantity, canonical, anchor);
+    return pickCheapestForQuantity(
+        [...direct, ...personal, ...merge, ...cluster], userQuantity, canonical, anchor,
+    );
 }
 
 /**
@@ -277,6 +355,10 @@ export const calculateBasketForStores = async (
 
     if (!basketItems.length) return [];
 
+    // Owner of the basket → enables the PERSONAL merge tier. Explicit opts.userId
+    // wins (virtual-item callers pass the viewer); otherwise read the basket owner.
+    const userId = opts.userId ?? (opts.items ? undefined : (await getBasketOwnerId(basketId)) ?? undefined);
+
     // Drop stores with no coordinates (distance would be null).
     const validStores = (stores as any[]).filter(s => s.distance != null);
 
@@ -284,12 +366,48 @@ export const calculateBasketForStores = async (
     const chainIds  = [...new Set(validStores.map((s: any) => Number(s.chainId)))] as number[];
     const productIds = [...new Set(basketItems.map((i: any) => Number(i.productId)))] as number[];
 
-    // Pre-fetch SP metadata for every basket Product across ALL chains. Used
-    // both to derive each Product's canonical unit/family (single source of
-    // truth for the picker UI + the calc math) and to feed tier-4
-    // cross-chain averaging without an extra per-product SP query.
-    const productSpData = await fetchAllSpMetadata(productIds);
-    const canonicalByProduct = computeCanonicalByProduct(productSpData);
+    // Personal ('same' vote) + merge (hard-merged) product links per basket item.
+    // Needed BOTH to widen each item's canonical unit family below AND to feed the
+    // Tier-2 evidence ladder in the price cache further down.
+    const linkedSets = await fetchLinkedSets(productIds, userId);
+    const linkedPids = [...new Set([
+        ...[...linkedSets.personal.values()].flatMap(s => [...s]),
+        ...[...linkedSets.merge.values()].flatMap(s => [...s]),
+    ])];
+
+    // Pre-fetch SP metadata for every basket Product — AND its linked products —
+    // across ALL chains. Used both to derive each Product's canonical unit/family
+    // (single source of truth for the picker UI + the calc math) and to feed
+    // tier-4 cross-chain averaging without an extra per-product SP query.
+    const productSpData = await fetchAllSpMetadata([...new Set([...productIds, ...linkedPids])]);
+    // Widen each basket Product's canonical family to span its linked products'
+    // SPs, so a personal/merge-linked SP counts as in-family and stays eligible
+    // for pricing (otherwise pickCheapestForQuantity drops it as an outlier).
+    // Linked keys remain separate in productSpData, so tier-4 averaging and the
+    // weighable-form vote below still see only each Product's OWN SPs.
+    const canonicalInput = linkedPids.length ? new Map(productSpData) : productSpData;
+    if (linkedPids.length) {
+        for (const pid of productIds) {
+            const extraPids = new Set<number>([
+                ...(linkedSets.personal.get(pid) ?? []),
+                ...(linkedSets.merge.get(pid) ?? []),
+            ]);
+            if (!extraPids.size) continue;
+            const extra = [...extraPids].flatMap(lp => productSpData.get(lp) ?? []);
+            if (extra.length) canonicalInput.set(pid, [...(productSpData.get(pid) ?? []), ...extra]);
+        }
+    }
+    const canonicalByProduct = computeCanonicalByProduct(canonicalInput);
+
+    // Each Product's dominant FORM (sold by weight vs fixed pack) — majority of
+    // its SPs. Feeds the Tier-3 matcher's weighable/form gate so a by-weight item
+    // never substitutes a fixed pack (or vice-versa), the worst substitute error.
+    const isWeighableByProduct = new Map<number, boolean>();
+    for (const [pid, sps] of productSpData) {
+        if (!sps.length) continue;
+        const w = sps.filter(sp => sp.isWeighable).length;
+        isWeighableByProduct.set(Number(pid), w * 2 >= sps.length);
+    }
 
     // Fallback price pool for tiers 3 & 4. These tiers (substitute + cross-chain
     // average) need a spread of nearby stores to draw prices from. We must NOT
@@ -313,14 +431,15 @@ export const calculateBasketForStores = async (
     }
 
     // Tier 1/2: single batch query — sync lookup inside the loop. Uses the
-    // TARGET stores only — this is the store's own direct price.
-    const tier12Cache = await batchFetchTier12Prices(storeIds, chainIds, productIds);
+    // TARGET stores only — this is the store's own direct price. `linkedSets`
+    // (computed above) adds the PERSONAL + MERGE "same product" tiers.
+    const tier12Cache = await batchFetchTier12Prices(storeIds, chainIds, productIds, linkedSets);
 
     // Tier 3: one query per (chainId × productId) instead of per (storeId × productId).
     // Results keyed as "chainId:productId" → best-substitute SpRow per store.
     // Priced over the fallback pool so substitutes resolve regardless of how
     // many target stores were requested.
-    const tier3Cache = await batchFetchTier3Substitutes(productIds, basketItems, poolStoreIds, poolChainIds);
+    const tier3Cache = await batchFetchTier3Substitutes(productIds, basketItems, poolStoreIds, poolChainIds, isWeighableByProduct);
 
     // Tier 4: cross-chain average per productId. Reuses the SP metadata
     // already loaded above — only the latest-prices query is per-product.
@@ -482,53 +601,64 @@ async function batchFetchTier3Substitutes(
     basketItems: any[],
     storeIds: number[],
     chainIds: number[],
+    isWeighableByProduct: Map<number, boolean>,
 ): Promise<Map<string, (SpRow & { effectivePrice: number }) | null>> {
     const result = new Map<string, (SpRow & { effectivePrice: number }) | null>();
     if (!productIds.length || !chainIds.length || !storeIds.length) return result;
 
+    // Chain candidate sets (SPs + learned canonical/rejected/similarity ALIASES),
+    // fetched once per chain and reused across every basket item. Same source the
+    // receipt matcher uses — so the basket now benefits from the vocabulary the
+    // OCR pipeline learned about how each chain prints a product.
+    const chainCandidates = new Map<number, MatchCandidate[]>();
+    await Promise.all([...new Set(chainIds)].map(async cid => {
+        chainCandidates.set(cid, await getCachedChainCandidates(cid));
+    }));
+
     await Promise.all(chainIds.map(async chainId => {
+        const candidates = chainCandidates.get(chainId) ?? [];
+        // Pre-normalise candidate names ONCE per chain (not per item) so the
+        // per-item stem prefilter below is cheap over the whole chain (~13k SPs).
+        const normed = candidates.map(c => ({
+            c,
+            hay: normalizeName(c.storeProductName),
+            aliasHay: (c.aliases ?? []).join(' '),
+        }));
+
         await Promise.all(basketItems.map(async (bi: any) => {
             const productId = Number(bi.productId);
             const productName = String(bi.name);
             const key = `${chainId}:${productId}`;
-            const normalized = normalizeName(productName);
-            if (!normalized) { result.set(key, null); return; }
-            const firstToken = normalized.split(' ')[0];
-            if (firstToken.length < 3) { result.set(key, null); return; }
 
-            // Step 1: find candidate SPs by name — no price join yet
-            const [candidateRows]: any = await pool.query(
-                `SELECT sp.id, sp.productId, sp.storeProductName, sp.isWeighable, sp.amount, sp.unit,
-                        prod.name AS productName
-                   FROM StoreProduct sp
-                   JOIN Product prod ON prod.id = sp.productId
-                  WHERE sp.chainId = ?
-                    AND prod.mergedIntoId IS NULL
-                    AND prod.categoryId <> ?
-                    AND prod.id <> ?
-                    AND (LOWER(prod.name) LIKE ? OR LOWER(sp.storeProductName) LIKE ?)
-                  LIMIT 200`,
-                [chainId, NEPRISKIRTA_CATEGORY_ID, productId,
-                    `%${firstToken}%`, `%${firstToken}%`],
-            );
-            if (!candidateRows.length) { result.set(key, null); return; }
-
-            // Score candidates — only keep the best above the threshold
-            let bestCandidate: (typeof candidateRows[number] & { score: number }) | null = null;
-            for (const sp of candidateRows as any[]) {
-                const score = levenshteinRatio(normalized, normalizeName(sp.productName));
-                if (score < MatchThresholds.substitutionMinSimilarity) continue;
-                if (!bestCandidate || score > bestCandidate.score) bestCandidate = { ...sp, score };
+            // Cheap recall prefilter: keep candidates whose name (or a learned
+            // alias) contains one of the item's SIGNIFICANT stems — shrinks the
+            // chain to a scorable set before the (heavier) advanced matcher, and
+            // the stemming means "sūrelis" reaches "sūreliai/sūrelių".
+            const stems = stemQuery(productName).filter(s => s.length >= 4);
+            if (!stems.length) { result.set(key, null); return; }
+            const pool2: MatchCandidate[] = [];
+            for (const n of normed) {
+                if (n.c.productId === productId) continue; // Tier 1/2 owns the exact product
+                if (stems.some(st => n.hay.includes(st) || n.aliasHay.includes(st))) pool2.push(n.c);
             }
-            if (!bestCandidate) { result.set(key, null); return; }
+            if (!pool2.length) { result.set(key, null); return; }
 
-            // Step 2: price the winning candidate at any nearby store
-            const candidateSpIds = [Number(bestCandidate.id)];
-            const priceMap = await fetchLatestPrices(candidateSpIds, storeIds);
-            const storePrices = priceMap.get(Number(bestCandidate.id));
+            // Advanced TYPED match: aliases + LT stemming + token/anchor/subset/
+            // abbrev lanes + the symmetric length penalty (branded-word case),
+            // replacing the old first-token-LIKE + whole-string Levenshtein. The
+            // item's form (weighable) gates out cross-form substitutes.
+            const itemWeighable = isWeighableByProduct.get(productId) ?? null;
+            const matches = findBestProductMatches(
+                productName, null, null, pool2, TIER3_MIN_CONFIDENCE, 1, itemWeighable, { typed: true });
+            const top = matches[0];
+            if (!top) { result.set(key, null); return; }
+            const topCand = pool2.find(c => c.id === top.storeProductId);
+            if (!topCand) { result.set(key, null); return; }
+
+            // Price the winner at any nearby store, cheapest.
+            const priceMap = await fetchLatestPrices([Number(topCand.id)], storeIds);
+            const storePrices = priceMap.get(Number(topCand.id));
             if (!storePrices?.size) { result.set(key, null); return; }
-
-            // Pick the cheapest price across the nearby stores
             let bestPrice: any = null;
             for (const pd of storePrices.values()) {
                 if (pd.price == null) continue;
@@ -541,7 +671,12 @@ async function batchFetchTier3Substitutes(
             if (!bestPrice) { result.set(key, null); return; }
 
             result.set(key, {
-                ...bestCandidate,
+                id: Number(topCand.id),
+                productId: Number(topCand.productId),
+                storeProductName: topCand.storeProductName,
+                isWeighable: topCand.isWeighable,
+                amount: topCand.amount,
+                unit: topCand.unit,
                 price: bestPrice.price,
                 promoPrice: bestPrice.promoPrice,
                 isFallback: bestPrice.isFallback,
