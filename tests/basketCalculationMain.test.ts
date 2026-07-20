@@ -48,6 +48,10 @@ beforeEach(() => {
     // resetAllMocks() wipes module-level defaults — re-establish the inert ones.
     mockFetchLinkedSets.mockResolvedValue({ personal: new Map(), merge: new Map() });
     mockGetBasketOwnerId.mockResolvedValue(null);
+    // Base default: any pool.query beyond a test's explicit .mockResolvedValueOnce
+    // sequence (e.g. the Tier-4 global-fallback probe when the nearby pool is
+    // empty) resolves to no rows rather than undefined.
+    mockPoolQuery.mockResolvedValue([[]]);
 });
 
 // ---------------------------------------------------------------------------
@@ -388,6 +392,39 @@ describe('calculateBasketForStores — tier-4 cross-chain average', () => {
 
         // Both stores use tier-4 cross-chain average = (2.00 + 4.00) / 2 = 3.00
         expect(results[0].total).toBe(3.00);
+    });
+
+    it('uses the promo (effective) price in the cross-chain average', async () => {
+        mockGetClosestStores.mockResolvedValue([makeStore(1)]);
+        mockGetBasketProductIds.mockResolvedValue([makeBasketItem({ quantity: '1' })]);
+
+        const tier4Sp = { id: 20, amount: '1', unit: 'vnt', isWeighable: 0 };
+        // Active promo 2.00 undercuts the 3.00 regular → the estimate uses 2.00.
+        const tier4Price = { storeProductId: 20, storeId: 1, price: '3.00', promoPrice: '2.00', isFallback: 0 };
+        setupTiers([], [], [], [tier4Sp], [tier4Price]);
+
+        const [store] = await calculateBasketForStores(1);
+
+        expect(store.items[0].isCrossChainAverage).toBe(true);
+        expect(store.total).toBe(2.00); // 1 × promo 2.00, not regular 3.00
+    });
+
+    it('GLOBAL FALLBACK: estimates from the price anywhere when the nearby pool is empty', async () => {
+        mockGetClosestStores.mockResolvedValue([makeStore(1)]);
+        mockGetBasketProductIds.mockResolvedValue([makeBasketItem()]); // qty 2, product 100
+
+        // Product 100 is stocked nowhere nearby: tier-1/2 miss, tier-3 none,
+        // tier-4 NEARBY pool empty → the global fallback probes its price anywhere.
+        const tier4Sp = { id: 20, productId: 100, amount: '1', unit: 'vnt', isWeighable: 0 };
+        setupTiers([], [], [], [tier4Sp], []); // meta, main SP [], tier-4 nearby []
+        // Next pool.query is the global-fallback probe (fetchLatestPricesAnyStore).
+        mockPoolQuery.mockResolvedValueOnce([[{ storeProductId: 20, price: '3.00', promoPrice: null }]]);
+
+        const [store] = await calculateBasketForStores(1);
+
+        expect(store.items[0].isMissing).toBe(false);
+        expect(store.items[0].isCrossChainAverage).toBe(true); // flagged approximate, not silent €0
+        expect(store.total).toBe(6.00); // 2 × 3.00 (global price)
     });
 });
 
