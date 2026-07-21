@@ -3,7 +3,7 @@ import { requireUser, optionalUser } from '../middleware/sessionAuth.js';
 import { requireTripMember } from '../middleware/resourceAuth.js';
 import {
     createOwnHousehold, getOwnHousehold, leaveOwnHousehold, removeHouseholdMemberCtl, createHouseholdInvite,
-    createTripInvite, previewJoin, claimJoin,
+    createTripInvite, previewJoin, claimJoin, listTripMembers, removeTripMember,
 } from '../controllers/joinController.js';
 
 /**
@@ -23,6 +23,8 @@ router.post('/households/mine/invites', requireUser, createHouseholdInvite);
 
 // Trip invites (any member may mint the QR)
 router.post('/trips/:id/invites', requireUser, requireTripMember('id'), createTripInvite);
+router.get('/trips/:id/members', requireUser, requireTripMember('id'), listTripMembers);
+router.delete('/trips/:id/members/:userId', requireUser, requireTripMember('id'), removeTripMember);
 
 // Join flow (token = capability)
 // Preview is ANONYMOUS-friendly (the souply.lt landing shows it before install);

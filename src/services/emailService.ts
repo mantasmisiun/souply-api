@@ -234,3 +234,35 @@ export async function sendAdminVerificationEmail(opts: {
 </html>`,
     });
 }
+
+/**
+ * Trip ("shared shopping") invite for an address with NO registered account —
+ * registered users get the in-app notification instead (joinController).
+ * Branded, bilingual-lite (LT with an EN hint), one big join button.
+ */
+export async function sendTripInviteEmail(opts: {
+    to: string;
+    joinUrl: string;
+    inviterName: string | null;
+}): Promise<void> {
+    const from = process.env.SMTP_FROM ?? 'Souply <noreply@souply.lt>';
+    const who = opts.inviterName?.trim() || 'Draugas';
+    await transporter.sendMail({
+        from,
+        to: opts.to,
+        subject: `${who} kviečia į bendrą apsipirkimą – Souply`,
+        text: `${who} pakvietė tave į bendrą pirkinių sąrašą programėlėje Souply.\n\nPrisijunk: ${opts.joinUrl}\n\n(You've been invited to a shared shopping list on Souply — open the link to join.)`,
+        html: `
+<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:520px;margin:0 auto;padding:24px;">
+  <h2 style="color:#212121;margin:0 0 8px;">🛒 ${who} kviečia apsipirkti kartu</h2>
+  <p style="color:#555;line-height:1.5;">Tave pakvietė į bendrą pirkinių sąrašą programėlėje <b>Souply</b> —
+  matysi bendrą krepšelį, pigiausias parduotuves ir kvitus vienoje vietoje.</p>
+  <p style="text-align:center;margin:28px 0;">
+    <a href="${opts.joinUrl}" style="background:#EB6784;color:#fff;text-decoration:none;
+       padding:13px 28px;border-radius:12px;font-weight:700;display:inline-block;">Prisijungti</a>
+  </p>
+  <p style="color:#999;font-size:12px;">Jei mygtukas neveikia: <a href="${opts.joinUrl}">${opts.joinUrl}</a><br>
+  You've been invited to a shared shopping list on Souply — open the link to join.</p>
+</div>`,
+    });
+}

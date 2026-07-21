@@ -93,17 +93,96 @@ export const createTripInvite = async (req: Request, res: Response, next: NextFu
                         ? await pool.query('SELECT id FROM User WHERE username = ? LIMIT 1', [handle])
                         : await pool.query('SELECT id FROM User WHERE email = ? LIMIT 1', [email]);
                     const target = rows[0]?.id;
+                    if (target && target !== req.authUserId && await isTripOwner(tripId, req.authUserId!)) {
+                        // Owner re-inviting a removed member lifts the ban.
+                        await pool.query('DELETE FROM TripMemberBan WHERE tripId = ? AND userId = ?', [tripId, target]);
+                    }
                     if (target && target !== req.authUserId) {
                         await notifyUser(target, 'trip_invite', {
                             title: 'Kvietimas į apsipirkimą',
                             body: 'Tave pakvietė į bendrą apsipirkimą.',
                             route: `/join/${token.code}`,
                         });
+                    } else if (!target && email) {
+                        // No account behind this address → send a REAL email
+                        // invite with the join link (registered users get the
+                        // in-app notification instead). Still oracle-free:
+                        // the HTTP response never differs.
+                        const [me]: any = await pool.query(
+                            'SELECT displayName, firstName, username FROM User WHERE id = ? LIMIT 1',
+                            [req.authUserId]);
+                        const inviterName = me[0]?.displayName ?? me[0]?.firstName ?? (me[0]?.username ? `@${me[0].username}` : null);
+                        const { sendTripInviteEmail } = await import('../services/emailService.js');
+                        await sendTripInviteEmail({
+                            to: email,
+                            joinUrl: `https://souply.lt/join/${token.code}`,
+                            inviterName,
+                        });
                     }
                 } catch {}
             })();
         }
         res.json({ code: token.code, addressed: !!(handle || email) });
+    } catch (error) { next(error); }
+};
+
+const isTripOwner = async (tripId: number, userId: string): Promise<boolean> => {
+    const [rows]: any = await pool.query(
+        "SELECT 1 FROM TripMember WHERE tripId = ? AND userId = ? AND role = 'owner' LIMIT 1",
+        [tripId, userId]);
+    return !!rows[0];
+};
+
+/** DELETE /trips/:id/members/:userId — OWNER-only removal. The removed user
+ *  is BANNED from rejoining via member-created invites; only an owner-minted
+ *  invite (QR/link/addressed) readmits (claim clears the ban). */
+export const removeTripMember = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const tripId = Number(req.params.id);
+        const targetId = String(req.params.userId ?? '');
+        if (!targetId) { res.status(400).json({ error: 'userId required' }); return; }
+        if (!(await isTripOwner(tripId, req.authUserId!))) {
+            res.status(403).json({ error: 'Owner only' });
+            return;
+        }
+        if (targetId === req.authUserId) { res.status(400).json({ error: 'Cannot remove yourself' }); return; }
+        const [tgt]: any = await pool.query(
+            'SELECT role FROM TripMember WHERE tripId = ? AND userId = ? LIMIT 1', [tripId, targetId]);
+        if (!tgt[0]) { res.status(404).json({ error: 'not found' }); return; }
+        if (tgt[0].role === 'owner') { res.status(400).json({ error: 'Cannot remove the owner' }); return; }
+        await pool.query('DELETE FROM TripMember WHERE tripId = ? AND userId = ?', [tripId, targetId]);
+        await pool.query(
+            'INSERT IGNORE INTO TripMemberBan (tripId, userId, bannedBy) VALUES (?, ?, ?)',
+            [tripId, targetId, req.authUserId]);
+        res.json({ removed: true });
+    } catch (error) { next(error); }
+};
+
+/** GET /trips/:id/members — the share roster: labels for avatars/initials.
+ *  Member-gated by the route; returns display label only (no emails of
+ *  OTHER members are exposed — label falls back to the email's local part
+ *  only for the caller themselves). */
+export const listTripMembers = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const tripId = Number(req.params.id);
+        const [rows]: any = await pool.query(
+            `SELECT tm.userId, tm.role,
+                    u.displayName, u.username, u.firstName,
+                    CASE WHEN tm.userId = ? THEN u.email ELSE NULL END AS ownEmail
+               FROM TripMember tm JOIN User u ON u.id = tm.userId
+              WHERE tm.tripId = ?
+              ORDER BY tm.role = 'owner' DESC, tm.joinedAt`,
+            [req.authUserId, tripId],
+        );
+        res.json({
+            members: (rows as any[]).map(r => ({
+                userId: r.userId,
+                role: r.role,
+                label: r.displayName ?? (r.username ? `@${r.username}` : null)
+                    ?? r.firstName ?? (r.ownEmail ? String(r.ownEmail).split('@')[0] : null)
+                    ?? 'Narys',
+            })),
+        });
     } catch (error) { next(error); }
 };
 
@@ -164,6 +243,18 @@ export const claimJoin = async (req: Request, res: Response, next: NextFunction)
             if (await isTripMember(trip.id, userId)) {
                 res.json({ scope: 'trip', tripId: trip.id, alreadyMember: true });
                 return;
+            }
+            // Removed-member ban: rejoining requires an OWNER-minted invite —
+            // a member's link/QR stays dead for this user. 404-shaped (the
+            // invite just "doesn't work"; no ban oracle).
+            const [ban]: any = await pool.query(
+                'SELECT 1 FROM TripMemberBan WHERE tripId = ? AND userId = ? LIMIT 1', [trip.id, userId]);
+            if (ban[0]) {
+                if (!(await isTripOwner(trip.id, token.createdByUserId))) {
+                    res.status(404).json({ error: 'not found' });
+                    return;
+                }
+                await pool.query('DELETE FROM TripMemberBan WHERE tripId = ? AND userId = ?', [trip.id, userId]);
             }
             await pool.query(
                 "INSERT IGNORE INTO TripMember (tripId, userId, role) VALUES (?, ?, 'member')",
