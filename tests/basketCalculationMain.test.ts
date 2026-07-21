@@ -354,6 +354,57 @@ describe('calculateBasketForStores — personal & merge tiers', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Saver mode — cheapest acceptable substitute over exact-product precision
+// ---------------------------------------------------------------------------
+
+describe('calculateBasketForStores — saver mode', () => {
+    // Shared fixtures: the exact product 100 is stocked at €5; a cheaper
+    // name-similar substitute (product 999) is stocked at €2.
+    function primeExactPlusCheaperSubstitute() {
+        mockGetClosestStores.mockResolvedValue([makeStore(1)]);
+        mockGetBasketProductIds.mockResolvedValue([makeBasketItem({ quantity: '1' })]); // "Pienas", product 100
+        // Call 1: fetchAllSpMetadata — product 100 exists (canonical = litres)
+        mockPoolQuery.mockResolvedValueOnce([[{ id: 10, productId: 100, amount: '1', unit: 'l', isWeighable: 0 }]]);
+        // Call 2: tier-1/2 main SP — the EXACT product IS stocked
+        mockPoolQuery.mockResolvedValueOnce([[makeSpDbRow({ id: 10, productId: 100, amount: '1', unit: 'l' })]]);
+        // Call 3: main price — exact = €5 (pricey)
+        mockPoolQuery.mockResolvedValueOnce([[makePriceDbRow(1, '5.00', { storeProductId: 10 })]]);
+        // Tier-3 candidates: a cheaper, name-similar substitute of a different product.
+        mockGetCachedChainCandidates.mockResolvedValue([{
+            id: 55, productId: 999, categoryId: 5, categoryName: null, categoryL2Name: null,
+            storeProductName: 'Pienas Rokiškio 2,5%', brandName: null,
+            amount: 1, unit: 'l', isWeighable: false, aliases: [],
+        }]);
+    }
+
+    it('SAVER ON: picks the cheaper substitute over the exact product', async () => {
+        primeExactPlusCheaperSubstitute();
+        // Call 4: tier-3 substitute price — €2 (undercuts the €5 exact)
+        mockPoolQuery.mockResolvedValueOnce([[{ storeProductId: 55, storeId: 1, price: '2.00', promoPrice: null, isFallback: 0 }]]);
+        // remaining calls (tier-4 probes) fall through to the empty base default
+
+        const [store] = await calculateBasketForStores(1, { saver: true });
+
+        expect(store.items[0].isMissing).toBe(false);
+        expect(store.items[0].isSubstituted).toBe(true); // cheaper substitute won
+        expect(store.items[0].effectivePrice).toBeCloseTo(2.00);
+        expect(store.total).toBe(2.00);
+    });
+
+    it('SAVER OFF: keeps the exact product even though a substitute is cheaper', async () => {
+        primeExactPlusCheaperSubstitute();
+        // No saver → the coverage gate skips Tier-3 entirely (exact is stocked),
+        // so the substitute is never priced; tier-4 probes hit the empty base default.
+
+        const [store] = await calculateBasketForStores(1); // no saver
+
+        expect(store.items[0].isSubstituted).toBe(false); // precision: exact wins
+        expect(store.items[0].effectivePrice).toBeCloseTo(5.00);
+        expect(store.total).toBe(5.00);
+    });
+});
+
+// ---------------------------------------------------------------------------
 // Tier-4 cross-chain average
 // ---------------------------------------------------------------------------
 

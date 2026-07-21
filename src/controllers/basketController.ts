@@ -240,6 +240,8 @@ export const calculateBasket = async (req: Request, res: Response, next: NextFun
             // Viewer → enables the PERSONAL merge tier. Falls back to the basket
             // owner inside the service when absent (anon requests).
             userId: req.authUserId,
+            // Saver mode: cheapest acceptable substitute over exact-product precision.
+            saver: req.body?.saver === true,
         };
 
         const { calculateBasketForStores } = await import('../services/basketCalculationService.js');
@@ -296,13 +298,14 @@ export const getBasketStorePrices = async (req: Request, res: Response, next: Ne
         const rawLng = Number(req.body?.lng);
         const lat = Number.isFinite(rawLat) ? rawLat : undefined;
         const lng = Number.isFinite(rawLng) ? rawLng : undefined;
+        const saver = req.body?.saver === true;
 
-        // Cache version: a basket edit (updatedAt) AND the user's location
-        // (rounded to ~100 m) both bust the cache — either can change a store's
-        // result (price / distance).
+        // Cache version: a basket edit (updatedAt), the user's location (rounded
+        // to ~100 m) AND the saver flag all bust the cache — each can change a
+        // store's result (price / distance / substitute).
         const ver = (basket as any).updatedAt ? new Date((basket as any).updatedAt).getTime() : 0;
         const locKey = `${lat != null ? lat.toFixed(3) : '_'}:${lng != null ? lng.toFixed(3) : '_'}`;
-        const keyOf = (sid: number) => `${id}:${ver}:${locKey}:${sid}`;
+        const keyOf = (sid: number) => `${id}:${ver}:${locKey}:${saver ? 's' : '_'}:${sid}`;
 
         const now = Date.now();
         const cached: any[] = [];
@@ -316,7 +319,7 @@ export const getBasketStorePrices = async (req: Request, res: Response, next: Ne
         let computed: any[] = [];
         if (toCompute.length) {
             const { calculateBasketForStores } = await import('../services/basketCalculationService.js');
-            computed = await calculateBasketForStores(id, { storeIds: toCompute, lat, lng, userId: req.authUserId }) as any[];
+            computed = await calculateBasketForStores(id, { storeIds: toCompute, lat, lng, userId: req.authUserId, saver }) as any[];
             for (const r of computed) {
                 const sid = Number(r?.storeId);
                 if (sid > 0) STORE_PRICE_CACHE.set(keyOf(sid), { ts: now, result: r });

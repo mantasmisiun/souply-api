@@ -23,6 +23,16 @@ const APPROX_POOL_SIZE = 12;
 // substitute enters a price total unreviewed, so it must be a solid name match.
 // Tunable.
 const TIER3_MIN_CONFIDENCE = 0.65;
+// Saver mode trades precision for price: a looser substitute bar so more
+// "similar" products qualify, and the cheapest of them competes with the exact
+// product. Still above the matcher's noise floor (0.4) + the form/weighable gate
+// so it stays same-category-ish, not garbage. Tunable.
+const SAVER_MIN_CONFIDENCE = 0.5;
+// Saver prefilter cap: most-relevant N candidates (by stem-hit count) fed to the
+// matcher per (chain × item). Bounds the cost of running the fuzzy matcher for
+// EVERY item (saver has no coverage gate) without dropping the genuinely similar
+// ones a common word would otherwise bury. Tunable.
+const SAVER_POOL_CAP = 150;
 
 type MatchMode = 'sku' | 'base';
 
@@ -87,6 +97,12 @@ export interface CalculateOptions {
      *  from client-side location filtering). Falls back to 10-closest when
      *  absent, preserving the existing single-store flow. */
     storeIds?: number[];
+    /** SAVER mode: the goal shifts from "price the exact product" to "find the
+     *  absolute cheapest acceptable substitute". Widens every store's candidate
+     *  pool — always includes the base cluster, admits looser name-similar
+     *  substitutes, and lets the cheapest of {exact, personal, merge, cluster,
+     *  substitute} win instead of the exact product always taking precedence. */
+    saver?: boolean;
     /** When provided, skip the `Basket` table read and price these items
      *  directly. Used by the šablonai share-snapshot pipeline so a virtual
      *  template can be priced without first persisting a temp basket. */
@@ -317,6 +333,7 @@ function getCheapestFromCache(
     userQuantity: number,
     canonical: CanonicalMeta | null,
     anchor: { amount: number; unit: string } | null = null,
+    saver = false,
 ): (SpRow & { effectivePrice: number }) | null {
     // "Definitely the product" — the item's own SKU plus the PERSONAL (viewer
     // voted 'same') and MERGE (hard-merged) tiers. All are the same product with
@@ -325,8 +342,9 @@ function getCheapestFromCache(
     const direct = cache.sku.get(storeId)?.get(productId) ?? [];
     const personal = cache.personal.get(storeId)?.get(productId) ?? [];
     const merge = cache.merge.get(storeId)?.get(productId) ?? [];
-    // Weaker "same base" name-similarity grouping — base mode only, as before.
-    const cluster = matchMode === 'base'
+    // Weaker "same base" name-similarity grouping — base mode always, and SAVER
+    // mode for sku-mode items too (widen the pool to the whole cluster).
+    const cluster = (matchMode === 'base' || saver)
         ? (cache.cluster.get(storeId)?.get(productId) ?? [])
         : [];
     return pickCheapestForQuantity(
@@ -383,6 +401,7 @@ export const calculateBasketForStores = async (
     // Owner of the basket → enables the PERSONAL merge tier. Explicit opts.userId
     // wins (virtual-item callers pass the viewer); otherwise read the basket owner.
     const userId = opts.userId ?? (opts.items ? undefined : (await getBasketOwnerId(basketId)) ?? undefined);
+    const saver = opts.saver === true;
 
     // Drop stores with no coordinates (distance would be null).
     const validStores = (stores as any[]).filter(s => s.distance != null);
@@ -465,17 +484,21 @@ export const calculateBasketForStores = async (
     // pair whose product has a direct hit at EVERY target store of that chain will
     // never read its substitute. Skipping those pairs avoids running the advanced
     // matcher (the calc's hotspot) for the ~80%+ of items stocked everywhere.
+    // SAVER exception: the substitute competes on price with the exact product,
+    // so it must be computed even where Tier-1/2 already covers the item — the
+    // coverage gate is bypassed and every (chain × product) pair is a candidate.
     const tier3Needed = new Set<string>();
     for (const store of validStores) {
         const sid = Number(store.id);
         const cid = Number(store.chainId);
         for (const bi of basketItems as any[]) {
             const pid = Number(bi.productId);
-            const baseMode = bi.matchMode === 'base';
-            const covered = (tier12Cache.sku.get(sid)?.get(pid)?.length ?? 0) > 0
+            const baseMode = saver || bi.matchMode === 'base';
+            const covered = !saver && (
+                (tier12Cache.sku.get(sid)?.get(pid)?.length ?? 0) > 0
                 || (tier12Cache.personal.get(sid)?.get(pid)?.length ?? 0) > 0
                 || (tier12Cache.merge.get(sid)?.get(pid)?.length ?? 0) > 0
-                || (baseMode && (tier12Cache.cluster.get(sid)?.get(pid)?.length ?? 0) > 0);
+                || (baseMode && (tier12Cache.cluster.get(sid)?.get(pid)?.length ?? 0) > 0));
             if (!covered) tier3Needed.add(`${cid}:${pid}`);
         }
     }
@@ -484,7 +507,7 @@ export const calculateBasketForStores = async (
     // Results keyed as "chainId:productId" → best-substitute SpRow per store.
     // Priced over the fallback pool so substitutes resolve regardless of how
     // many target stores were requested.
-    const tier3Cache = await batchFetchTier3Substitutes(productIds, basketItems, poolStoreIds, poolChainIds, isWeighableByProduct, tier3Needed);
+    const tier3Cache = await batchFetchTier3Substitutes(productIds, basketItems, poolStoreIds, poolChainIds, isWeighableByProduct, tier3Needed, saver);
 
     // Tier 4: cross-chain average per productId. Reuses the SP metadata
     // already loaded above — only the latest-prices query is per-product.
@@ -552,6 +575,7 @@ export const calculateBasketForStores = async (
                         tier4Cache,
                         canonicalByProduct.get(pid) ?? null,
                         anchor,
+                        saver,
                     );
                 })
             );
@@ -623,24 +647,42 @@ async function resolveItemAtStore(
     tier4Cache: Map<number, (SpRow & { effectivePrice: number }) | null>,
     canonical: CanonicalMeta | null,
     anchor: { amount: number; unit: string } | null = null,
+    saver = false,
 ): Promise<ItemResult> {
     // Tier 1 / 2: served from the pre-fetched cache — no DB call. Pricing
     // is per-total: for non-weighable items with multiple pack sizes, the
     // cheapest per-pack-unit SP can be wasteful when the user wants a
     // small quantity (e.g. 4-pack at 0.40 beats 30-pack at 2.50 for a
     // basket of 5). pickCheapestForQuantity computes the actual basket
-    // cost per SP and picks the cheapest total.
-    const direct = getCheapestFromCache(tier12Cache, storeId, productId, matchMode, userQuantity, canonical, anchor);
-    if (direct) {
-        return priceItem(productId, userQuantity, productName, matchMode, direct,
-            { isSubstituted: false, isCrossChainAverage: false }, canonical);
-    }
-
-    // Tier 3: pre-computed best substitute for this (chain, product) pair.
+    // cost per SP and picks the cheapest total. SAVER mode also folds the
+    // base cluster into this pool for sku-mode items (see getCheapestFromCache).
+    const direct = getCheapestFromCache(tier12Cache, storeId, productId, matchMode, userQuantity, canonical, anchor, saver);
     const substitute = tier3Cache.get(`${chainId}:${productId}`) ?? null;
-    if (substitute) {
-        return priceItem(productId, userQuantity, productName, matchMode, substitute,
-            { isSubstituted: true, isCrossChainAverage: false }, canonical);
+
+    if (saver) {
+        // Precision is not the goal — the absolute cheapest acceptable option is.
+        // Price BOTH the exact/near tiers and the substitute, then take whichever
+        // yields the lower basket-line total. Falls through to Tier-4/missing only
+        // when neither exists at this store.
+        const options: ItemResult[] = [];
+        if (direct) options.push(priceItem(productId, userQuantity, productName, matchMode, direct,
+            { isSubstituted: false, isCrossChainAverage: false }, canonical));
+        if (substitute) options.push(priceItem(productId, userQuantity, productName, matchMode, substitute,
+            { isSubstituted: true, isCrossChainAverage: false }, canonical));
+        if (options.length) {
+            return options.reduce((a, b) => (b.totalPrice ?? Infinity) < (a.totalPrice ?? Infinity) ? b : a);
+        }
+    } else {
+        // Normal mode: precision first — the exact/near product wins even when a
+        // substitute is cheaper.
+        if (direct) {
+            return priceItem(productId, userQuantity, productName, matchMode, direct,
+                { isSubstituted: false, isCrossChainAverage: false }, canonical);
+        }
+        if (substitute) {
+            return priceItem(productId, userQuantity, productName, matchMode, substitute,
+                { isSubstituted: true, isCrossChainAverage: false }, canonical);
+        }
     }
 
     // Tier 4: pre-computed cross-chain average — no DB call.
@@ -687,9 +729,14 @@ async function batchFetchTier3Substitutes(
      *  misses at some target store). Pairs absent here are skipped — their item
      *  is stocked at every store of the chain, so the substitute is never read. */
     tier3Needed: Set<string>,
+    /** SAVER: looser confidence bar + keep several candidates per item, then
+     *  return the CHEAPEST of them (not the highest-confidence one). */
+    saver = false,
 ): Promise<Map<string, (SpRow & { effectivePrice: number }) | null>> {
     const result = new Map<string, (SpRow & { effectivePrice: number }) | null>();
     if (!productIds.length || !chainIds.length || !storeIds.length || !tier3Needed.size) return result;
+    const minConf = saver ? SAVER_MIN_CONFIDENCE : TIER3_MIN_CONFIDENCE;
+    const topN = saver ? 8 : 1;
 
     // Chain candidate sets (SPs + learned canonical/rejected/similarity ALIASES),
     // fetched once per chain and reused across every basket item. Same source the
@@ -705,7 +752,7 @@ async function batchFetchTier3Substitutes(
     // that need pricing. Sequential on purpose: this is CPU-bound, and firing a
     // price query per (chain × item) as before floods the connection pool on
     // large baskets (40 items × N chains ≫ queueLimit → "Queue limit reached").
-    const winners = new Map<string, MatchCandidate>();
+    const winners = new Map<string, MatchCandidate[]>();
     const spIdsToPrice = new Set<number>();
     for (const chainId of chainIds) {
         // Skip the whole chain when nothing there needs a substitute — avoids the
@@ -740,10 +787,27 @@ async function batchFetchTier3Substitutes(
             // the stemming means "sūrelis" reaches "sūreliai/sūrelių".
             const stems = stemQuery(productName).filter(s => s.length >= 4);
             if (!stems.length) { result.set(key, null); continue; }
-            const pool2: MatchCandidate[] = [];
-            for (const n of normed) {
-                if (n.c.productId === productId) continue; // Tier 1/2 owns the exact product
-                if (stems.some(st => n.hay.includes(st) || n.aliasHay.includes(st))) pool2.push(n.c);
+            let pool2: MatchCandidate[] = [];
+            if (saver) {
+                // Saver runs the matcher for EVERY item (no coverage gate), so a
+                // common word ("pienas") can prefilter to hundreds of loosely
+                // related SPs and blow up the matcher. Score each by how many of
+                // the item's stems it contains and keep the most relevant slice —
+                // bounds cost while keeping the genuinely-similar (cheapest) ones.
+                const scored: Array<{ c: MatchCandidate; hits: number }> = [];
+                for (const n of normed) {
+                    if (n.c.productId === productId) continue;
+                    let hits = 0;
+                    for (const st of stems) if (n.hay.includes(st) || n.aliasHay.includes(st)) hits++;
+                    if (hits > 0) scored.push({ c: n.c, hits });
+                }
+                scored.sort((a, b) => b.hits - a.hits);
+                pool2 = scored.slice(0, SAVER_POOL_CAP).map(s => s.c);
+            } else {
+                for (const n of normed) {
+                    if (n.c.productId === productId) continue; // Tier 1/2 owns the exact product
+                    if (stems.some(st => n.hay.includes(st) || n.aliasHay.includes(st))) pool2.push(n.c);
+                }
             }
             if (!pool2.length) { result.set(key, null); continue; }
 
@@ -753,13 +817,17 @@ async function batchFetchTier3Substitutes(
             // item's form (weighable) gates out cross-form substitutes.
             const itemWeighable = isWeighableByProduct.get(productId) ?? null;
             const matches = findBestProductMatches(
-                productName, null, null, pool2, TIER3_MIN_CONFIDENCE, 1, itemWeighable, { typed: true });
-            const top = matches[0];
-            if (!top) { result.set(key, null); continue; }
-            const topCand = pool2.find(c => c.id === top.storeProductId);
-            if (!topCand) { result.set(key, null); continue; }
-            winners.set(key, topCand);
-            spIdsToPrice.add(Number(topCand.id));
+                productName, null, null, pool2, minConf, topN, itemWeighable, { typed: true });
+            if (!matches.length) { result.set(key, null); continue; }
+            // Normal: the single best match. Saver: keep every match above the
+            // looser bar so Phase C can pick the cheapest of them.
+            const cands: MatchCandidate[] = [];
+            for (const m of matches) {
+                const c = pool2.find(pc => pc.id === m.storeProductId);
+                if (c) { cands.push(c); spIdsToPrice.add(Number(c.id)); }
+            }
+            if (!cands.length) { result.set(key, null); continue; }
+            winners.set(key, cands);
         }
     }
 
@@ -767,29 +835,34 @@ async function batchFetchTier3Substitutes(
     // across the fallback pool, instead of a query per (chain × item).
     const priceMap = await fetchLatestPrices([...spIdsToPrice], storeIds);
 
-    // Phase C — assemble: cheapest effective price per winner.
-    for (const [key, cand] of winners) {
-        const storePrices = priceMap.get(Number(cand.id));
-        if (!storePrices?.size) { result.set(key, null); continue; }
-        let bestPrice: any = null;
-        let bestEff = Infinity;
-        for (const pd of storePrices.values()) {
-            if (pd.price == null) continue;
-            const eff = pd.promoPrice ? parseFloat(pd.promoPrice) : parseFloat(pd.price);
-            if (eff < bestEff) { bestEff = eff; bestPrice = pd; }
+    // Phase C — assemble. For each key pick the candidate (and its store price)
+    // with the lowest effective price. Normal mode has one candidate → its
+    // cheapest store price; saver has several → the cheapest across ALL of them.
+    for (const [key, cands] of winners) {
+        let winCand: MatchCandidate | null = null;
+        let winPrice: any = null;
+        let winEff = Infinity;
+        for (const cand of cands) {
+            const storePrices = priceMap.get(Number(cand.id));
+            if (!storePrices?.size) continue;
+            for (const pd of storePrices.values()) {
+                if (pd.price == null) continue;
+                const eff = pd.promoPrice ? parseFloat(pd.promoPrice) : parseFloat(pd.price);
+                if (eff < winEff) { winEff = eff; winPrice = pd; winCand = cand; }
+            }
         }
-        if (!bestPrice) { result.set(key, null); continue; }
+        if (!winCand || !winPrice) { result.set(key, null); continue; }
         result.set(key, {
-            id: Number(cand.id),
-            productId: Number(cand.productId),
-            storeProductName: cand.storeProductName,
-            isWeighable: cand.isWeighable,
-            amount: cand.amount,
-            unit: cand.unit,
-            price: bestPrice.price,
-            promoPrice: bestPrice.promoPrice,
-            isFallback: bestPrice.isFallback,
-            effectivePrice: bestEff,
+            id: Number(winCand.id),
+            productId: Number(winCand.productId),
+            storeProductName: winCand.storeProductName,
+            isWeighable: winCand.isWeighable,
+            amount: winCand.amount,
+            unit: winCand.unit,
+            price: winPrice.price,
+            promoPrice: winPrice.promoPrice,
+            isFallback: winPrice.isFallback,
+            effectivePrice: winEff,
         });
     }
 
@@ -994,10 +1067,12 @@ export function pickCheapestForQuantity(
             ? parseFloat(String(sp.promoPrice))
             : parseFloat(String(sp.price));
         const rawAmount = sp.amount ? parseFloat(String(sp.amount)) : 1;
+        const isWeighable = sp.isWeighable === 1 || sp.isWeighable === true;
+        // Null canonical ⇒ quantity is a pack count (client stepped by 1); one
+        // pack = 1 unit for non-weighable, so a count isn't divided by a weight.
         const canonAmount = canonical
             ? (toCanonicalAmount(rawAmount, sp.unit ?? '', canonical) ?? rawAmount)
-            : rawAmount;
-        const isWeighable = sp.isWeighable === 1 || sp.isWeighable === true;
+            : (isWeighable ? rawAmount : 1);
 
         const total = isWeighable
             ? userQuantity * (effectivePrice / Math.max(canonAmount, 1e-9))
@@ -1056,9 +1131,14 @@ export function priceItem(
     // matches when sub-unit matches (vnt vs vnt). When no canonical (e.g.
     // tier-3 substitute from a different Product), use the raw amount —
     // matches the legacy single-Product behaviour.
+    // No canonical (product has no SP metadata → resolved via a tier-3 substitute):
+    // the client had no canonicalStep, so it stepped by 1 and `quantity` is a PACK
+    // COUNT, not a weight. Treat one pack = 1 unit so a count of 1 doesn't get
+    // divided by the substitute's weight (e.g. ceil(1 / 0.08 kg) = 13 packs).
+    // Weighable items keep their weight amount.
     const canonAmount = canonical && spUnit
         ? (toCanonicalAmount(spAmount, spUnit, canonical) ?? spAmount)
-        : spAmount;
+        : (isWeighable ? spAmount : 1);
 
     let packsNeeded: number;
     let actualAmount: number;
