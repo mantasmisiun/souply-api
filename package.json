@@ -31,7 +31,8 @@
         "ocr:confusions": "tsx src/scripts/mineOcrConfusions.ts",
         "backfill:trips": "tsx src/scripts/backfillTrips.ts",
         "import:translations": "tsx src/scripts/importSpTranslations.ts",
-        "scores:backfillbuys": "tsx src/scripts/backfillReceiptBuy.ts"
+        "scores:backfillbuys": "tsx src/scripts/backfillReceiptBuy.ts",
+        "scrape:lidl:leaflet": "tsx src/scrapers/runLidlLeaflet.ts"
     },
     "keywords": [],
     "author": "",

@@ -6,6 +6,7 @@ import { runIkiPromoScraper } from './iki/index.js';
 import { runNorfaPromoScraper } from './norfa/index.js';
 import { runRimiPromoScraper } from './rimi/index.js';
 import { runLidlPromoScraper } from './lidl/index.js';
+import { runLidlLeafletScraper } from './lidl/leaflet.js';
 
 (async () => {
     try {
@@ -14,6 +15,7 @@ import { runLidlPromoScraper } from './lidl/index.js';
         await runNorfaPromoScraper();
         await runRimiPromoScraper();
         await runLidlPromoScraper();
+        await runLidlLeafletScraper();
     } finally {
         // The Discounts screen reads the materialized DiscountedProductSummary table, which
         // is otherwise only rebuilt at API boot or by the prod-only scheduler — so a manual

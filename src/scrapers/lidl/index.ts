@@ -2,6 +2,7 @@ import { chromium } from 'playwright-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import type { Page } from 'playwright';
 import { upsertPromo } from '../shared/promoUpsert.js';
+import { joinBrand as joinBrandShared } from '../shared/net.js';
 import { notifyTelegram } from '../shared/telegramAlert.js';
 import { extractLidlSizes } from './parseLidlProduct.js';
 
@@ -32,9 +33,23 @@ interface LidlProduct {
     imageUrl: string | null;
     regularPrice: number;
     promoPrice: number | null; // null = Super Kaina (no comparison price)
+    promoStart: Date | null;   // window open (future promos scraped early); null = already active
     promoEnd: Date;
     requiresCoupon: boolean;
     productId: number;
+    /** Pre-derived size (gridbox tiles: from €/kg) — bypasses extractLidlSizes. */
+    directSize?: { amount: number | null; unit: string | null; isWeighable: boolean };
+    /** ERP item code (gridbox detail page) — same code space as leaflet + receipts. */
+    itemCode?: string | null;
+    /** Website names are authoritative (leaflet typos self-heal against them). */
+    nameAuthority?: boolean;
+}
+
+/** Prepend the chain-declared brand to the title unless it's already there. The
+ *  brand is a strong matcher signal (we store it in the name, not a column). */
+function joinBrand(brand: any, name: string): string {
+    const b = brand?.showBrand && typeof brand?.name === 'string' ? brand.name : null;
+    return joinBrandShared(b, name);
 }
 
 function isLidlPlusCoupon(lp: any): boolean {
@@ -45,14 +60,19 @@ function isLidlPlusCoupon(lp: any): boolean {
 
 function parseGridData(raw: any): LidlProduct | null {
     if (!raw?.havingPrice) return null;
-    const name = (raw.fullTitle as string | undefined)?.trim();
-    if (!name) return null;
+    const rawName = (raw.fullTitle as string | undefined)?.trim();
+    if (!rawName) return null;
+    const name = joinBrand(raw.brand, rawName);
 
     const imageUrl = (raw.image as string | null) ?? null;
-    const validUntilTs: number | undefined =
-        raw.stockAvailability?.badgeInfoV2?.[0]?.validUntil ?? raw.storeEndDate;
+    const badge = raw.stockAvailability?.badgeInfoV2?.[0];
+    const validUntilTs: number | undefined = badge?.validUntil ?? raw.storeEndDate;
     if (!validUntilTs) return null;
     const promoEnd = new Date(validUntilTs * 1000);
+    // Window OPEN — a promo/price scraped before it starts (Lidl staggers the
+    // week). Null when already active; the calc shows the regular price until it.
+    const validFromTs: number | undefined = badge?.validFrom ?? raw.storeStartDate;
+    const promoStart = validFromTs && validFromTs * 1000 > Date.now() ? new Date(validFromTs * 1000) : null;
     const productId = raw.productId as number;
 
     const p = raw.price;
@@ -61,7 +81,7 @@ function parseGridData(raw: any): LidlProduct | null {
     if (p?.price > 0 && p?.discount?.deletedPrice > 0 && p?.discount?.showDiscount) {
         if (p.price >= p.discount.deletedPrice) return null;
         return {
-            name, imageUrl, promoEnd, productId,
+            name, imageUrl, promoStart, promoEnd, productId,
             regularPrice: p.discount.deletedPrice,
             promoPrice: p.price,
             requiresCoupon: false,
@@ -74,7 +94,7 @@ function parseGridData(raw: any): LidlProduct | null {
     if (lp?.price?.price > 0 && lp?.price?.discount?.deletedPrice > 0) {
         if (lp.price.price >= lp.price.discount.deletedPrice) return null;
         return {
-            name, imageUrl, promoEnd, productId,
+            name, imageUrl, promoStart, promoEnd, productId,
             regularPrice: lp.price.discount.deletedPrice,
             promoPrice: lp.price.price,
             requiresCoupon: isLidlPlusCoupon(lp),
@@ -87,7 +107,7 @@ function parseGridData(raw: any): LidlProduct | null {
     // still tracked; the UI won't show it as a sale because promoPrice is null.
     if (p?.price > 0) {
         return {
-            name, imageUrl, promoEnd, productId,
+            name, imageUrl, promoStart, promoEnd, productId,
             regularPrice: p.price,
             promoPrice: null,
             requiresCoupon: false,
@@ -106,14 +126,129 @@ async function collectItems(page: Page): Promise<any[]> {
     );
 }
 
+interface GridBoxRaw { webId: string; name: string; price: number; href: string | null; img: string | null; text: string; }
+
+/** The SECOND product tile type ("product-grid-box", e.g. the Superiniai fresh
+ *  offers — Šilauogės). NOT in [data-grid-data]; tile text carries prices,
+ *  €/kg and the window; the detail page carries the ERP item code. */
+async function collectGridBoxes(page: Page): Promise<GridBoxRaw[]> {
+    return page.evaluate(() => {
+        const out: any[] = [];
+        for (const b of Array.from(document.querySelectorAll('[data-gridbox-impression]'))) {
+            try {
+                const imp = JSON.parse(decodeURIComponent(b.getAttribute('data-gridbox-impression') ?? ''));
+                if (!imp?.name || typeof imp.price !== 'number') continue;
+                const a = b.querySelector('a[href]');
+                const img = b.querySelector('img');
+                out.push({
+                    webId: String(imp.id ?? ''),
+                    name: String(imp.name),
+                    price: Number(imp.price),
+                    href: a?.getAttribute('href') ?? null,
+                    img: img?.getAttribute('src') ?? img?.getAttribute('data-src') ?? null,
+                    text: (b.textContent ?? '').replace(/\s+/g, ' ').trim(),
+                });
+            } catch { /* skip malformed tile */ }
+        }
+        return out;
+    });
+}
+
+/** Parse a gridbox tile into a LidlProduct. Self-validating like the leaflet:
+ *  a printed -N% must agree with the price pair, €/kg derives the pack size. */
+function parseGridBox(raw: GridBoxRaw): LidlProduct | null {
+    const promo = raw.price;
+    if (!promo || promo <= 0) return null;
+    const perKgM = raw.text.match(/1\s*(kg|l)\s*=\s*(\d+[.,]\d+)\s*€/i);
+    const perKg = perKgM ? parseFloat(perKgM[2].replace(',', '.')) : null;
+    const pctM = raw.text.match(/-(\d+)\s*[%﹪]/);
+    const winM = raw.text.match(/(\d{2})\s+(\d{2})\s*[-–]\s*(\d{2})\s+(\d{2})/);
+    // candidate old price: a €-suffixed number that is neither promo nor €/kg
+    const nums = [...raw.text.matchAll(/(\d+[.,]\d{2})\s*€/g)].map(m => parseFloat(m[1].replace(',', '.')));
+    const old = nums.find(n => Math.abs(n - promo) > 0.005 && (perKg == null || Math.abs(n - perKg) > 0.005) && n > promo) ?? null;
+    if (old != null && pctM) {
+        const implied = (1 - promo / old) * 100;
+        if (Math.abs(implied - Number(pctM[1])) > 8) return null; // mispaired — never insert
+    }
+    // window (year from now; scraper runs within the flyer week)
+    let promoStart: Date | null = null;
+    let promoEnd: Date | null = null;
+    if (winM) {
+        const now = new Date();
+        promoEnd = new Date(now.getFullYear(), +winM[3] - 1, +winM[4], 23, 59, 59);
+        if (promoEnd < now) promoEnd.setFullYear(promoEnd.getFullYear() + 1);
+        const s = new Date(promoEnd.getFullYear(), +winM[1] - 1, +winM[2], 0, 0, 0);
+        if (s > promoEnd) s.setFullYear(s.getFullYear() - 1);
+        promoStart = s > now ? s : null;
+    }
+    if (!promoEnd) return null; // no window — not a priced offer tile
+    // pack size from €/kg|€/l (validated derivation, same rule as Barbora)
+    let directSize: LidlProduct['directSize'] = { amount: null, unit: null, isWeighable: false };
+    if (perKg && perKg > 0) {
+        const qty = promo / perKg;
+        if (qty >= 0.9 && qty <= 1.1) directSize = { amount: 1, unit: perKgM![1].toLowerCase(), isWeighable: perKgM![1].toLowerCase() === 'kg' };
+        else if (qty >= 0.005 && qty <= 25) {
+            const solid = perKgM![1].toLowerCase() === 'kg';
+            directSize = { amount: Math.round(qty * 1000 / 5) * 5, unit: solid ? 'g' : 'ml', isWeighable: false };
+        }
+    }
+    return {
+        name: raw.name,
+        basePriceText: '',
+        imageUrl: raw.img,
+        regularPrice: old ?? promo,
+        promoPrice: old != null ? promo : null,
+        promoStart,
+        promoEnd,
+        requiresCoupon: false,
+        productId: Number(raw.webId) || 0,
+        directSize,
+        itemCode: null, // filled from the detail page
+        nameAuthority: true,
+    };
+}
+
+/** ERP item code from the product detail page's payload — anchored on the
+ *  serialized `,"<code>",{"brand"` neighborhood (verified live). */
+async function fetchErpCode(page: Page, href: string): Promise<string | null> {
+    try {
+        await gotoWithRetry(page, href.startsWith('http') ? href : BASE_URL + href, 30000);
+        const html = await page.content();
+        const m = html.match(/,"(\d{5,7})",\{"brand"/);
+        return m ? m[1] : null;
+    } catch {
+        return null;
+    }
+}
+
+/** goto with one retry — a single transient timeout shouldn't drop a whole page
+ *  (which, on the weekly-offers page, can zero the run). */
+async function gotoWithRetry(page: Page, url: string, timeout = 45000): Promise<void> {
+    try {
+        await page.goto(url, { waitUntil: 'networkidle', timeout });
+    } catch {
+        await page.waitForTimeout(1500);
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout });
+    }
+}
+
 async function scrapeUrl(page: Page, url: string): Promise<any[]> {
     try {
-        await page.goto(url, { waitUntil: 'networkidle', timeout: 45000 });
-        // One click of "Rodyti daugiau" loads all remaining items for the page
-        const btn = await page.$('button:has-text("Rodyti daugiau")');
-        if (btn) {
-            await btn.click();
-            await page.waitForTimeout(2500);
+        await gotoWithRetry(page, url);
+        // "Rodyti daugiau" — VERIFIED live 2026-07: on current lidl.lt it expands
+        // the BROCHURE masonry grid (ux-masonry-grid__expander), NOT product rows;
+        // clicking added +0 [data-grid-data]. All products load up-front. Keep a
+        // GROWTH-GATED loop as insurance: click only while the product count
+        // actually grows, so a future product-paginating layout is still covered
+        // but today's no-op costs a single probe instead of 25 blind clicks.
+        for (let i = 0; i < 25; i++) {
+            const btn = await page.$('button:has-text("Rodyti daugiau")');
+            if (!btn) break;
+            const before = await page.evaluate(() => document.querySelectorAll('[data-grid-data]').length);
+            await btn.click().catch(() => {});
+            await page.waitForTimeout(1500);
+            const after = await page.evaluate(() => document.querySelectorAll('[data-grid-data]').length);
+            if (after <= before) break; // brochure expander, not product pagination
         }
         return collectItems(page);
     } catch (e: any) {
@@ -171,19 +306,36 @@ interface Counters {
     parseErrors: number;
 }
 
-async function fetchAllProducts(): Promise<LidlProduct[]> {
+export interface FetchOpts {
+    /** Cap the number of category URLs scraped (dry-run / quick sampling). */
+    limitCategories?: number;
+    /** Skip discovery and scrape exactly these paths (e.g. ['/c/kainu-leidiniai/s10020254']). */
+    overridePaths?: string[];
+}
+
+export async function fetchAllProducts(opts: FetchOpts = {}): Promise<LidlProduct[]> {
     const browser = await chromium.launch({ headless: true });
     try {
         const page = await browser.newPage();
 
-        const categoryUrls = await discoverCategoryUrls(page);
+        let categoryUrls = opts.overridePaths?.length
+            ? opts.overridePaths.map(p => (p.startsWith('http') ? p : BASE_URL + p))
+            : await discoverCategoryUrls(page);
+        if (opts.limitCategories && opts.limitCategories > 0) {
+            categoryUrls = categoryUrls.slice(0, opts.limitCategories);
+        }
         console.log(`[Lidl] Scraping ${categoryUrls.length} category URLs…`);
 
         const byId = new Map<number, LidlProduct>();
+        const gridBoxes = new Map<string, GridBoxRaw>(); // webId → raw tile
 
         for (const url of categoryUrls) {
             const rawItems = await scrapeUrl(page, url);
-            if (!rawItems.length) continue;
+            // second tile type (Superiniai fresh offers) on the same page
+            for (const gb of await collectGridBoxes(page).catch(() => [] as GridBoxRaw[])) {
+                if (gb.webId && !gridBoxes.has(gb.webId)) gridBoxes.set(gb.webId, gb);
+            }
+            if (!rawItems.length && !gridBoxes.size) continue;
 
             let added = 0;
             for (const raw of rawItems) {
@@ -197,6 +349,17 @@ async function fetchAllProducts(): Promise<LidlProduct[]> {
             }
         }
 
+        // Parse gridbox tiles + fetch their ERP codes (one detail visit each).
+        let gbAdded = 0;
+        for (const gb of gridBoxes.values()) {
+            const product = parseGridBox(gb);
+            if (!product || byId.has(product.productId)) continue;
+            if (gb.href) product.itemCode = await fetchErpCode(page, gb.href);
+            byId.set(product.productId, product);
+            gbAdded++;
+        }
+        if (gbAdded) console.log(`[Lidl] gridbox tiles → +${gbAdded} (${byId.size} total)`);
+
         return Array.from(byId.values());
     } finally {
         await browser.close();
@@ -208,16 +371,18 @@ export async function runLidlPromoScraper(): Promise<void> {
     const c: Counters = { inserted: 0, skipped: 0, spCreated: 0, productCreated: 0, parseErrors: 0 };
 
     try {
-        const products = await fetchAllProducts();
+        const products = await fetchAllProducts({});
         console.log(`[Lidl] ${products.length} discounted products across all categories`);
 
         for (let i = 0; i < products.length; i++) {
             const item = products[i];
             try {
-                const sizes = extractLidlSizes(item.basePriceText, {
-                    promoPrice: item.promoPrice,
-                    regularPrice: item.regularPrice,
-                });
+                const sizes = item.directSize
+                    ? [item.directSize]
+                    : extractLidlSizes(item.basePriceText, {
+                        promoPrice: item.promoPrice,
+                        regularPrice: item.regularPrice,
+                    });
                 for (const { amount, unit, isWeighable } of sizes) {
                     const result = await upsertPromo({
                         chainId: LIDL_CHAIN_ID,
@@ -228,8 +393,11 @@ export async function runLidlPromoScraper(): Promise<void> {
                         imageUrl: item.imageUrl,
                         regularPrice: item.regularPrice,
                         promoPrice: item.promoPrice,
+                        promoStart: item.promoStart,
                         promoEnd: item.promoEnd,
                         requiresCoupon: item.requiresCoupon,
+                        itemCodes: item.itemCode ? [item.itemCode] : undefined,
+                        nameAuthority: item.nameAuthority,
                     });
                     if (result === 'skipped')              c.skipped++;
                     else if (result === 'sp_created')      c.spCreated++;

@@ -87,12 +87,13 @@ export const createStoreProduct = async (
     amount: number | null = null,
     unit: string | null = null,
     imageUrl: string | null = null,
+    siteCategory: string | null = null,
     conn?: Connection
     ) => {
     const db = conn || pool;
     const [result]: any = await db.query(
-        'INSERT INTO StoreProduct (productId, chainId, storeProductName, brandName, isWeighable, amount, unit, imageUrl) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-        [productId, chainId, storeProductName, brandName, isWeighable, amount, unit, imageUrl]
+        'INSERT INTO StoreProduct (productId, chainId, storeProductName, brandName, isWeighable, amount, unit, imageUrl, siteCategory) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [productId, chainId, storeProductName, brandName, isWeighable, amount, unit, imageUrl, siteCategory]
     );
     return result.insertId;
 };
