@@ -1092,3 +1092,11 @@ CREATE TABLE `AdminScrapeVerification` (
   UNIQUE KEY `uq_asv` (`chainId`,`scrapeDate`,`productId`),
   KEY `idx_asv_day` (`chainId`,`scrapeDate`,`status`)
 );
+
+CREATE TABLE `TripMemberBan` (
+  `tripId` int(11) NOT NULL,
+  `userId` char(36) NOT NULL,
+  `bannedBy` char(36) DEFAULT NULL,
+  `bannedAt` datetime NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`tripId`,`userId`)
+);
