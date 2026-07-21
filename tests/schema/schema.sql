@@ -734,6 +734,7 @@ CREATE TABLE `StoreProduct` (
   `unit` varchar(20) DEFAULT NULL,
   `isWeighable` tinyint(1) NOT NULL DEFAULT 0,
   `imageUrl` varchar(500) DEFAULT NULL,
+  `siteCategory` varchar(255) DEFAULT NULL,
   `provisional` tinyint(1) NOT NULL DEFAULT 0,
   `provisionalOwnerUserId` char(36) DEFAULT NULL,
   `mintedFromSpId` int(11) DEFAULT NULL,
@@ -1052,3 +1053,42 @@ CREATE TABLE `Notification` (
   PRIMARY KEY (`id`),
   KEY `idx_notification_user` (`userId`,`readAt`,`createdAt`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE `StoreProductCode` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `chainId` int(11) NOT NULL,
+  `code` varchar(16) NOT NULL,
+  `storeProductId` int(11) NOT NULL,
+  `updatedAt` datetime NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_spc_chain_code` (`chainId`,`code`),
+  KEY `idx_spc_sp` (`storeProductId`)
+);
+
+CREATE TABLE `StoreProductCodeEvidence` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `chainId` int(11) NOT NULL,
+  `code` varchar(16) NOT NULL,
+  `normalizedName` varchar(255) NOT NULL,
+  `printedName` varchar(255) NOT NULL,
+  `seenCount` int(11) NOT NULL DEFAULT 1,
+  `resolvedSpId` int(11) DEFAULT NULL,
+  `lastSeenAt` datetime NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_spce` (`chainId`,`code`,`normalizedName`),
+  KEY `idx_spce_code` (`chainId`,`code`)
+);
+
+CREATE TABLE `AdminScrapeVerification` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `chainId` int(11) NOT NULL,
+  `scrapeDate` date NOT NULL,
+  `productId` int(11) NOT NULL,
+  `status` enum('checked','flagged') NOT NULL,
+  `note` varchar(500) DEFAULT NULL,
+  `adminUserId` char(36) DEFAULT NULL,
+  `updatedAt` datetime NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_asv` (`chainId`,`scrapeDate`,`productId`),
+  KEY `idx_asv_day` (`chainId`,`scrapeDate`,`status`)
+);
