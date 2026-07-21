@@ -98,6 +98,7 @@ export const getListItemsByShoppingListId = async (listId: number, locale: Local
                  WHERE pr.storeProductId = sli.storeProductId
                    AND pr.requiresCoupon = 1
                    AND pr.promoEnd IS NOT NULL AND pr.promoEnd > NOW()
+                   AND (pr.validFrom IS NULL OR pr.validFrom <= NOW())
                    AND pr.price > 0 AND pr.promoPrice > 0
                  ORDER BY pr.date DESC LIMIT 1) AS couponLabel
          FROM ShoppingListItem sli

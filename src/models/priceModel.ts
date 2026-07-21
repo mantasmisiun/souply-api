@@ -74,8 +74,12 @@ export const findLinePrimaryPrice = async (
 };
 
 export const getLatestPriceByStoreProduct = async (storeProductId: number) => {
+    // Exclude not-yet-active (future validFrom) rows so a pre-scraped upcoming
+    // promo isn't shown as the current price; latest by effective date.
     const [rows]: any = await pool.query(
-        'SELECT * FROM Price WHERE storeProductId = ? ORDER BY date DESC LIMIT 1',
+        `SELECT * FROM Price WHERE storeProductId = ?
+           AND (validFrom IS NULL OR validFrom <= NOW())
+         ORDER BY COALESCE(validFrom, date) DESC, id DESC LIMIT 1`,
         [storeProductId]
     );
     return rows[0] || null;
@@ -104,6 +108,7 @@ export const getLatestPricesAcrossStores = async (productId: number) => {
              FROM Price p2
              WHERE p2.storeProductId = p.storeProductId
              AND p2.storeId = p.storeId
+             AND (p2.validFrom IS NULL OR p2.validFrom <= NOW())
          )
          ORDER BY p.price ASC`,
         [productId]
@@ -127,6 +132,7 @@ export const getActivePromoPrices = async () => {
          JOIN Store s ON p.storeId = s.id
          JOIN StoreChain sc ON sp.chainId = sc.id
          WHERE p.promoPrice IS NOT NULL AND (p.promoEnd > NOW() OR p.promoEnd IS NULL)
+           AND (p.validFrom IS NULL OR p.validFrom <= NOW())
          ORDER BY p.date DESC`
     );
     return rows.map((row: any) => ({
@@ -187,7 +193,7 @@ export const getPriceHistoryForStoreProductAllStores = async (storeProductId: nu
     const [rows]: any = await pool.query(
         `SELECT MIN(p.id) AS id,
                 p.storeProductId,
-                p.date,
+                COALESCE(p.validFrom, p.date) AS date,
                 CAST(p.price AS DECIMAL(10,4))      AS price,
                 CAST(p.promoPrice AS DECIMAL(10,4)) AS promoPrice,
                 p.promoEnd,
@@ -195,8 +201,8 @@ export const getPriceHistoryForStoreProductAllStores = async (storeProductId: nu
                 p.priceVerified
            FROM Price p
           WHERE p.storeProductId = ?
-          GROUP BY p.date, p.price, p.promoPrice, p.promoEnd, p.isFallback, p.priceVerified, p.storeProductId
-          ORDER BY p.date ASC`,
+          GROUP BY COALESCE(p.validFrom, p.date), p.price, p.promoPrice, p.promoEnd, p.isFallback, p.priceVerified, p.storeProductId
+          ORDER BY COALESCE(p.validFrom, p.date) ASC`,
         [storeProductId]
     );
     const nonFallback = rows.filter((r: any) => r.isFallback !== 1);
@@ -336,18 +342,18 @@ export const getAsOfDatePricesForCandidates = async (
     asOfDate: Date,
     excludeReceiptId: number,
     conn?: Connection
-): Promise<Map<number, { price: number; promoPrice: number | null; promoEnd: Date | null }>> => {
+): Promise<Map<number, { price: number; promoPrice: number | null; validFrom: Date | null; promoEnd: Date | null }>> => {
     const db = conn || pool;
-    const result = new Map<number, { price: number; promoPrice: number | null; promoEnd: Date | null }>();
+    const result = new Map<number, { price: number; promoPrice: number | null; validFrom: Date | null; promoEnd: Date | null }>();
     if (storeProductIds.length === 0) return result;
 
     // ORDER BY isFallback ASC, date DESC → a scraped row wins over any fallback
     // row; within scraped (or within fallback when no scrape exists) the latest
     // date on/before asOfDate wins. One row per candidate (rn = 1).
     const [rows]: any = await db.query(
-        `SELECT storeProductId, price, promoPrice, promoEnd
+        `SELECT storeProductId, price, promoPrice, validFrom, promoEnd
            FROM (
-               SELECT p.storeProductId, p.price, p.promoPrice, p.promoEnd,
+               SELECT p.storeProductId, p.price, p.promoPrice, p.validFrom, p.promoEnd,
                       ROW_NUMBER() OVER (
                           PARTITION BY p.storeProductId
                           ORDER BY p.isFallback ASC, p.date DESC
@@ -367,6 +373,7 @@ export const getAsOfDatePricesForCandidates = async (
         result.set(Number(row.storeProductId), {
             price: parseFloat(row.price),
             promoPrice: row.promoPrice === null || row.promoPrice === undefined ? null : parseFloat(row.promoPrice),
+            validFrom: row.validFrom ? new Date(row.validFrom) : null,
             promoEnd: row.promoEnd ? new Date(row.promoEnd) : null,
         });
     }

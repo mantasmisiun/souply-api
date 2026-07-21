@@ -500,6 +500,7 @@ async function attachRealDiscounts(enriched: any[], productIds: number[]): Promi
            FROM Price pr
            JOIN (SELECT storeProductId, MAX(id) AS maxId FROM Price
                   WHERE storeProductId IN (?) AND promoPrice IS NOT NULL AND promoEnd > NOW()
+                    AND (validFrom IS NULL OR validFrom <= NOW())
                   GROUP BY storeProductId) m ON m.maxId = pr.id
           WHERE pr.promoPrice > 0 AND pr.promoPrice < pr.price`,
         [spIds],
@@ -651,6 +652,7 @@ export const refreshDiscountedSummary = async (): Promise<void> => {
                  FROM Price FORCE INDEX (idx_price_promo_end)
                  WHERE promoEnd > NOW()
                    AND promoPrice IS NOT NULL
+                   AND (validFrom IS NULL OR validFrom <= NOW())
                  GROUP BY storeProductId
              ) latest ON latest.maxId = pr.id
              WHERE pr.promoPrice < pr.price

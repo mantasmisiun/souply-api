@@ -174,7 +174,7 @@ async function fetchLatestPrices(
     if (!spIds.length || !storeIds.length) return result;
     const [rows]: any = await pool.query(
         `SELECT p.storeProductId, p.storeId, p.price,
-                CASE WHEN p.promoEnd > NOW() THEN p.promoPrice ELSE NULL END AS promoPrice,
+                CASE WHEN (p.validFrom IS NULL OR p.validFrom <= NOW()) AND p.promoEnd > NOW() THEN p.promoPrice ELSE NULL END AS promoPrice,
                 p.isFallback
          FROM Price p
          INNER JOIN (
@@ -204,7 +204,7 @@ async function fetchLatestPricesAnyStore(spIds: number[]): Promise<Map<number, n
     if (!spIds.length) return out;
     const [rows]: any = await pool.query(
         `SELECT p.storeProductId,
-                CASE WHEN p.promoEnd > NOW() THEN p.promoPrice ELSE NULL END AS promoPrice,
+                CASE WHEN (p.validFrom IS NULL OR p.validFrom <= NOW()) AND p.promoEnd > NOW() THEN p.promoPrice ELSE NULL END AS promoPrice,
                 p.price
          FROM Price p
          INNER JOIN (

@@ -173,7 +173,9 @@ export const applyPriceRound2Matching = async (
                 if (regInBand) plausible.push({ am, spId, conf });
             }
             const regMatch = priceClose(observed, db.price);
-            const promoActive = db.promoPrice != null && (db.promoEnd == null || db.promoEnd >= receiptDate);
+            const promoActive = db.promoPrice != null
+                && (db.validFrom == null || db.validFrom <= receiptDate)
+                && (db.promoEnd == null || db.promoEnd >= receiptDate);
             const promoMatch = promoActive && priceClose(observed, db.promoPrice);
             // A price match only CONFIRMS when the regular price isn't extreme — a
             // discount that matches a wildly-different regular is a coincidence, and
