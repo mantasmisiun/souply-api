@@ -37,12 +37,16 @@ const pool = mysql.createPool({
     // an emoji name is truncated → empty/garbled. Pin the connection to utf8mb4.
     charset: 'utf8mb4',
     waitForConnections: true,
-    connectionLimit: Number(process.env.DB_POOL_SIZE) || 15,
-    // Bound the acquisition queue so overload SHEDS (fails fast) instead of hanging: a
-    // receipt burst spawns post-commit propagation + orphan refill + N per-vote txns, and
-    // with an unbounded queue (queueLimit:0) those pile up and requests wait forever. With
-    // a cap, excess acquisitions reject and the caller returns an error the client retries.
-    queueLimit: Number(process.env.DB_QUEUE_LIMIT) || 60,
+    connectionLimit: Number(process.env.DB_POOL_SIZE) || 20,
+    // Bound the acquisition queue so extreme overload SHEDS (fails fast) instead of
+    // hanging forever, but keep it deep enough to ABSORB a legitimate user spike:
+    // when N people hit "Stores" at once, each basket calc fires ~8 short queries,
+    // and at the instant they all start the first-query burst = N acquisitions.
+    // queueLimit must exceed (peak concurrent requests − connectionLimit) or those
+    // requests fail with "Queue limit reached" rather than queueing. 256 absorbs a
+    // ~275-request simultaneous spike (well past the ~10-30 real concurrency), while
+    // still capping a pathological receipt-burst runaway. Tune via DB_QUEUE_LIMIT.
+    queueLimit: Number(process.env.DB_QUEUE_LIMIT) || 256,
     timezone: process.env.DB_TIMEZONE || '+02:00',
     ssl: process.env.DB_SSL_REJECT_UNAUTHORIZED === 'false' ? { rejectUnauthorized: false } : undefined,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
