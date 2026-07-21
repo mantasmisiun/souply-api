@@ -105,6 +105,15 @@ async function main() {
 
     console.log(`\n⏱  cold: ${coldMs.toFixed(0)} ms | warm avg: ${warmAvg.toFixed(0)} ms (runs: ${warmTimes.map(t => t.toFixed(0)).join(', ')}) | stores priced: ${cold.length}`);
 
+    // Saver mode — same basket, wider pool, cheapest substitute wins.
+    const s0 = process.hrtime();
+    const saver = await calculateBasketForStores(0, { ...opts, saver: true });
+    const saverMs = ms(process.hrtime(s0));
+    const cheapNormal = [...warm].sort((a, b) => a.total - b.total)[0];
+    const cheapSaver = [...saver].sort((a, b) => a.total - b.total)[0];
+    const subN = (r: any) => r.items.filter((i: any) => i.isSubstituted).length;
+    console.log(`\n🏷  SAVER: ${saverMs.toFixed(0)} ms | cheapest store total €${cheapNormal.total} (normal) → €${cheapSaver.total} (saver)  Δ €${(cheapNormal.total - cheapSaver.total).toFixed(2)} | substituted items: ${subN(cheapNormal)} → ${subN(cheapSaver)} / ${items.length}`);
+
     // Tier distribution across ALL (store × item) resolutions.
     const tierOf = (it: any): string =>
         it.isMissing ? 'MISSING'
