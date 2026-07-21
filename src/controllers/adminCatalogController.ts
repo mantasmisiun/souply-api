@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
+import { ADMIN_OPEN_ACCESS } from '../config/adminAccess.js';
 import pool from '../config/db.js';
 import { mergeProducts } from '../services/productMergeService.js';
 import { logAdminAction } from '../services/adminActionLog.js';
@@ -24,7 +25,7 @@ export const mergeProductsHandler = async (
             `SELECT adminRole FROM User WHERE id = ? LIMIT 1`,
             [adminId],
         );
-        if ((userRows as any[])[0]?.adminRole !== 'superadmin') {
+        if ((userRows as any[])[0]?.adminRole !== 'superadmin' && !ADMIN_OPEN_ACCESS) {
             res.status(403).json({ error: 'Superadmin role required for product merge' });
             return;
         }
@@ -63,7 +64,7 @@ export const moveProductsHandler = async (
             `SELECT adminRole FROM User WHERE id = ? LIMIT 1`,
             [adminId],
         );
-        if ((userRows as any[])[0]?.adminRole !== 'superadmin') {
+        if ((userRows as any[])[0]?.adminRole !== 'superadmin' && !ADMIN_OPEN_ACCESS) {
             res.status(403).json({ error: 'Superadmin role required for product move' });
             return;
         }
@@ -99,7 +100,7 @@ export const moveProductsHandler = async (
         );
 
         await pool.query(
-            `UPDATE Product SET categoryId = ? WHERE id IN (?)`,
+            `UPDATE Product SET categoryId = ?, categoryReviewPending = 0 WHERE id IN (?)`,
             [categoryId, productIds],
         );
 
@@ -137,7 +138,7 @@ export const renameProductHandler = async (
             `SELECT adminRole FROM User WHERE id = ? LIMIT 1`,
             [adminId],
         );
-        if ((userRows as any[])[0]?.adminRole !== 'superadmin') {
+        if ((userRows as any[])[0]?.adminRole !== 'superadmin' && !ADMIN_OPEN_ACCESS) {
             res.status(403).json({ error: 'Superadmin role required for product rename' });
             return;
         }

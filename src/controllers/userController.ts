@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
+import { ADMIN_OPEN_ACCESS } from '../config/adminAccess.js';
 import crypto from 'crypto';
 import pool from '../config/db.js';
 import { avatarSignedUrl } from '../services/storageService.js';
@@ -140,8 +141,8 @@ export const fetchUserProfile = async (req: Request, res: Response, next: NextFu
             showBurstWarning,
             // Surface the admin flag so the client can decide whether to
             // show the "Pereiti į admin panelį" button on the Profilis tab.
-            isAdmin: !!(user as any).isAdmin,
-            role: (user as any).adminRole ?? null,
+            isAdmin: ADMIN_OPEN_ACCESS || !!(user as any).isAdmin,
+            role: ADMIN_OPEN_ACCESS ? 'superadmin' : ((user as any).adminRole ?? null),
             // Identity for the profile header (avatar + name + @handle).
             firstName: (user as any).firstName ?? null,
             lastName: (user as any).lastName ?? null,

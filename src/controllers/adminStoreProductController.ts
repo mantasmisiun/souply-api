@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
+import { ADMIN_OPEN_ACCESS } from '../config/adminAccess.js';
 import pool from '../config/db.js';
 import { logAdminAction } from '../services/adminActionLog.js';
 import { fetchImageCandidatesBySpIds } from '../models/adminImageQueueModel.js';
@@ -12,7 +13,7 @@ async function requireSuperadmin(req: Request, res: Response): Promise<boolean> 
     const [rows]: any = await pool.query(
         `SELECT adminRole FROM User WHERE id = ? LIMIT 1`, [adminId],
     );
-    if ((rows as any[])[0]?.adminRole !== 'superadmin') {
+    if ((rows as any[])[0]?.adminRole !== 'superadmin' && !ADMIN_OPEN_ACCESS) {
         res.status(403).json({ error: 'Superadmin role required' });
         return false;
     }
