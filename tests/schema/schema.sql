@@ -650,6 +650,8 @@ CREATE TABLE `ShoppingListItem` (
   `productId` int(11) DEFAULT NULL,
   `quantity` decimal(10,1) NOT NULL,
   `isChecked` tinyint(1) DEFAULT 0,
+  `checkedBy` char(36) DEFAULT NULL,
+  `checkedAt` datetime DEFAULT NULL,
   `price` decimal(10,2) DEFAULT NULL,
   `customName` varchar(255) DEFAULT NULL,
   `storeProductId` int(11) DEFAULT NULL,
@@ -658,9 +660,11 @@ CREATE TABLE `ShoppingListItem` (
   KEY `productId` (`productId`),
   KEY `ShoppingListItem_listId_fk` (`listId`),
   KEY `storeProductId` (`storeProductId`),
+  KEY `fk_sli_checkedby` (`checkedBy`),
   CONSTRAINT `ShoppingListItem_ibfk_2` FOREIGN KEY (`productId`) REFERENCES `Product` (`id`),
   CONSTRAINT `ShoppingListItem_ibfk_3` FOREIGN KEY (`storeProductId`) REFERENCES `StoreProduct` (`id`),
-  CONSTRAINT `ShoppingListItem_listId_fk` FOREIGN KEY (`listId`) REFERENCES `ShoppingList` (`id`) ON DELETE CASCADE
+  CONSTRAINT `ShoppingListItem_listId_fk` FOREIGN KEY (`listId`) REFERENCES `ShoppingList` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_sli_checkedby` FOREIGN KEY (`checkedBy`) REFERENCES `User` (`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB AUTO_INCREMENT=28 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 DROP TABLE IF EXISTS `ShoppingListMember`;
@@ -866,6 +870,7 @@ CREATE TABLE `User` (
   `displayName` varchar(60) DEFAULT NULL,
   `bio` varchar(160) DEFAULT NULL,
   `avatarUrl` varchar(500) DEFAULT NULL,
+  `avatarColor` varchar(7) DEFAULT NULL,
   `authProvider` enum('google','apple') DEFAULT NULL,
   `authSubject` varchar(255) DEFAULT NULL,
   `email` varchar(255) DEFAULT NULL,
