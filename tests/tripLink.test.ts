@@ -222,6 +222,9 @@ describe('trip minting at persist time', () => {
         // Prediction accuracy: matched item's list price (2.80) vs paid (2×1.50).
         expect(r.body.predictedMatchedTotal).toBeCloseTo(2.80);
         expect(r.body.actualMatchedTotal).toBeCloseTo(3.00);
+        // Impulse/missed counts present (fuzzy product/name/L3 matching).
+        expect(typeof r.body.impulseCount).toBe('number');
+        expect(typeof r.body.forgottenCount).toBe('number');
         expect(r.body.unmatchedListItems).toHaveLength(1);
         expect(r.body.unmatchedReceiptItems).toHaveLength(1);
         const expected = Math.round(100 * (0.4 * 0.5 + 0.4 * (3.0 / 3.8) + 0.2 * 1));

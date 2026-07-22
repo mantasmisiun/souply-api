@@ -1,4 +1,27 @@
 import pool from '../config/db.js';
+import { normalizeProductName } from '../utils/productNameNormalize.js';
+
+const UNASSIGNED_CATEGORY = 688; // "Nepriskirta" — never counts as a category match
+// Filler tokens that must not create a false name match on their own.
+const NAME_STOP = new Set(['bon', 'via', 'clever', 'lengvai', 'ekologiskas', 'lietuviski', 'lietuviskas', 'didziosios', 'smulkiavaisiai', 'smulki', 'skonio', 'salt', 'hill']);
+/** Significant name tokens (≥4 chars, not a filler) for fuzzy same-item match. */
+const nameTokens = (name: string | null): Set<string> => {
+    const out = new Set<string>();
+    for (const w of normalizeProductName(name ?? '').split(' ')) {
+        if (w.length >= 4 && !NAME_STOP.has(w)) out.add(w);
+    }
+    return out;
+};
+/** Do a list item and a receipt item refer to the same KIND of product? Exact
+ *  product id, else a shared significant name token, else the same real L3. */
+const sameKind = (li: any, ri: any): boolean => {
+    if (li.productId != null && ri.productId != null && Number(li.productId) === Number(ri.productId)) return true;
+    const lt = li._tokens ?? (li._tokens = nameTokens(li.productName ?? li.spName ?? li.customName));
+    const rt = ri._tokens ?? (ri._tokens = nameTokens(ri.resolvedName ?? ri.spName ?? ri.name));
+    for (const w of rt) if (lt.has(w)) return true;
+    const lc = li.l3, rc = ri.l3;
+    return lc != null && rc != null && lc !== UNASSIGNED_CATEGORY && Number(lc) === Number(rc);
+};
 
 /**
  * Souply 2.0 planning score (spec: Stage 5 / Planavimo balas).
@@ -49,6 +72,10 @@ export interface PlanningScore {
     scoreExempt: boolean;
     listItemCount: number;
     matchedListItemCount: number;
+    /** Stats-card counts (see below): impulse = receipt items sharing nothing
+     *  with the list; missed = list items sharing nothing with the receipt. */
+    impulseCount: number;
+    forgottenCount: number;
     /** Prediction accuracy basis: summed predicted (list) vs actual (receipt)
      *  totals over matched items THAT HAD a list price. null = no priced matches
      *  (or ad-hoc) → the client hides the prediction card. */
@@ -67,17 +94,22 @@ export const computePlanningScore = async (tripId: number): Promise<PlanningScor
         tripId, score: null, coverage: 0, discipline: 0, precision: 0,
         isAdHoc: !!trip?.isAdHoc, scoreExempt: !!trip?.scoreExempt,
         listItemCount: 0, matchedListItemCount: 0,
+        impulseCount: 0, forgottenCount: 0,
         predictedMatchedTotal: null, actualMatchedTotal: null,
         pairs: [], unmatchedListItems: [], unmatchedReceiptItems: [],
     };
     if (!trip || trip.scoreExempt) return base;
     if (trip.isAdHoc) return { ...base, score: AD_HOC_SCORE };
 
-    // List items across the trip's lists, with resolved productId + name.
+    // List items across the trip's lists, with resolved productId, name + L3
+    // category (leaf, or itself if it has children). name/category feed the
+    // fuzzy pairing since the list and the receipt often resolve the SAME real
+    // item to DIFFERENT product rows (and receipt mints are uncategorised).
     const [listItems]: any = await pool.query(
         `SELECT sli.id, sli.quantity, sli.customName, sli.price,
                 COALESCE(sli.productId, sp.productId) AS productId,
-                p.name AS productName
+                p.name AS productName, sp.storeProductName AS spName,
+                p.categoryId AS l3
            FROM ShoppingListItem sli
            JOIN ShoppingList sl ON sl.id = sli.listId
            LEFT JOIN StoreProduct sp ON sp.id = sli.storeProductId
@@ -85,13 +117,16 @@ export const computePlanningScore = async (tripId: number): Promise<PlanningScor
           WHERE sl.tripId = ?`,
         [tripId],
     );
-    // Receipt lines with resolved productId + spend.
+    // Receipt lines with resolved productId, name + L3 category.
     const [receiptItems]: any = await pool.query(
         `SELECT ri.id, ri.name, ri.price, ri.promoPrice, ri.quantity,
-                sp.productId AS productId
+                sp.productId AS productId,
+                p.name AS resolvedName, sp.storeProductName AS spName,
+                p.categoryId AS l3
            FROM ReceiptItem ri
            JOIN Receipt r ON r.id = ri.receiptId
            LEFT JOIN StoreProduct sp ON sp.id = ri.matchedSpId
+           LEFT JOIN Product p ON p.id = sp.productId
           WHERE r.tripId = ?`,
         [tripId],
     );
@@ -133,10 +168,12 @@ export const computePlanningScore = async (tripId: number): Promise<PlanningScor
         });
     }
     for (const li of listItems) {
-        if (usedList.has(li.id) || li.productId == null) continue;
+        if (usedList.has(li.id)) continue;
+        // Same product id → same name token → same real L3 (not just exact id):
+        // the list and receipt routinely resolve one real item to two product
+        // rows, and receipt mints are uncategorised.
         const ri = receiptItems.find((r: any) =>
-            !usedReceipt.has(r.id) && r.productId != null && Number(r.productId) === Number(li.productId)
-            && !suppressed.has(`${li.id}:${r.id}`));
+            !usedReceipt.has(r.id) && sameKind(li, r) && !suppressed.has(`${li.id}:${r.id}`));
         if (!ri) continue;
         usedList.add(li.id); usedReceipt.add(ri.id);
         pairs.push({
@@ -166,6 +203,12 @@ export const computePlanningScore = async (tripId: number): Promise<PlanningScor
 
     base.matchedListItemCount = pairs.length;
     base.pairs = pairs;
+    // Impulse / missed for the stats cards — NON 1:1: a receipt item is impulse
+    // only if it shares NOTHING (product / name token / L3) with ANY list item,
+    // so extra units of a planned kind (2 breads for 1) are NOT impulse. Missed
+    // is the mirror. (pairs/unmatched* above stay 1:1 for the manual-link UI.)
+    base.impulseCount = receiptItems.filter((ri: any) => !listItems.some((li: any) => sameKind(li, ri))).length;
+    base.forgottenCount = listItems.filter((li: any) => !receiptItems.some((ri: any) => sameKind(li, ri))).length;
     // Prediction accuracy: predicted (list) vs actual (receipt) over matched
     // items that carried a list price. null when none (e.g. list never priced).
     const priced = pairs.filter(p => p.listPrice != null && p.listPrice > 0);
