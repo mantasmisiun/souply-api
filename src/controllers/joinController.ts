@@ -167,7 +167,7 @@ export const listTripMembers = async (req: Request, res: Response, next: NextFun
         const tripId = Number(req.params.id);
         const [rows]: any = await pool.query(
             `SELECT tm.userId, tm.role,
-                    u.displayName, u.username, u.firstName,
+                    u.displayName, u.username, u.firstName, u.avatarColor,
                     CASE WHEN tm.userId = ? THEN u.email ELSE NULL END AS ownEmail
                FROM TripMember tm JOIN User u ON u.id = tm.userId
               WHERE tm.tripId = ?
@@ -181,6 +181,7 @@ export const listTripMembers = async (req: Request, res: Response, next: NextFun
                 label: r.displayName ?? (r.username ? `@${r.username}` : null)
                     ?? r.firstName ?? (r.ownEmail ? String(r.ownEmail).split('@')[0] : null)
                     ?? 'Narys',
+                avatarColor: r.avatarColor ?? null,
             })),
         });
     } catch (error) { next(error); }

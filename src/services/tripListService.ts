@@ -27,6 +27,8 @@ export interface TripSlotSummary {
     itemCount: number;
 }
 
+export interface TripMemberPreview { initial: string; color: string | null; }
+
 export interface TripSummary {
     id: number;
     name: string | null;
@@ -36,6 +38,8 @@ export interface TripSummary {
     createdAt: string;
     stage: TripStage;
     memberCount: number;
+    /** Member avatar previews (owner first) for the shared-card circles. */
+    members: TripMemberPreview[];
     /** Best-known shopping date (receipt date > list creation > trip creation)
      *  — the calendar-dot anchor per the spec. */
     anchorDate: string;
@@ -62,9 +66,38 @@ export const listTripsForUser = async (userId: string, locale: Locale = 'lt', li
     if (trips.length === 0) return [];
     const ids = trips.map((t: any) => t.id);
 
-    const [members]: any = await pool.query(
-        'SELECT tripId, COUNT(*) AS n FROM TripMember WHERE tripId IN (?) GROUP BY tripId', [ids]);
-    const memberCountByTrip = new Map<number, number>(members.map((m: any) => [m.tripId, Number(m.n)]));
+    // Members with their avatar identity (owner first) — powers the stacked
+    // avatar circles on shared cards. Count derives from the same rows.
+    // Two queries (not a JOIN) — joining User.id to TripMember.userId trips a
+    // MariaDB "illegal mix of collations" on the CI schema. Owner-first ordering
+    // is done in JS (comparing role to a literal in SQL has the same issue).
+    const [memberRows]: any = await pool.query(
+        'SELECT tripId, userId, role FROM TripMember WHERE tripId IN (?) ORDER BY joinedAt', [ids]);
+    const memberUserIds = [...new Set(memberRows.map((m: any) => m.userId))];
+    const userById = new Map<string, { label: string | null; avatarColor: string | null }>();
+    if (memberUserIds.length) {
+        const [users]: any = await pool.query(
+            'SELECT id, COALESCE(displayName, firstName, username) AS label, avatarColor FROM User WHERE id IN (?)',
+            [memberUserIds]);
+        for (const u of users) userById.set(u.id, { label: u.label ?? null, avatarColor: u.avatarColor ?? null });
+    }
+    const memberCountByTrip = new Map<number, number>();
+    const rawByTrip = new Map<number, any[]>();
+    for (const m of memberRows) {
+        memberCountByTrip.set(m.tripId, (memberCountByTrip.get(m.tripId) ?? 0) + 1);
+        const arr = rawByTrip.get(m.tripId) ?? [];
+        arr.push(m);
+        rawByTrip.set(m.tripId, arr);
+    }
+    const membersByTrip = new Map<number, TripMemberPreview[]>();
+    for (const [tripId, arr] of rawByTrip) {
+        const ordered = [...arr].sort((a, b) => (b.role === 'owner' ? 1 : 0) - (a.role === 'owner' ? 1 : 0));
+        membersByTrip.set(tripId, ordered.map(m => {
+            const u = userById.get(m.userId);
+            const ch = String(u?.label ?? '').trim().replace(/^@/, '').charAt(0);
+            return { initial: ch ? ch.toUpperCase() : '?', color: u?.avatarColor ?? null };
+        }));
+    }
 
     const [baskets]: any = await pool.query(
         `SELECT b.tripId, b.id, b.status, b.name, b.hasBeenCalculated,
@@ -144,6 +177,7 @@ export const listTripsForUser = async (userId: string, locale: Locale = 'lt', li
             createdAt: t.createdAt,
             stage,
             memberCount: memberCountByTrip.get(t.id) ?? 1,
+            members: membersByTrip.get(t.id) ?? [],
             anchorDate,
             basket: basket ? {
                 id: basket.id, status: basket.status, itemCount: Number(basket.itemCount) || 0,
