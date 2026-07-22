@@ -85,7 +85,7 @@ export const toggleListItemChecked = async (req: Request, res: Response, next: N
             res.status(400).json({ error: 'Invalid ID or missing isChecked value' });
             return;
         }
-        await toggleListItem(id, isChecked);
+        await toggleListItem(id, isChecked, req.authUserId ?? null);
         if (isChecked) {
             getListItemById(id).then(async item => {
                 if (!item?.productId) return;

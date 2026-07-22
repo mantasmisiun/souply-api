@@ -100,13 +100,17 @@ export const getListItemsByShoppingListId = async (listId: number, locale: Local
                    AND pr.promoEnd IS NOT NULL AND pr.promoEnd > NOW()
                    AND (pr.validFrom IS NULL OR pr.validFrom <= NOW())
                    AND pr.price > 0 AND pr.promoPrice > 0
-                 ORDER BY pr.date DESC LIMIT 1) AS couponLabel
+                 ORDER BY pr.date DESC LIMIT 1) AS couponLabel,
+                sli.checkedBy AS checkedByUserId,
+                COALESCE(cb.displayName, cb.firstName) AS checkedByName,
+                cb.avatarColor AS checkedByColor
          FROM ShoppingListItem sli
          LEFT JOIN Product p ON sli.productId = p.id
          LEFT JOIN StoreProduct sp ON sli.storeProductId = sp.id
          LEFT JOIN Category c3 ON p.categoryId = c3.id
          LEFT JOIN Category c2 ON c3.parentCategoryId = c2.id
          LEFT JOIN Category c1 ON c2.parentCategoryId = c1.id
+         LEFT JOIN User cb ON cb.id = sli.checkedBy
          WHERE sli.listId = ?
          ORDER BY sli.isChecked ASC,
                   COALESCE(sp.storeProductName, p.name, sli.customName, '') ASC,
@@ -136,11 +140,20 @@ export const updateListItemQuantity = async (id: number, quantity: number) => {
     );
 };
 
-export const toggleListItem = async (id: number, isChecked: boolean) => {
-    await pool.query(
-        'UPDATE ShoppingListItem SET isChecked = ? WHERE id = ?',
-        [isChecked, id]
-    );
+export const toggleListItem = async (id: number, isChecked: boolean, userId: string | null = null) => {
+    // Record WHO checked it (and clear the attribution on uncheck) so a shared
+    // list can show each member's avatar on the items they ticked.
+    if (isChecked) {
+        await pool.query(
+            'UPDATE ShoppingListItem SET isChecked = 1, checkedBy = ?, checkedAt = NOW() WHERE id = ?',
+            [userId, id]
+        );
+    } else {
+        await pool.query(
+            'UPDATE ShoppingListItem SET isChecked = 0, checkedBy = NULL, checkedAt = NULL WHERE id = ?',
+            [id]
+        );
+    }
 };
 
 export const deleteListItem = async (id: number) => {

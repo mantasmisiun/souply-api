@@ -16,10 +16,24 @@ export const addShoppingListMember = async (
     );
 };
 
+/**
+ * List membership is trip-aware: a user may read/add/toggle a list if they are
+ * an explicit ShoppingListMember (the list creator, or a legacy share-QR
+ * claimer) OR a member of the TRIP that owns the list. Deriving from trip
+ * membership is what keeps checkmarks in sync across everyone the trip was
+ * shared with — no per-list backfill on join, and it holds whether the list
+ * was created before or after a member joined. (The old share-QR flow was the
+ * ONLY writer of ShoppingListMember rows for non-owners; once it was removed,
+ * trip invitees had no membership at all without this join.)
+ */
 export const isShoppingListMember = async (listId: number, userId: string): Promise<boolean> => {
     const [rows]: any = await pool.query(
-        'SELECT 1 FROM ShoppingListMember WHERE listId = ? AND userId = ? LIMIT 1',
-        [listId, userId]
+        `SELECT 1 FROM ShoppingList sl
+           LEFT JOIN ShoppingListMember slm ON slm.listId = sl.id AND slm.userId = ?
+           LEFT JOIN TripMember tm ON tm.tripId = sl.tripId AND tm.userId = ?
+          WHERE sl.id = ? AND (slm.userId IS NOT NULL OR tm.userId IS NOT NULL)
+          LIMIT 1`,
+        [userId, userId, listId]
     );
     return rows.length > 0;
 };

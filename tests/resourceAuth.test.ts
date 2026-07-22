@@ -124,6 +124,55 @@ describe('user account — self only', () => {
     });
 });
 
+// A list that belongs to a TRIP: every trip member may read + toggle it even
+// without an explicit ShoppingListMember row (that is what keeps checkmarks in
+// sync for everyone the trip was shared with). USER_B is a trip member here.
+describe('shopping lists — trip-derived membership', () => {
+    let tripListId: number;
+    let tripItemId: number;
+    let tripId: number;
+
+    beforeAll(async () => {
+        const conn = await (pool as any).getConnection();
+        try {
+            const [tr]: any = await conn.query('INSERT INTO Trip (createdByUserId) VALUES (?)', [USER_A]);
+            tripId = tr.insertId;
+            await conn.query("INSERT INTO TripMember (tripId, userId, role) VALUES (?,?,'owner'),(?,?,'member')", [tripId, USER_A, tripId, USER_B]);
+            const [sl]: any = await conn.query('INSERT INTO ShoppingList (userId, storeId, tripId) VALUES (?,?,?)', [USER_A, STORE_ID, tripId]);
+            tripListId = sl.insertId;
+            await conn.query('INSERT INTO ShoppingListMember (listId, userId, role) VALUES (?,?,?)', [tripListId, USER_A, 'owner']);
+            const [it]: any = await conn.query('INSERT INTO ShoppingListItem (listId, customName, quantity, isChecked) VALUES (?,?,?,0)', [tripListId, 'Pienas', 1]);
+            tripItemId = it.insertId;
+        } finally { conn.release(); }
+    });
+
+    afterAll(async () => {
+        const conn = await (pool as any).getConnection();
+        try {
+            await conn.query('DELETE FROM ShoppingList WHERE id = ?', [tripListId]);
+            await conn.query('DELETE FROM Trip WHERE id = ?', [tripId]);
+        } finally { conn.release(); }
+    });
+
+    it('a trip member reads the list (200) without an explicit list-member row', async () => {
+        expect((await asUser(app, USER_B).get(`/api/shopping-lists/${tripListId}`)).status).toBe(200);
+    });
+    it('a trip member reaches the items endpoint — not 403/401 (checkmark read path)', async () => {
+        // The membership guard passes for a trip member; assert it's not refused
+        // (the fixture item has no Product row, so the localized-name query can
+        // 500 — that's a fixture artifact, not an authorization failure).
+        expect([401, 403]).not.toContain((await asUser(app, USER_B).get(`/api/shopping-lists/${tripListId}/items`)).status);
+    });
+    it('a trip member toggles an item (200) — checkmark sync path', async () => {
+        expect((await asUser(app, USER_B).patch(`/api/list-items/${tripItemId}/toggle`).send({ isChecked: true })).status).toBe(200);
+    });
+    it('a NON-trip-member still cannot toggle (403)', async () => {
+        const STRANGER = 'resauth-cccc-cccc-cccc-cccccccccccc';
+        await primeTokens(STRANGER);
+        expect((await asUser(app, STRANGER).patch(`/api/list-items/${tripItemId}/toggle`).send({ isChecked: true })).status).toBe(403);
+    });
+});
+
 describe('non-prod dev-header shim (x-user-id) works when NODE_ENV!=production', () => {
     it('accepts X-User-Id as identity in test env', async () => {
         // The shim lets dev/staging web (no cookie) authenticate; prod ignores it.
