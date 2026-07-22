@@ -77,6 +77,27 @@ describe('trip minting at persist time', () => {
         for (const r of rows) expect(r.tripId).toBe(tripId);
     });
 
+    it('DELETE /baskets/:id/shopping-lists reconciles the store selection (owner only)', async () => {
+        // A stranger cannot wipe the owner's lists.
+        const STRANGER = 'trplk-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+        await primeTokens(STRANGER);
+        expect((await asUser(app, STRANGER).delete(`/api/baskets/${basketId}/shopping-lists`)).status).toBe(403);
+        expect(await q('SELECT id FROM ShoppingList WHERE basketId = ?', [basketId])).toHaveLength(2);
+
+        // Owner replaces the selection: old lists gone, trip survives, re-create
+        // reattaches to the SAME trip (members/receipts preserved).
+        expect((await asUser(app, USER).delete(`/api/baskets/${basketId}/shopping-lists`)).status).toBe(204);
+        expect(await q('SELECT id FROM ShoppingList WHERE basketId = ?', [basketId])).toHaveLength(0);
+        expect(await q('SELECT id FROM Trip WHERE id = ?', [tripId])).toHaveLength(1);
+
+        const re = await asUser(app, USER).post('/api/shopping-lists').send({ storeId: STORE_A, basketId });
+        expect([200, 201]).toContain(re.status);
+        expect(re.body.tripId).toBe(tripId);
+        listA = re.body.id ?? re.body.listId;
+        const lb = await asUser(app, USER).post('/api/shopping-lists').send({ storeId: STORE_B, basketId });
+        expect([200, 201]).toContain(lb.status);
+    });
+
     it('GET /api/trips derives the stage and slot facts', async () => {
         const r = await asUser(app, USER).get('/api/trips');
         expect(r.status).toBe(200);

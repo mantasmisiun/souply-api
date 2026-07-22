@@ -4,6 +4,7 @@ import {
     fetchShoppingListsByUserId,
     fetchShoppingListById,
     removeShoppingList,
+    removeShoppingListsByBasket,
     changeShoppingListStatus,
     duplicateList,
     createListShareToken,
@@ -115,6 +116,10 @@ router.get('/shopping-lists/:id', requireUser, member, fetchShoppingListById);
  */
 // DELETE /api/shopping-lists/:id - Delete a shopping list by ID
 router.delete('/shopping-lists/:id', requireUser, requireListOwner('id'), removeShoppingList);
+
+// DELETE /api/baskets/:basketId/shopping-lists - remove all of a basket's lists
+// (owner-checked inside) before re-creating for a new store selection.
+router.delete('/baskets/:basketId/shopping-lists', requireUser, removeShoppingListsByBasket);
 
 router.patch('/shopping-lists/:id/status', requireUser, member, changeShoppingListStatus);
 

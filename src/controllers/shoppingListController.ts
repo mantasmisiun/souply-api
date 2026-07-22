@@ -6,6 +6,7 @@ import {
     getShoppingListById,
     getShoppingListsByUserId,
     deleteShoppingList,
+    deleteShoppingListsByBasketId,
     updateShoppingListStatus,
     updateShoppingListBasket,
     getShoppingListByBasketId,
@@ -280,6 +281,31 @@ export const linkReceiptToShoppingList = async (req: Request, res: Response, nex
     } catch (error) {
         next(error);
     }
+};
+
+/**
+ * DELETE /api/baskets/:basketId/shopping-lists — remove EVERY list for a basket
+ * (owner only). Called by the client just before re-creating lists for a new
+ * store selection, so the trip's tabs match the current picks instead of
+ * accumulating. The Trip survives (members/receipts kept); re-create reattaches.
+ */
+export const removeShoppingListsByBasket = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const basketId = Number(req.params.basketId);
+        if (isNaN(basketId)) { res.status(400).json({ error: 'Invalid basket ID' }); return; }
+        const userId = req.authUserId;
+        if (!userId) { res.status(401).json({ error: 'auth-required' }); return; }
+        const owner = await getBasketOwnerId(basketId);
+        if (owner !== null && owner !== userId) { res.status(403).json({ error: 'forbidden' }); return; }
+        await deleteShoppingListsByBasketId(basketId);
+        // The basket returns to 'compared' — its lists (the in-progress state)
+        // are gone; a re-create will move it forward again.
+        const basket = await getBasketById(basketId);
+        if (basket && basket.status === 'inProgress') {
+            await updateBasketStatus(basketId, 'compared');
+        }
+        res.status(204).send();
+    } catch (error) { next(error); }
 };
 
 export const removeShoppingList = async (req: Request, res: Response, next: NextFunction) => {

@@ -31,6 +31,19 @@ export const getShoppingListByBasketId = async (basketId: number): Promise<any |
     return rows[0] || null;
 };
 
+/**
+ * Delete ALL shopping lists for a basket (items + members cascade via FK).
+ * Used to REPLACE a basket's store selection: re-picking stores on the map
+ * must not accumulate stale per-store lists (which surface as extra tabs and
+ * carry over old check-off progress). The owning Trip is left intact — a later
+ * re-create reattaches to it via ensureTripForBasket. Returns rows deleted.
+ */
+export const deleteShoppingListsByBasketId = async (basketId: number, conn?: any): Promise<number> => {
+    const db = conn ?? pool;
+    const [res]: any = await db.query('DELETE FROM ShoppingList WHERE basketId = ?', [basketId]);
+    return res?.affectedRows ?? 0;
+};
+
 /** Find an existing list for this basket+store pair — used for split combo duplicate guard. */
 export const getShoppingListByBasketAndStore = async (basketId: number, storeId: number): Promise<any | null> => {
     const [rows]: any = await pool.query(
