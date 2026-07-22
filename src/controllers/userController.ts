@@ -149,6 +149,7 @@ export const fetchUserProfile = async (req: Request, res: Response, next: NextFu
             displayName: (user as any).displayName ?? null,
             username: (user as any).username ?? null,
             avatarUrl: await avatarSignedUrl((user as any).avatarUrl),
+            avatarColor: (user as any).avatarColor ?? null,
             // Aggregate template stats for the profile cards.
             templateCount: Number(agg.templateCount ?? 0),
             totalVisits: Number(agg.totalVisits ?? 0),
