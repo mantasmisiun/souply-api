@@ -167,9 +167,36 @@ describe('trip minting at persist time', () => {
         expect(r.body.totalSpent).toBeCloseTo(3.80); // 2×1.50 + 0.80
         expect(r.body.chainBreakdown).toHaveLength(1);
         expect(r.body.chainBreakdown[0].chainName).toBe('TripLink Chain');
+        // Promo captured: line b (1.20 → 0.80) is one discounted item, 0.40 saved.
+        expect(r.body.promoItemCount).toBe(1);
+        expect(r.body.promoSavings).toBeCloseTo(0.40);
+        // Member breakdown: every member (here just USER), carrying name+colour.
         expect(r.body.memberSpend).toHaveLength(1);
         expect(r.body.memberSpend[0].userId).toBe(USER);
         expect(r.body.memberSpend[0].receiptCount).toBe(1);
+        expect(r.body.memberSpend[0]).toHaveProperty('name');
+        expect(r.body.memberSpend[0]).toHaveProperty('avatarColor');
+    });
+
+    it('trip receipts carry a promo-adjusted lineTotal (sums to the hero)', async () => {
+        const r = await asUser(app, USER).get(`/api/trips/${tripId}/receipts`);
+        expect(r.status).toBe(200);
+        const items = r.body[0].items as any[];
+        const a = items.find(i => i.lineIdx === 0); // 1.50 × 2, no promo
+        const b = items.find(i => i.lineIdx === 1); // 0.80 promo × 1
+        expect(Number(a.lineTotal)).toBeCloseTo(3.00);
+        expect(Number(b.lineTotal)).toBeCloseTo(0.80);
+        const sum = items.reduce((s, i) => s + Number(i.lineTotal ?? 0), 0);
+        expect(sum).toBeCloseTo(3.80); // == stats.totalSpent
+    });
+
+    it('per-trip spend endpoint buckets the trip into its anchor month', async () => {
+        const r = await asUser(app, USER).get('/api/trips/spend');
+        expect(r.status).toBe(200);
+        const entry = (r.body as any[]).find(e => e.tripId === tripId);
+        expect(entry).toBeTruthy();
+        expect(entry.totalSpent).toBeCloseTo(3.80);
+        expect(entry.anchorDate).toBeTruthy();
     });
 
     it('planning score: coverage/discipline/precision + manual link/unlink', async () => {
@@ -183,7 +210,7 @@ describe('trip minting at persist time', () => {
         const [receipt] = await q('SELECT id FROM Receipt WHERE userId = ? AND tripId = ?', [USER, tripId]);
         // Re-point the stats-test items: line a → product 501, line b stays unmatched.
         await q("UPDATE ReceiptItem SET matchedSpId = 95011, price = 1.50, promoPrice = NULL, quantity = 2 WHERE receiptId = ? AND lineIdx = 0", [receipt.id]);
-        const li1 = await q("INSERT INTO ShoppingListItem (listId, productId, quantity) VALUES (?, 501, 2)", [listA]);
+        const li1 = await q("INSERT INTO ShoppingListItem (listId, productId, quantity, price) VALUES (?, 501, 2, 2.80)", [listA]);
         const li2 = await q("INSERT INTO ShoppingListItem (listId, productId, quantity) VALUES (?, 502, 1)", [listA]);
 
         let r = await asUser(app, USER).get(`/api/trips/${tripId}/score`);
@@ -192,6 +219,9 @@ describe('trip minting at persist time', () => {
         expect(r.body.discipline).toBeCloseTo(3.0 / 3.8, 2);
         expect(r.body.precision).toBeCloseTo(1);
         expect(r.body.pairs).toHaveLength(1);
+        // Prediction accuracy: matched item's list price (2.80) vs paid (2×1.50).
+        expect(r.body.predictedMatchedTotal).toBeCloseTo(2.80);
+        expect(r.body.actualMatchedTotal).toBeCloseTo(3.00);
         expect(r.body.unmatchedListItems).toHaveLength(1);
         expect(r.body.unmatchedReceiptItems).toHaveLength(1);
         const expected = Math.round(100 * (0.4 * 0.5 + 0.4 * (3.0 / 3.8) + 0.2 * 1));

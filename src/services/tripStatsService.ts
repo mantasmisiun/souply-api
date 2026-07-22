@@ -11,6 +11,69 @@ import { tripSavingsDeltas, type TripSavingsDeltas } from './comparisonSnapshotS
  * persisted-comparison slice later in Phase 5.
  */
 
+export interface TripSpendEntry {
+    tripId: number;
+    name: string | null;
+    anchorDate: string;
+    totalSpent: number;
+}
+
+/** Local YYYY-MM bucket for a trip's anchor date (matches the monthly-stats and
+ *  Shopping-card convention — local calendar month). */
+const monthKey = (d: any): string => {
+    const dt = new Date(d);
+    return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}`;
+};
+
+/**
+ * Per-TRIP spend for every non-archived trip the user belongs to whose ANCHOR
+ * date falls in the given month (default: current). Feeds the "Kelionės" donut
+ * (this trip preselected vs the month's other trips). The trip is the unit —
+ * assigned to one month by anchorDate — so receipts spanning weeks/months never
+ * split a trip. Same itemTotal math as getTripStats.
+ */
+export const getMonthlyTripSpend = async (userId: string, month?: string): Promise<TripSpendEntry[]> => {
+    const target = month && /^\d{4}-\d{2}$/.test(month) ? month : monthKey(new Date());
+    const [trips]: any = await pool.query(
+        `SELECT t.id AS tripId, t.name,
+                COALESCE(
+                  (SELECT MAX(r.receiptDate) FROM Receipt r WHERE r.tripId = t.id),
+                  (SELECT MAX(sl.createdAt)   FROM ShoppingList sl WHERE sl.tripId = t.id),
+                  t.createdAt
+                ) AS anchorDate
+           FROM Trip t
+           JOIN TripMember tm ON tm.tripId = t.id
+          WHERE tm.userId = ? AND t.archivedAt IS NULL`,
+        [userId],
+    );
+    const inMonth = (trips as any[]).filter(t => monthKey(t.anchorDate) === target);
+    if (inMonth.length === 0) return [];
+
+    const ids = inMonth.map(t => Number(t.tripId));
+    const [items]: any = await pool.query(
+        `SELECT r.tripId, ri.price, ri.promoPrice, ri.quantity
+           FROM ReceiptItem ri JOIN Receipt r ON r.id = ri.receiptId
+          WHERE r.tripId IN (?)`,
+        [ids],
+    );
+    const spendByTrip = new Map<number, number>();
+    for (const it of items as any[]) {
+        const unit = (it.promoPrice != null && parseFloat(it.promoPrice) > 0)
+            ? parseFloat(it.promoPrice) : parseFloat(it.price) || 0;
+        const total = unit * (parseFloat(it.quantity) || 1);
+        if (total <= 0) continue;
+        spendByTrip.set(Number(it.tripId), (spendByTrip.get(Number(it.tripId)) ?? 0) + total);
+    }
+    return inMonth
+        .map(t => ({
+            tripId: Number(t.tripId),
+            name: t.name ?? null,
+            anchorDate: String(t.anchorDate),
+            totalSpent: Math.round((spendByTrip.get(Number(t.tripId)) ?? 0) * 100) / 100,
+        }))
+        .sort((a, b) => b.totalSpent - a.totalSpent);
+};
+
 export interface TripStats {
     tripId: number;
     /** Frozen comparable-store deltas (null until snapshots exist). */
@@ -19,9 +82,11 @@ export interface TripStats {
     receiptCount: number;
     totalSpent: number;
     savings: number;
+    promoItemCount: number;
+    promoSavings: number;
     categoryBreakdown: { categoryName: string; total: number }[];
     chainBreakdown: { chainName: string; total: number }[];
-    memberSpend: { userId: string; total: number; receiptCount: number }[];
+    memberSpend: { userId: string; name: string | null; avatarColor: string | null; total: number; receiptCount: number }[];
 }
 
 export const getTripStats = async (tripId: number): Promise<TripStats> => {
@@ -35,6 +100,7 @@ export const getTripStats = async (tripId: number): Promise<TripStats> => {
     );
     const empty: TripStats = {
         tripId, receiptCount: 0, totalSpent: 0, savings: 0,
+        promoItemCount: 0, promoSavings: 0,
         savedVsMedian: null, couldHaveSaved: null,
         categoryBreakdown: [], chainBreakdown: [], memberSpend: [],
     };
@@ -80,18 +146,22 @@ export const getTripStats = async (tripId: number): Promise<TripStats> => {
     const round2 = (n: number) => Math.round(n * 100) / 100;
 
     let totalSpent = 0;
+    let promoItemCount = 0;
+    let promoSavings = 0;
     const catMap: Record<string, number> = {};
     const chainMap: Record<string, number> = {};
     const memberMap: Record<string, { total: number; receipts: Set<number> }> = {};
 
     for (const item of itemRows) {
-        const unitPrice = (item.promoPrice != null && parseFloat(item.promoPrice) > 0)
-            ? parseFloat(item.promoPrice)
-            : parseFloat(item.price) || 0;
+        const regular = parseFloat(item.price) || 0;
+        const promo = item.promoPrice != null ? parseFloat(item.promoPrice) : 0;
+        const unitPrice = promo > 0 ? promo : regular;
         const qty = parseFloat(item.quantity) || 1;
         const itemTotal = unitPrice * qty;
         if (itemTotal <= 0) continue;
         totalSpent += itemTotal;
+        // Discount captured: a promo below the regular price.
+        if (promo > 0 && regular > promo) { promoItemCount += 1; promoSavings += (regular - promo) * qty; }
 
         const receipt = receiptById.get(Number(item.receiptId));
         const chain = receipt?.chainName ?? 'Kita';
@@ -112,6 +182,34 @@ export const getTripStats = async (tripId: number): Promise<TripStats> => {
         quantity: parseFloat(i.quantity) || 1,
     })));
 
+    // Member breakdown across EVERY trip member (0 for non-uploaders), with the
+    // name + avatar colour for the per-user card. Two queries (no User JOIN) to
+    // dodge the CI collation mismatch.
+    const [memberRows]: any = await pool.query('SELECT userId FROM TripMember WHERE tripId = ?', [tripId]);
+    const memberIds = [...new Set((memberRows as any[]).map(m => m.userId))];
+    // Include any uploader who paid but isn't a formal member (edge case).
+    for (const uid of Object.keys(memberMap)) if (uid !== 'unknown' && !memberIds.includes(uid)) memberIds.push(uid);
+    const userById = new Map<string, { label: string | null; avatarColor: string | null }>();
+    if (memberIds.length) {
+        const [users]: any = await pool.query(
+            'SELECT id, COALESCE(displayName, firstName, username) AS label, avatarColor FROM User WHERE id IN (?)',
+            [memberIds]);
+        for (const u of users) userById.set(u.id, { label: u.label ?? null, avatarColor: u.avatarColor ?? null });
+    }
+    const memberSpend = memberIds
+        .map(userId => {
+            const m = memberMap[userId];
+            const u = userById.get(userId);
+            return {
+                userId,
+                name: u?.label ?? null,
+                avatarColor: u?.avatarColor ?? null,
+                total: round2(m?.total ?? 0),
+                receiptCount: m?.receipts.size ?? 0,
+            };
+        })
+        .sort((a, b) => b.total - a.total);
+
     return {
         tripId,
         savedVsMedian: deltas.savedVsMedian,
@@ -119,14 +217,14 @@ export const getTripStats = async (tripId: number): Promise<TripStats> => {
         receiptCount: receipts.length,
         totalSpent: round2(totalSpent),
         savings: round2(savings),
+        promoItemCount,
+        promoSavings: round2(promoSavings),
         categoryBreakdown: Object.entries(catMap)
             .map(([categoryName, total]) => ({ categoryName, total: round2(total) }))
             .sort((a, b) => b.total - a.total),
         chainBreakdown: Object.entries(chainMap)
             .map(([chainName, total]) => ({ chainName, total: round2(total) }))
             .sort((a, b) => b.total - a.total),
-        memberSpend: Object.entries(memberMap)
-            .map(([userId, v]) => ({ userId, total: round2(v.total), receiptCount: v.receipts.size }))
-            .sort((a, b) => b.total - a.total),
+        memberSpend,
     };
 };

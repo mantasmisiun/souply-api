@@ -2,7 +2,7 @@ import type { Request, Response, NextFunction } from 'express';
 import pool from '../config/db.js';
 import { listTripsForUser } from '../services/tripListService.js';
 import { isTripMember } from '../models/tripModel.js';
-import { getTripStats } from '../services/tripStatsService.js';
+import { getTripStats, getMonthlyTripSpend } from '../services/tripStatsService.js';
 import { computePlanningScore, monthlyPlanningScores } from '../services/planningScoreService.js';
 
 export const listTrips = async (req: Request, res: Response, next: NextFunction) => {
@@ -107,6 +107,15 @@ export const fetchMonthlyPlanningScore = async (req: Request, res: Response, nex
     } catch (error) { next(error); }
 };
 
+/** GET /api/trips/spend?month=YYYY-MM — per-trip spend for the month (default
+ *  current), for the "Kelionės" spend donut. Own trips only (TripMember). */
+export const fetchMonthlyTripSpend = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const month = typeof req.query.month === 'string' ? req.query.month : undefined;
+        res.json(await getMonthlyTripSpend(req.authUserId!, month));
+    } catch (error) { next(error); }
+};
+
 
 /**
  * Receipts attached to a trip, with their parsed items — the Receipts stage
@@ -131,7 +140,9 @@ export const fetchTripReceipts = async (req: Request, res: Response, next: NextF
         const receipts = [] as any[];
         for (const r of rows as any[]) {
             const [items] = await pool.query(
-                `SELECT lineIdx, name, price, quantity, unit, matchedName, storeProductImageUrl
+                `SELECT lineIdx, name, price, quantity, unit, matchedName, storeProductImageUrl,
+                        ROUND((CASE WHEN promoPrice IS NOT NULL AND promoPrice > 0 THEN promoPrice ELSE price END)
+                              * COALESCE(quantity, 1), 2) AS lineTotal
                    FROM ReceiptItem WHERE receiptId = ? ORDER BY lineIdx ASC`,
                 [r.id]) as any;
             receipts.push({ ...r, items });

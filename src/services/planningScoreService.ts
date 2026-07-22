@@ -31,6 +31,11 @@ export interface PlanningPair {
     productName: string | null;
     listQty: number;
     receiptQty: number;
+    /** Predicted (list) vs actual (receipt) TOTAL for this matched item — feeds
+     *  the prediction-accuracy metric. listPrice is null when the list item has
+     *  no calculated price. */
+    listPrice: number | null;
+    receiptPrice: number;
 }
 
 export interface PlanningScore {
@@ -44,6 +49,11 @@ export interface PlanningScore {
     scoreExempt: boolean;
     listItemCount: number;
     matchedListItemCount: number;
+    /** Prediction accuracy basis: summed predicted (list) vs actual (receipt)
+     *  totals over matched items THAT HAD a list price. null = no priced matches
+     *  (or ad-hoc) → the client hides the prediction card. */
+    predictedMatchedTotal: number | null;
+    actualMatchedTotal: number | null;
     pairs: PlanningPair[];
     /** Unmatched list items (id + name) — the manual-link UI's left column. */
     unmatchedListItems: { listItemId: number; name: string | null; productId: number | null }[];
@@ -57,6 +67,7 @@ export const computePlanningScore = async (tripId: number): Promise<PlanningScor
         tripId, score: null, coverage: 0, discipline: 0, precision: 0,
         isAdHoc: !!trip?.isAdHoc, scoreExempt: !!trip?.scoreExempt,
         listItemCount: 0, matchedListItemCount: 0,
+        predictedMatchedTotal: null, actualMatchedTotal: null,
         pairs: [], unmatchedListItems: [], unmatchedReceiptItems: [],
     };
     if (!trip || trip.scoreExempt) return base;
@@ -64,7 +75,7 @@ export const computePlanningScore = async (tripId: number): Promise<PlanningScor
 
     // List items across the trip's lists, with resolved productId + name.
     const [listItems]: any = await pool.query(
-        `SELECT sli.id, sli.quantity, sli.customName,
+        `SELECT sli.id, sli.quantity, sli.customName, sli.price,
                 COALESCE(sli.productId, sp.productId) AS productId,
                 p.name AS productName
            FROM ShoppingListItem sli
@@ -118,6 +129,7 @@ export const computePlanningScore = async (tripId: number): Promise<PlanningScor
             listItemId: li.id, receiptItemId: ri.id, source: 'manual',
             productName: li.productName ?? li.customName ?? ri.name,
             listQty: parseFloat(li.quantity) || 1, receiptQty: parseFloat(ri.quantity) || 1,
+            listPrice: li.price != null ? parseFloat(li.price) : null, receiptPrice: spend(ri),
         });
     }
     for (const li of listItems) {
@@ -131,6 +143,7 @@ export const computePlanningScore = async (tripId: number): Promise<PlanningScor
             listItemId: li.id, receiptItemId: ri.id, source: 'auto',
             productName: li.productName ?? li.customName ?? ri.name,
             listQty: parseFloat(li.quantity) || 1, receiptQty: parseFloat(ri.quantity) || 1,
+            listPrice: li.price != null ? parseFloat(li.price) : null, receiptPrice: spend(ri),
         });
     }
 
@@ -153,6 +166,13 @@ export const computePlanningScore = async (tripId: number): Promise<PlanningScor
 
     base.matchedListItemCount = pairs.length;
     base.pairs = pairs;
+    // Prediction accuracy: predicted (list) vs actual (receipt) over matched
+    // items that carried a list price. null when none (e.g. list never priced).
+    const priced = pairs.filter(p => p.listPrice != null && p.listPrice > 0);
+    if (priced.length > 0) {
+        base.predictedMatchedTotal = Math.round(priced.reduce((s, p) => s + (p.listPrice ?? 0), 0) * 100) / 100;
+        base.actualMatchedTotal = Math.round(priced.reduce((s, p) => s + p.receiptPrice, 0) * 100) / 100;
+    }
     base.unmatchedListItems = listItems
         .filter((l: any) => !usedList.has(l.id))
         .map((l: any) => ({ listItemId: l.id, name: l.productName ?? l.customName ?? null, productId: l.productId ?? null }));
