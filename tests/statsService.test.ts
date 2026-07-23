@@ -346,9 +346,10 @@ describe('getUserStats', () => {
         expect(maxima.total).toBeCloseTo(2.00);
     });
 
-    it('excludes L1 categories (categoryName NULL) from categoryBreakdown', async () => {
-        // sp10 maps to L1 (categoryName = null) — should not appear in categoryBreakdown
-        // sp11 maps to L2 (categoryName = 'Pienas') — should appear
+    it('buckets uncategorised (categoryName NULL) into Nepriskirta, not dropped', async () => {
+        // sp10 maps to L1 (categoryName = null) — must NOT be dropped: it lands in
+        // the "Nepriskirta" bucket so the donut total reconciles with the spend.
+        // sp11 maps to L2 (categoryName = 'Pienas').
         const parsedData = {
             products: [
                 { price: '5.00', quantity: '1', storeProductId: 10 },
@@ -358,15 +359,20 @@ describe('getUserStats', () => {
         setupPoolWithSp(
             [{ receiptDate: '2026-05-01', parsedData, chainName: 'Maxima' }],
             [
-                { spId: 10, productId: 100, categoryName: null },   // L1 → excluded
+                { spId: 10, productId: 100, categoryName: null },   // L1 → Nepriskirta
                 { spId: 11, productId: 101, categoryName: 'Pienas' }, // L2 → included
             ],
             [],
         );
 
         const result = await getUserStats('user1');
-        expect(result.categoryBreakdown).toHaveLength(1);
-        expect(result.categoryBreakdown[0].categoryName).toBe('Pienas');
+        expect(result.categoryBreakdown).toHaveLength(2);
+        const byName = Object.fromEntries(result.categoryBreakdown.map((c: any) => [c.categoryName, c.total]));
+        expect(byName['Pienas']).toBeCloseTo(2.00);
+        expect(byName['Nepriskirta']).toBeCloseTo(5.00);
+        // The breakdown now sums to the full spend (nothing dropped).
+        const sum = result.categoryBreakdown.reduce((s: number, c: any) => s + c.total, 0);
+        expect(sum).toBeCloseTo(7.00);
     });
 
     it('issues at most 4 pool queries for receipts with matched SPs', async () => {

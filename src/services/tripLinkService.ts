@@ -89,12 +89,46 @@ export const ensureTripForReceipt = async (
 };
 
 /**
+ * "Receipt is now visible to the trip" notification — fired on PUBLISH, not on
+ * link. Notifies every trip member EXCEPT the uploader, deep-linking to the
+ * Kvitai screen (/trip/receipts/:tripId). Title carries the uploader's display
+ * name ("<name> įkėlė kvitą"); body is the store name when handy. Fire-and-
+ * forget at the call site; each notifyUser writes the inbox row + Expo push.
+ */
+export const notifyTripReceiptPublished = async (receiptId: number): Promise<void> => {
+    const [rows]: any = await pool.query(
+        `SELECT r.tripId, COALESCE(r.uploaderUserId, r.userId) AS uploaderId, s.name AS storeName
+           FROM Receipt r LEFT JOIN Store s ON s.id = r.storeId
+          WHERE r.id = ?`,
+        [receiptId],
+    );
+    const receipt = rows[0];
+    if (!receipt || receipt.tripId == null) return;
+    const tripId = Number(receipt.tripId);
+    const uploaderId: string | null = receipt.uploaderId ?? null;
+    let uploaderName: string | null = null;
+    if (uploaderId) {
+        const [[u]]: any = await pool.query(
+            'SELECT COALESCE(displayName, firstName, username) AS label FROM User WHERE id = ?', [uploaderId]);
+        uploaderName = (u?.label ?? null) as string | null;
+    }
+    const title = uploaderName ? `${uploaderName} įkėlė kvitą` : 'Naujas kvitas kelionėje';
+    const body = receipt.storeName ? String(receipt.storeName) : 'Apsipirkimo kvitas jau įkeltas.';
+    const members = await getTripMemberIds(tripId);
+    for (const m of members) {
+        if (uploaderId && m === uploaderId) continue;
+        await notifyUser(m, 'trip_receipt_in', { title, body, route: `/trip/receipts/${tripId}` });
+    }
+};
+
+/**
  * Re-point a receipt at ITS LIST's trip (the upload → link flow: the bare
  * OCR create minted an ad-hoc trip; the link endpoint moves the receipt to
  * the list's trip and garbage-collects the now-empty ad-hoc one).
  */
 export const relinkReceiptToListTrip = async (receiptId: number, listId: number): Promise<void> => {
-    const [receipts]: any = await pool.query('SELECT tripId, userId FROM Receipt WHERE id = ?', [receiptId]);
+    const [receipts]: any = await pool.query(
+        'SELECT tripId, userId, mandatorySwipesRequired, mandatorySwipesCompleted FROM Receipt WHERE id = ?', [receiptId]);
     const receipt = receipts[0];
     if (!receipt) return;
     const [lists]: any = await pool.query('SELECT id, tripId, basketId, userId FROM ShoppingList WHERE id = ?', [listId]);
@@ -104,20 +138,15 @@ export const relinkReceiptToListTrip = async (receiptId: number, listId: number)
     const oldTrip = receipt.tripId;
     if (oldTrip === listTrip) return;
     await pool.query('UPDATE Receipt SET tripId = ? WHERE id = ?', [listTrip, receiptId]);
-    // Trip members (minus the uploader) hear the slot close — fire-and-forget.
-    void (async () => {
-        try {
-            const members = await getTripMemberIds(listTrip);
-            for (const m of members) {
-                if (m === receipt.userId) continue;
-                await notifyUser(m, 'trip_receipt_in', {
-                    title: 'Kvitas įkeltas',
-                    body: 'Apsipirkimo kvitas jau įkeltas.',
-                    route: `/trip/${listTrip}`,
-                });
-            }
-        } catch {}
-    })();
+    // NO-QUEUE case only: a receipt with mandatorySwipesRequired = 0 is PUBLISHED
+    // the moment it lands on the trip, so notify members here. Receipts that still
+    // have a mandatory queue stay pending — their notification fires on swipe
+    // completion (see markSwipesDone), so we never double-notify.
+    const req = Number(receipt.mandatorySwipesRequired ?? 0);
+    const comp = Number(receipt.mandatorySwipesCompleted ?? 0);
+    if (req === 0 || comp >= req) {
+        void notifyTripReceiptPublished(receiptId).catch(() => {});
+    }
     if (oldTrip != null) {
         // GC the churn ad-hoc trip if nothing else references it.
         const [[t]]: any = await pool.query('SELECT isAdHoc FROM Trip WHERE id = ?', [oldTrip]);

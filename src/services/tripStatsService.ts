@@ -1,5 +1,5 @@
 import pool from '../config/db.js';
-import { computeReceiptSavings } from './statsService.js';
+import { computeReceiptSavings, UNCATEGORISED_CAT } from './statsService.js';
 import { tripSavingsDeltas, type TripSavingsDeltas } from './comparisonSnapshotService.js';
 
 /**
@@ -37,7 +37,8 @@ export const getMonthlyTripSpend = async (userId: string, month?: string): Promi
     const [trips]: any = await pool.query(
         `SELECT t.id AS tripId, t.name,
                 COALESCE(
-                  (SELECT MAX(r.receiptDate) FROM Receipt r WHERE r.tripId = t.id),
+                  (SELECT MAX(r.receiptDate) FROM Receipt r WHERE r.tripId = t.id AND r.userDeletedAt IS NULL
+                     AND (r.mandatorySwipesRequired = 0 OR r.mandatorySwipesCompleted >= r.mandatorySwipesRequired)),
                   (SELECT MAX(sl.createdAt)   FROM ShoppingList sl WHERE sl.tripId = t.id),
                   t.createdAt
                 ) AS anchorDate
@@ -53,7 +54,8 @@ export const getMonthlyTripSpend = async (userId: string, month?: string): Promi
     const [items]: any = await pool.query(
         `SELECT r.tripId, ri.price, ri.promoPrice, ri.quantity
            FROM ReceiptItem ri JOIN Receipt r ON r.id = ri.receiptId
-          WHERE r.tripId IN (?)`,
+          WHERE r.tripId IN (?) AND r.userDeletedAt IS NULL
+            AND (r.mandatorySwipesRequired = 0 OR r.mandatorySwipesCompleted >= r.mandatorySwipesRequired)`,
         [ids],
     );
     const spendByTrip = new Map<number, number>();
@@ -65,6 +67,9 @@ export const getMonthlyTripSpend = async (userId: string, month?: string): Promi
         spendByTrip.set(Number(it.tripId), (spendByTrip.get(Number(it.tripId)) ?? 0) + total);
     }
     return inMonth
+        // Finished trips only — a shop with no uploaded (published) receipt has no
+        // spend and shouldn't clutter the "Apsipirkimai" donut as a €0 slice.
+        .filter(t => spendByTrip.has(Number(t.tripId)))
         .map(t => ({
             tripId: Number(t.tripId),
             name: t.name ?? null,
@@ -95,7 +100,9 @@ export const getTripStats = async (tripId: number): Promise<TripStats> => {
            FROM Receipt r
            LEFT JOIN Store s ON s.id = r.storeId
            LEFT JOIN StoreChain sc ON sc.id = s.chainId
-          WHERE r.tripId = ?`,
+          WHERE r.tripId = ?
+            AND r.userDeletedAt IS NULL
+            AND (r.mandatorySwipesRequired = 0 OR r.mandatorySwipesCompleted >= r.mandatorySwipesRequired)`,
         [tripId],
     );
     const empty: TripStats = {
@@ -172,8 +179,11 @@ export const getTripStats = async (tripId: number): Promise<TripStats> => {
         m.total += itemTotal;
         m.receipts.add(Number(item.receiptId));
 
-        const cat = spCategory.get(Number(item.storeProductId));
-        if (cat) catMap[cat] = (catMap[cat] ?? 0) + itemTotal;
+        // Items whose SP has no resolved L2 category (uncategorised / unmatched /
+        // L1) must NOT be dropped — bucket them under the shared "Nepriskirta"
+        // label so the donut's total reconciles with the real spend.
+        const cat = spCategory.get(Number(item.storeProductId)) || UNCATEGORISED_CAT;
+        catMap[cat] = (catMap[cat] ?? 0) + itemTotal;
     }
 
     const savings = await computeReceiptSavings(itemRows.map((i: any) => ({

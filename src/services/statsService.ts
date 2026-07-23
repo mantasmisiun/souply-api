@@ -87,6 +87,11 @@ export const comboDiscountOf = (parsedData: any, cap = Infinity): number => {
     return Math.round(Math.min(v, cap) * 100) / 100;
 };
 
+/** Donut label for spend with no resolved L2 category (uncategorised / unmatched
+ *  / un-rescued Nepriskirta). Shown as its own slice so the donut total matches
+ *  the real spend; small amounts fold into "Kitos" like any other category. */
+export const UNCATEGORISED_CAT = 'Nepriskirta';
+
 /**
  * Fetches the average latest market price for each matched receipt item,
  * then delegates to the pure computeSavingsFromPrices function.
@@ -304,12 +309,14 @@ export const getUserStats = async (userId: string, locale: Locale = 'lt') => {
                     const rescued = pid != null ? rescueByProduct.get(pid)?.l2Name : undefined;
                     if (rescued) catName = rescued;
                 }
-                if (catName) {
-                    categoryMap[catName] = (categoryMap[catName] ?? 0) + itemTotal;
-                    if (month) {
-                        const cm = (categoryMonthMap[month] ??= {});
-                        cm[catName] = (cm[catName] ?? 0) + itemTotal;
-                    }
+                // No catalog L2 and no personal rescue → the Nepriskirta bucket,
+                // NOT dropped (else the donut total under-counts the real spend;
+                // small amounts still fold into "Kitos" downstream).
+                const catForDonut = catName || UNCATEGORISED_CAT;
+                categoryMap[catForDonut] = (categoryMap[catForDonut] ?? 0) + itemTotal;
+                if (month) {
+                    const cm = (categoryMonthMap[month] ??= {});
+                    cm[catForDonut] = (cm[catForDonut] ?? 0) + itemTotal;
                 }
                 if (month) {
                     monthMap[month] = (monthMap[month] ?? 0) + itemTotal;

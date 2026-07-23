@@ -31,6 +31,9 @@ export interface TripMemberPreview { initial: string; color: string | null; }
 
 export interface TripSummary {
     id: number;
+    /** Trip owner/creator user id — the client uses it to decide who may
+     *  moderate (detach any member's receipt). Sourced from Trip.createdByUserId. */
+    ownerUserId: string;
     name: string | null;
     isAdHoc: boolean;
     scoreExempt: boolean;
@@ -113,12 +116,14 @@ export const listTripsForUser = async (userId: string, locale: Locale = 'lt', li
                 sc.name AS chainName,
                 (SELECT COUNT(*) FROM ShoppingListItem sli WHERE sli.listId = sl.id) AS itemCount,
                 (SELECT COUNT(*) FROM ShoppingListItem sli WHERE sli.listId = sl.id AND sli.isChecked = 1) AS checkedCount,
-                (SELECT COUNT(*) FROM Receipt r WHERE r.shoppingListId = sl.id) AS receiptCount
+                (SELECT COUNT(*) FROM Receipt r WHERE r.shoppingListId = sl.id AND r.userDeletedAt IS NULL
+                    AND (COALESCE(r.uploaderUserId, r.userId) = ?
+                         OR r.mandatorySwipesRequired = 0 OR r.mandatorySwipesCompleted >= r.mandatorySwipesRequired)) AS receiptCount
            FROM ShoppingList sl
            LEFT JOIN Store s ON s.id = sl.storeId
            LEFT JOIN StoreChain sc ON sc.id = s.chainId
           WHERE sl.tripId IN (?)`,
-        [ids]);
+        [userId, ids]);
     const listsByTrip = new Map<number, any[]>();
     for (const l of lists) {
         const arr = listsByTrip.get(l.tripId) ?? [];
@@ -128,8 +133,11 @@ export const listTripsForUser = async (userId: string, locale: Locale = 'lt', li
 
     const [receipts]: any = await pool.query(
         `SELECT tripId, COUNT(*) AS n, MAX(receiptDate) AS lastDate
-           FROM Receipt WHERE tripId IN (?) GROUP BY tripId`,
-        [ids]);
+           FROM Receipt WHERE tripId IN (?) AND userDeletedAt IS NULL
+             AND (COALESCE(uploaderUserId, userId) = ?
+                  OR mandatorySwipesRequired = 0 OR mandatorySwipesCompleted >= mandatorySwipesRequired)
+          GROUP BY tripId`,
+        [ids, userId]);
     const receiptAggByTrip = new Map<number, any>(receipts.map((r: any) => [r.tripId, r]));
 
     return trips.map((t: any): TripSummary => {
@@ -170,6 +178,7 @@ export const listTripsForUser = async (userId: string, locale: Locale = 'lt', li
 
         return {
             id: t.id,
+            ownerUserId: t.createdByUserId,
             name: t.name ?? null,
             isAdHoc: !!t.isAdHoc,
             scoreExempt: !!t.scoreExempt,

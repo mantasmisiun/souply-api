@@ -199,11 +199,13 @@ describe('trip minting at persist time', () => {
         expect(entry.anchorDate).toBeTruthy();
     });
 
-    it('planning score: coverage/discipline/precision + manual link/unlink', async () => {
-        // Plan: listA gets TWO items (products 501, 502); the receipt (already
-        // in the trip, from the stats test) carries product 501 at 3.00 and an
-        // unmatched line at 0.80. Auto pair on 501 → coverage 0.5,
-        // discipline 3.00/3.80, precision 1.
+    it('planning score: any-match coverage/discipline + storeChoice renorm + manual link/unlink', async () => {
+        // Plan: listA gets TWO items (products 501, 502, both category 9970);
+        // the receipt (already in the trip, from the stats test) carries product
+        // 501 at 3.00 and an unmatched impulse line at 0.80. ANY-MATCH: both list
+        // items share a kind (category 9970 / "score" token) with the single
+        // receipt line → coverage 1.0; on-plan spend 3.00/3.80 → discipline;
+        // no comparison snapshot → storeChoice null → renorm over the two.
         await q("INSERT INTO Category (id, name) VALUES (9970, 'Score Cat') ON DUPLICATE KEY UPDATE name=VALUES(name)");
         await q("INSERT INTO Product (id, name, categoryId) VALUES (501,'Score Milk', 9970), (502,'Score Bread', 9970) ON DUPLICATE KEY UPDATE name=VALUES(name)");
         await q("INSERT INTO StoreProduct (id, chainId, productId, storeProductName) VALUES (95011, ?, 501, 'Score Milk SP') ON DUPLICATE KEY UPDATE productId=VALUES(productId)", [CHAIN_ID]);
@@ -215,9 +217,13 @@ describe('trip minting at persist time', () => {
 
         let r = await asUser(app, USER).get(`/api/trips/${tripId}/score`);
         expect(r.status).toBe(200);
-        expect(r.body.coverage).toBeCloseTo(0.5);
+        expect(r.body.coverage).toBeCloseTo(1.0);
         expect(r.body.discipline).toBeCloseTo(3.0 / 3.8, 2);
-        expect(r.body.precision).toBeCloseTo(1);
+        expect(r.body).not.toHaveProperty('precision'); // dropped from the model
+        expect(r.body.storeChoice).toBeNull();          // no comparison snapshot
+        expect(r.body.storeHeadroomEur).toBeNull();
+        expect(r.body.impulseEur).toBeCloseTo(0.80);    // the unmatched 0.80 line
+        expect(r.body.hasList).toBe(true);
         expect(r.body.pairs).toHaveLength(1);
         // Prediction accuracy: matched item's list price (2.80) vs paid (2×1.50).
         expect(r.body.predictedMatchedTotal).toBeCloseTo(2.80);
@@ -227,17 +233,18 @@ describe('trip minting at persist time', () => {
         expect(typeof r.body.forgottenCount).toBe('number');
         expect(r.body.unmatchedListItems).toHaveLength(1);
         expect(r.body.unmatchedReceiptItems).toHaveLength(1);
-        const expected = Math.round(100 * (0.4 * 0.5 + 0.4 * (3.0 / 3.8) + 0.2 * 1));
+        // storeChoice null → renormalized over coverage + discipline (0.5 / 0.5).
+        const expected = Math.round(100 * (1.0 + (3.0 / 3.8)) / 2);
         expect(r.body.score).toBe(expected);
 
-        // MANUAL link of the leftover pair (bread ↔ the 0.80 line, both sides
-        // category-less → plausibility passes) lifts coverage to ~0.95.
+        // MANUAL link of the leftover pair (bread ↔ the 0.80 line) feeds only the
+        // manual-link UI (pairs). Any-match coverage is already 1.0 and unmoved.
         const link = await asUser(app, USER).post(`/api/trips/${tripId}/line-links`).send({
             listItemId: li2.insertId, receiptItemId: r.body.unmatchedReceiptItems[0].receiptItemId, action: 'link',
         });
         expect(link.status).toBe(200);
         expect(link.body.pairs).toHaveLength(2);
-        expect(link.body.coverage).toBeCloseTo(0.95); // (1 + 0.9)/2
+        expect(link.body.coverage).toBeCloseTo(1.0);
 
         // Unlink restores the previous state (manual row deleted).
         const unlink = await asUser(app, USER).post(`/api/trips/${tripId}/line-links`).send({

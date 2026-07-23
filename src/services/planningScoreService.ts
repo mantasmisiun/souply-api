@@ -1,5 +1,7 @@
 import pool from '../config/db.js';
 import { normalizeProductName } from '../utils/productNameNormalize.js';
+import { localizedProductNameSql } from '../middleware/locale.js';
+import { loadCanonicalsForProducts } from './productCanonical.js';
 
 const UNASSIGNED_CATEGORY = 688; // "Nepriskirta" — never counts as a category match
 // Filler tokens that must not create a false name match on their own.
@@ -26,32 +28,48 @@ const sameKind = (li: any, ri: any): boolean => {
 /**
  * Souply 2.0 planning score (spec: Stage 5 / Planavimo balas).
  *
- *   score = round(100 · (0.4·coverage + 0.4·discipline + 0.2·precision)) − penalties
+ *   score = round(100 · (0.35·coverage + 0.35·discipline + 0.30·storeChoice))
  *
- *   coverage   = matched list items ÷ list items          (did you buy the plan?)
- *   discipline = matched receipt spend ÷ total spend      (€-weighted: a €15
- *                impulse hurts more than a €0.30 snack)
- *   precision  = quantity accuracy on matched pairs       (min/max of qty)
+ *   coverage    = list items with ≥1 same-kind receipt line ÷ list items
+ *                 (ANY-MATCH: did you buy the plan?)
+ *   discipline  = on-plan receipt spend ÷ total spend (ANY-MATCH, €-weighted:
+ *                 a €15 impulse hurts more than a €0.30 snack)
+ *   storeChoice = did you shop the cheapest comparable store? Frozen from the
+ *                 receipt's ReceiptComparisonSnapshot (paid vs median vs
+ *                 cheapest alternative). null when uninformative (no snapshot,
+ *                 or all stores ~same) → renormalize over the other two.
  *
- * AUTO pairs: list item and receipt line resolve to the SAME productId
- * (list side: ShoppingListItem.productId or its storeProductId's product;
- * receipt side: ReceiptItem.matchedSpId's product). MANUAL pairs come from
- * TripLineLink (kind='manual', crediting 0.9 of an auto pair); an auto pair
- * the user disconnected is stored as kind='suppressed' and excluded.
+ * coverage / discipline are ALWAYS defined (0 when there's no list). When
+ * storeChoice is null the score renormalizes over the two available metrics
+ * (0.5 / 0.5). An ad-hoc (list-less) trip therefore scores purely on
+ * storeChoice (30·storeChoice) — no fixed penalty.
  *
- * Penalties: ad-hoc trips score a fixed mild negative (they have no plan to
- * measure — sustained ad-hoc-only behaviour drags the monthly score, a single
- * upload barely moves it). scoreExempt trips (historic backfill) return null.
+ * AUTO pairs (manual-link UI only, NOT the score): list item and receipt line
+ * resolve to the SAME productId (list side: ShoppingListItem.productId or its
+ * storeProductId's product; receipt side: ReceiptItem.matchedSpId's product).
+ * MANUAL pairs come from TripLineLink (kind='manual'); an auto pair the user
+ * disconnected is stored as kind='suppressed' and excluded.
+ *
+ * scoreExempt trips (historic backfill), and trips with no receipts, return
+ * a null score.
  */
-
-const MANUAL_CREDIT = 0.9;
-export const AD_HOC_SCORE = 25; // fixed mild score for unplanned trips
 
 export interface PlanningPair {
     listItemId: number;
     receiptItemId: number;
     source: 'auto' | 'manual';
     productName: string | null;
+    /** Planned (list) vs bought (receipt) display names — the fuzzy matcher may
+     *  resolve one real item to two different product rows, so the Prognozė sheet
+     *  shows the plan name primary + the bought name muted when they differ. */
+    listName: string | null;
+    receiptName: string | null;
+    /** Product image aggregate (list-item side) for the sheet thumbnail. */
+    imageUrls: string | (string | null)[] | null;
+    /** Weighable → the amount is a weight (kg); else pieces (vnt). */
+    isWeighable: boolean;
+    /** Smallest pack in canonical units — packaged qty ÷ step = pack count. */
+    canonicalStep: number | null;
     listQty: number;
     receiptQty: number;
     /** Predicted (list) vs actual (receipt) TOTAL for this matched item — feeds
@@ -67,7 +85,16 @@ export interface PlanningScore {
     score: number | null;
     coverage: number;
     discipline: number;
-    precision: number;
+    /** Store-choice quality (0..1) frozen from the receipt comparison snapshot,
+     *  or null when uninformative (no snapshot / all stores ~same). */
+    storeChoice: number | null;
+    /** €-savings a perfect store-chooser would have kept (max(0, paid−cheapest)),
+     *  summed over snapshotted receipts. null when storeChoice is null. */
+    storeHeadroomEur: number | null;
+    /** € spent on non-list (impulse) receipt lines = totalSpend − onPlanSpend. */
+    impulseEur: number;
+    /** Whether the trip has any list items (drives per-category tips). */
+    hasList: boolean;
     isAdHoc: boolean;
     scoreExempt: boolean;
     listItemCount: number;
@@ -86,29 +113,52 @@ export interface PlanningScore {
     unmatchedListItems: { listItemId: number; name: string | null; productId: number | null }[];
     /** Unmatched receipt lines — the manual-link UI's right column. */
     unmatchedReceiptItems: { receiptItemId: number; name: string; productId: number | null }[];
+    /** ANY-MATCH impulse receipt-item ids (share nothing with any list item) —
+     *  lets the Impulse sheet flag each Kvitai card ✓ planned / ✗ impulse, using
+     *  the SAME definition as impulseCount (NOT the 1:1 unmatched list above). */
+    impulseReceiptItemIds: number[];
+    /** Every list item classified bought (ANY-MATCH some receipt line) or missed,
+     *  with render data for the Missed sheet's cards. */
+    listItemsDetail: { listItemId: number; name: string; imageUrls: string | (string | null)[] | null; quantity: number; isWeighable: boolean; canonicalStep: number | null; bought: boolean }[];
 }
 
 export const computePlanningScore = async (tripId: number): Promise<PlanningScore> => {
     const [[trip]]: any = await pool.query('SELECT isAdHoc, scoreExempt FROM Trip WHERE id = ?', [tripId]);
     const base: PlanningScore = {
-        tripId, score: null, coverage: 0, discipline: 0, precision: 0,
+        tripId, score: null, coverage: 0, discipline: 0,
+        storeChoice: null, storeHeadroomEur: null, impulseEur: 0, hasList: false,
         isAdHoc: !!trip?.isAdHoc, scoreExempt: !!trip?.scoreExempt,
         listItemCount: 0, matchedListItemCount: 0,
         impulseCount: 0, forgottenCount: 0,
         predictedMatchedTotal: null, actualMatchedTotal: null,
         pairs: [], unmatchedListItems: [], unmatchedReceiptItems: [],
+        impulseReceiptItemIds: [], listItemsDetail: [],
     };
     if (!trip || trip.scoreExempt) return base;
-    if (trip.isAdHoc) return { ...base, score: AD_HOC_SCORE };
 
     // List items across the trip's lists, with resolved productId, name + L3
     // category (leaf, or itself if it has children). name/category feed the
     // fuzzy pairing since the list and the receipt often resolve the SAME real
     // item to DIFFERENT product rows (and receipt mints are uncategorised).
     const [listItems]: any = await pool.query(
+        // Image resolution mirrors the shopping list: the product's aggregate of
+        // ALL its StoreProduct photos (any chain), not the single SP linked to the
+        // list item (usually null — items are added by productId, no storeProductId).
         `SELECT sli.id, sli.quantity, sli.customName, sli.price,
                 COALESCE(sli.productId, sp.productId) AS productId,
                 p.name AS productName, sp.storeProductName AS spName,
+                ${localizedProductNameSql('lt', { productAlias: 'p' }).imageUrlsSql} AS imageUrls,
+                -- Weighable is a PRODUCT property; sli.isWeighable is NOT NULL
+                -- DEFAULT 0 so it can't lead the COALESCE (mirrors the shopping
+                -- list): exact SP → any SP of the product (covers null storeProductId
+                -- substitutions) → explicit custom flag → 0.
+                COALESCE(
+                    sp.isWeighable,
+                    (SELECT MAX(spi.isWeighable) FROM StoreProduct spi
+                      WHERE spi.productId = COALESCE(sli.productId, sp.productId)),
+                    NULLIF(sli.isWeighable, 0),
+                    0
+                ) AS isWeighable,
                 p.categoryId AS l3
            FROM ShoppingListItem sli
            JOIN ShoppingList sl ON sl.id = sli.listId
@@ -131,7 +181,16 @@ export const computePlanningScore = async (tripId: number): Promise<PlanningScor
         [tripId],
     );
     base.listItemCount = listItems.length;
+    base.hasList = listItems.length > 0;
     if (listItems.length === 0 && receiptItems.length === 0) return base;
+
+    // Canonical step (smallest pack in canonical units) per list-item product —
+    // lets the sheets render a packaged item as a pack COUNT (quantity ÷ step)
+    // rather than the raw canonical weight ("0,25 kg" → "1 vnt").
+    const canonProductIds = [...new Set(
+        (listItems as any[]).map(li => Number(li.productId)).filter((n: number) => Number.isFinite(n) && n > 0))];
+    const canonById = await loadCanonicalsForProducts(canonProductIds);
+    const stepOf = (li: any): number | null => canonById.get(Number(li.productId))?.step ?? null;
 
     // Manual corrections.
     const [links]: any = await pool.query(
@@ -163,6 +222,9 @@ export const computePlanningScore = async (tripId: number): Promise<PlanningScor
         pairs.push({
             listItemId: li.id, receiptItemId: ri.id, source: 'manual',
             productName: li.productName ?? li.customName ?? ri.name,
+            listName: li.productName ?? li.customName ?? li.spName ?? null,
+            receiptName: ri.resolvedName ?? ri.spName ?? ri.name,
+            imageUrls: li.imageUrls ?? null, isWeighable: !!li.isWeighable, canonicalStep: stepOf(li),
             listQty: parseFloat(li.quantity) || 1, receiptQty: parseFloat(ri.quantity) || 1,
             listPrice: li.price != null ? parseFloat(li.price) : null, receiptPrice: spend(ri),
         });
@@ -179,27 +241,51 @@ export const computePlanningScore = async (tripId: number): Promise<PlanningScor
         pairs.push({
             listItemId: li.id, receiptItemId: ri.id, source: 'auto',
             productName: li.productName ?? li.customName ?? ri.name,
+            listName: li.productName ?? li.customName ?? li.spName ?? null,
+            receiptName: ri.resolvedName ?? ri.spName ?? ri.name,
+            imageUrls: li.imageUrls ?? null, isWeighable: !!li.isWeighable, canonicalStep: stepOf(li),
             listQty: parseFloat(li.quantity) || 1, receiptQty: parseFloat(ri.quantity) || 1,
             listPrice: li.price != null ? parseFloat(li.price) : null, receiptPrice: spend(ri),
         });
     }
 
-    const credit = (p: PlanningPair) => (p.source === 'manual' ? MANUAL_CREDIT : 1);
-    const matchedCredit = pairs.reduce((s, p) => s + credit(p), 0);
-    const coverage = listItems.length > 0 ? Math.min(1, matchedCredit / listItems.length) : 0;
-
-    const matchedSpend = pairs.reduce((s, p) => {
-        const ri = receiptById.get(p.receiptItemId);
-        return s + (ri ? spend(ri) * credit(p) : 0);
-    }, 0);
-    const discipline = totalSpend > 0 ? Math.min(1, matchedSpend / totalSpend) : 0;
-
-    const precision = pairs.length > 0
-        ? pairs.reduce((s, p) => {
-            const lo = Math.min(p.listQty, p.receiptQty), hi = Math.max(p.listQty, p.receiptQty);
-            return s + (hi > 0 ? lo / hi : 1);
-        }, 0) / pairs.length
+    // coverage / discipline are ANY-MATCH (NOT the greedy 1:1 pairs above, which
+    // exist only for the manual-link UI): a list item counts as covered if ANY
+    // receipt line is the same kind, and a receipt line is on-plan if it shares
+    // a kind with ANY list item. Extra units of a planned kind (2 breads for 1)
+    // therefore never read as impulse, and one receipt line can cover several
+    // list items — matching how impulseCount/forgottenCount already count.
+    const coverage = listItems.length > 0
+        ? listItems.filter((li: any) => receiptItems.some((ri: any) => sameKind(li, ri))).length / listItems.length
         : 0;
+
+    const onPlanSpend = receiptItems.reduce((s: number, ri: any) =>
+        s + (listItems.some((li: any) => sameKind(li, ri)) ? spend(ri) : 0), 0);
+    const discipline = totalSpend > 0 ? onPlanSpend / totalSpend : 0;
+
+    // storeChoice — frozen store-selection quality from the receipt comparison
+    // snapshots (paid vs median vs cheapest comparable-store totals).
+    const [snaps]: any = await pool.query(
+        `SELECT s.paidTotal, s.medianAltTotal, s.cheapestAltTotal
+           FROM ReceiptComparisonSnapshot s
+           JOIN Receipt r ON r.id = s.receiptId
+          WHERE r.tripId = ? AND r.userDeletedAt IS NULL`,
+        [tripId],
+    );
+    let P = 0, M = 0, C = 0, snapRows = 0;
+    for (const row of snaps) {
+        if (row.medianAltTotal == null || row.cheapestAltTotal == null) continue;
+        P += Number(row.paidTotal) || 0;
+        M += Number(row.medianAltTotal);
+        C += Number(row.cheapestAltTotal);
+        snapRows++;
+    }
+    let storeChoice: number | null = null;
+    if (snapRows > 0 && (M - C) >= 0.01) {
+        storeChoice = Math.min(1, Math.max(0, 0.5 + 0.5 * (M - P) / (M - C)));
+        base.storeChoice = Math.round(storeChoice * 100) / 100;
+        base.storeHeadroomEur = Math.round(Math.max(0, P - C) * 100) / 100;
+    }
 
     base.matchedListItemCount = pairs.length;
     base.pairs = pairs;
@@ -209,6 +295,20 @@ export const computePlanningScore = async (tripId: number): Promise<PlanningScor
     // is the mirror. (pairs/unmatched* above stay 1:1 for the manual-link UI.)
     base.impulseCount = receiptItems.filter((ri: any) => !listItems.some((li: any) => sameKind(li, ri))).length;
     base.forgottenCount = listItems.filter((li: any) => !receiptItems.some((ri: any) => sameKind(li, ri))).length;
+    // Per-item classification for the Impulse / Missed sheets (same ANY-MATCH
+    // rule as the counts above, so the sheets reconcile with the cards).
+    base.impulseReceiptItemIds = receiptItems
+        .filter((ri: any) => !listItems.some((li: any) => sameKind(li, ri)))
+        .map((r: any) => Number(r.id));
+    base.listItemsDetail = listItems.map((li: any) => ({
+        listItemId: Number(li.id),
+        name: li.productName ?? li.customName ?? li.spName ?? '',
+        imageUrls: li.imageUrls ?? null,
+        quantity: parseFloat(li.quantity) || 1,
+        isWeighable: !!li.isWeighable,
+        canonicalStep: stepOf(li),
+        bought: receiptItems.some((ri: any) => sameKind(li, ri)),
+    }));
     // Prediction accuracy: predicted (list) vs actual (receipt) over matched
     // items that carried a list price. null when none (e.g. list never priced).
     const priced = pairs.filter(p => p.listPrice != null && p.listPrice > 0);
@@ -224,20 +324,61 @@ export const computePlanningScore = async (tripId: number): Promise<PlanningScor
         .map((r: any) => ({ receiptItemId: r.id, name: String(r.name), productId: r.productId ?? null }));
     base.coverage = Math.round(coverage * 100) / 100;
     base.discipline = Math.round(discipline * 100) / 100;
-    base.precision = Math.round(precision * 100) / 100;
+    base.impulseEur = Math.round((totalSpend - onPlanSpend) * 100) / 100;
     // Receipts not in yet → nothing to judge; score stays null until stage 5-ish.
+    // storeChoice may be uninformative (null) → renormalize over coverage +
+    // discipline (0.5 / 0.5); otherwise weight 0.35 / 0.35 / 0.30.
     base.score = receiptItems.length > 0
-        ? Math.max(0, Math.round(100 * (0.4 * coverage + 0.4 * discipline + 0.2 * precision)))
+        ? Math.min(100, Math.max(0, Math.round(100 * (storeChoice == null
+            ? (coverage + discipline) / 2
+            : 0.35 * coverage + 0.35 * discipline + 0.30 * storeChoice))))
         : null;
     return base;
 };
 
 /**
- * Monthly aggregation for the Profilis card: the mean of scoreable planned
- * trips' scores in each month (keyed by anchor = latest receipt date, falling
- * back to trip creation), with each ad-hoc trip contributing its fixed mild
- * score into the same mean (spec: "aggregation of trip scores + ad-hoc
- * negatives" — sustained ad-hoc-only behaviour converges the month to 25).
+ * % delta of a trip's planning score vs the user's RECENT typical: the median of
+ * their scored trips over the last 90 days (most-recent 10, excluding this trip).
+ * Median (robust to a one-off bad trip) + a recency window (old scores age out)
+ * — so the number reflects how they plan lately. null when the current score is
+ * null or there are fewer than 3 priors (too little signal).
+ */
+export const planningBaselineDelta = async (
+    userId: string, excludeTripId: number, currentScore: number | null,
+): Promise<number | null> => {
+    if (currentScore == null) return null;
+    const [trips]: any = await pool.query(
+        `SELECT t.id
+           FROM Trip t
+           JOIN TripMember tm ON tm.tripId = t.id
+          WHERE tm.userId = ? AND t.scoreExempt = 0 AND t.id <> ?
+            AND EXISTS (SELECT 1 FROM Receipt r
+                         WHERE r.tripId = t.id AND r.userDeletedAt IS NULL
+                           AND r.receiptDate >= (NOW() - INTERVAL 90 DAY))
+          ORDER BY (SELECT MAX(r.receiptDate) FROM Receipt r WHERE r.tripId = t.id) DESC
+          LIMIT 10`,
+        [userId, excludeTripId],
+    );
+    const scores: number[] = [];
+    for (const tr of trips) {
+        const s = await computePlanningScore(Number(tr.id));
+        if (s.score != null) scores.push(s.score);
+    }
+    if (scores.length < 3) return null;
+    scores.sort((a, b) => a - b);
+    const mid = scores.length % 2
+        ? scores[(scores.length - 1) / 2]
+        : (scores[scores.length / 2 - 1] + scores[scores.length / 2]) / 2;
+    if (mid <= 0) return null;
+    return Math.round(((currentScore - mid) / mid) * 100);
+};
+
+/**
+ * Monthly aggregation for the Profilis card: the mean of scoreable trips'
+ * scores in each month (keyed by anchor = latest receipt date, falling back to
+ * trip creation). Ad-hoc trips are no longer a fixed value — they flow through
+ * the normal computation (list-less, so scored purely on storeChoice) and
+ * contribute their real score to the mean like any other trip.
  */
 export const monthlyPlanningScores = async (
     userId: string,
@@ -269,7 +410,7 @@ export const monthlyPlanningScores = async (
         const scores: number[] = [];
         let adHocCount = 0;
         for (const t of monthTrips) {
-            if (t.isAdHoc) { scores.push(AD_HOC_SCORE); adHocCount++; continue; }
+            if (t.isAdHoc) adHocCount++;
             const s = await computePlanningScore(Number(t.id));
             if (s.score != null) scores.push(s.score);
         }

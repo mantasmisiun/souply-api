@@ -3,7 +3,8 @@ import pool from '../config/db.js';
 import { listTripsForUser } from '../services/tripListService.js';
 import { isTripMember } from '../models/tripModel.js';
 import { getTripStats, getMonthlyTripSpend } from '../services/tripStatsService.js';
-import { computePlanningScore, monthlyPlanningScores } from '../services/planningScoreService.js';
+import { computePlanningScore, monthlyPlanningScores, planningBaselineDelta } from '../services/planningScoreService.js';
+import { getTripComparison } from '../services/tripComparisonService.js';
 
 export const listTrips = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -42,7 +43,23 @@ export const fetchTripScore = async (req: Request, res: Response, next: NextFunc
         const tripId = Number(req.params.id);
         if (!Number.isFinite(tripId)) { res.status(400).json({ error: 'bad id' }); return; }
         if (!(await isTripMember(tripId, req.authUserId!))) { res.status(404).json({ error: 'not found' }); return; }
-        res.json(await computePlanningScore(tripId));
+        const score = await computePlanningScore(tripId);
+        const deltaPct = await planningBaselineDelta(req.authUserId!, tripId, score.score);
+        res.json({ ...score, deltaPct });
+    } catch (error) { next(error); }
+};
+
+/**
+ * Trip-level cross-store basket comparison for the "savings" sheet — the whole
+ * trip's basket priced across nearby chains. Member-gated with the same
+ * 404-over-403 probing defense as fetchTripReceipts/fetchTripScore.
+ */
+export const fetchTripComparison = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const tripId = Number(req.params.id);
+        if (!Number.isFinite(tripId)) { res.status(400).json({ error: 'bad id' }); return; }
+        if (!(await isTripMember(tripId, req.authUserId!))) { res.status(404).json({ error: 'not found' }); return; }
+        res.json(await getTripComparison(tripId));
     } catch (error) { next(error); }
 };
 
@@ -126,21 +143,34 @@ export const fetchTripReceipts = async (req: Request, res: Response, next: NextF
     try {
         const tripId = Number(req.params.id);
         if (!Number.isFinite(tripId)) { res.status(400).json({ error: 'bad id' }); return; }
-        if (!(await isTripMember(tripId, req.authUserId!))) { res.status(404).json({ error: 'not found' }); return; }
+        const viewer = req.authUserId!;
+        if (!(await isTripMember(tripId, viewer))) { res.status(404).json({ error: 'not found' }); return; }
+        // Publish-gating: a receipt is invisible to OTHER members until its
+        // uploader clears the mandatory swipe queue (published = required 0 or
+        // completed >= required). The uploader always sees their own pending row.
         const [rows] = await pool.query(
             `SELECT r.id, r.storeId, r.receiptDate, r.processingStatus,
                     r.mandatorySwipesRequired, r.mandatorySwipesCompleted,
-                    s.name AS storeName, s.address AS storeAddress, c.name AS chainName, c.id AS chainId
+                    COALESCE(r.uploaderUserId, r.userId) AS uploaderUserId,
+                    s.name AS storeName, s.address AS storeAddress, c.name AS chainName, c.id AS chainId,
+                    -- Old-receipt flag: the receipt was already >30 days old WHEN
+                    -- UPLOADED (uploadedAt is frozen at insert, so this never drifts
+                    -- — fresh-at-upload stays fresh forever). Seen by all members.
+                    (r.receiptDate IS NOT NULL AND DATEDIFF(r.uploadedAt, r.receiptDate) > 30) AS staleReceipt
                FROM Receipt r
                LEFT JOIN Store s ON s.id = r.storeId
                LEFT JOIN StoreChain c ON c.id = s.chainId
               WHERE r.tripId = ?
+                AND r.userDeletedAt IS NULL
+                AND (COALESCE(r.uploaderUserId, r.userId) = ?
+                     OR r.mandatorySwipesRequired = 0
+                     OR r.mandatorySwipesCompleted >= r.mandatorySwipesRequired)
               ORDER BY r.id ASC`,
-            [tripId]) as any;
+            [tripId, viewer]) as any;
         const receipts = [] as any[];
         for (const r of rows as any[]) {
             const [items] = await pool.query(
-                `SELECT lineIdx, name, price, quantity, unit, matchedName, storeProductImageUrl,
+                `SELECT id, lineIdx, name, price, quantity, unit, sizeUnit, matchedSpId, matchedName, storeProductImageUrl,
                         ROUND((CASE WHEN promoPrice IS NOT NULL AND promoPrice > 0 THEN promoPrice ELSE price END)
                               * COALESCE(quantity, 1), 2) AS lineTotal
                    FROM ReceiptItem WHERE receiptId = ? ORDER BY lineIdx ASC`,
@@ -151,25 +181,48 @@ export const fetchTripReceipts = async (req: Request, res: Response, next: NextF
     } catch (error) { next(error); }
 };
 
-/** How long after trip creation a member may still detach a wrong receipt. */
+/** How long after trip creation the UPLOADER may still detach their own wrong
+ *  receipt. The trip OWNER moderates with no window (see below). */
 const RECEIPT_DETACH_WINDOW_DAYS = 7;
 
 /**
- * "Wrong receipt": DETACH a receipt from the trip (tripId → NULL — the
- * receipt itself survives in the user's history; the slot reopens and the
- * derived stage falls back). Time-gated so week-old trips stay immutable.
+ * "Wrong receipt": DETACH a receipt from the trip (tripId → NULL — the receipt
+ * itself survives in the uploader's history; the slot reopens and the derived
+ * stage falls back). Detach ONLY unlinks; it never deletes the receipt/items/
+ * prices.
+ *
+ * Authz:
+ *   • trip OWNER (Trip.createdByUserId) may detach ANY receipt in the trip
+ *     (moderation) with NO time window.
+ *   • the receipt's UPLOADER may detach their OWN receipt, still bounded by the
+ *     7-day window (a week-old trip stays immutable for regular members).
+ *   • any other member cannot detach → 403.
  */
 export const detachTripReceipt = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const tripId = Number(req.params.id);
         const receiptId = Number(req.params.receiptId);
         if (!Number.isFinite(tripId) || !Number.isFinite(receiptId)) { res.status(400).json({ error: 'bad id' }); return; }
-        if (!(await isTripMember(tripId, req.authUserId!))) { res.status(404).json({ error: 'not found' }); return; }
-        const [[trip]] = await pool.query('SELECT createdAt FROM Trip WHERE id = ?', [tripId]) as any;
+        const viewer = req.authUserId!;
+        // 404-over-403 probe defense: non-members learn nothing about the trip.
+        if (!(await isTripMember(tripId, viewer))) { res.status(404).json({ error: 'not found' }); return; }
+        const [[trip]] = await pool.query('SELECT createdByUserId, createdAt FROM Trip WHERE id = ?', [tripId]) as any;
         if (!trip) { res.status(404).json({ error: 'not found' }); return; }
-        const ageMs = Date.now() - new Date(trip.createdAt).getTime();
-        if (ageMs > RECEIPT_DETACH_WINDOW_DAYS * 24 * 60 * 60 * 1000) {
-            res.status(423).json({ error: 'detach-window-closed' }); return;
+        // The receipt must actually belong to this trip.
+        const [[rcpt]] = await pool.query(
+            'SELECT COALESCE(uploaderUserId, userId) AS uploaderId FROM Receipt WHERE id = ? AND tripId = ?',
+            [receiptId, tripId]) as any;
+        if (!rcpt) { res.status(404).json({ error: 'not found' }); return; }
+
+        const isOwner = trip.createdByUserId === viewer;
+        const isUploader = rcpt.uploaderId === viewer;
+        if (!isOwner && !isUploader) { res.status(403).json({ error: 'forbidden' }); return; }
+        // Only the uploader path is window-gated; the owner moderates freely.
+        if (!isOwner) {
+            const ageMs = Date.now() - new Date(trip.createdAt).getTime();
+            if (ageMs > RECEIPT_DETACH_WINDOW_DAYS * 24 * 60 * 60 * 1000) {
+                res.status(423).json({ error: 'detach-window-closed' }); return;
+            }
         }
         const [result] = await pool.query(
             'UPDATE Receipt SET tripId = NULL, shoppingListId = NULL WHERE id = ? AND tripId = ?',
