@@ -51,6 +51,7 @@ export const getReceiptsByUserId = async (userId: string) => {
       LEFT JOIN Store      s  ON s.id        = r.storeId
       LEFT JOIN StoreChain sc ON sc.id       = s.chainId
           WHERE r.userId = ?
+            AND r.userDeletedAt IS NULL
           ORDER BY r.id DESC`,
         [userId]
     );
@@ -104,6 +105,50 @@ export const updateReceiptDetails = async (
 
 export const deleteReceipt = async (id: number) => {
     await pool.query('DELETE FROM Receipt WHERE id = ?', [id]);
+};
+
+/**
+ * User-facing "remove this scan" (pre-swipe): soft-hide the receipt from every
+ * user-facing read (userDeletedAt), detach it from its trip/list, and clear the
+ * stored image path. Shared Price / ReceiptItem / learning rows are KEPT — this
+ * is NOT the dev-only hard purge. The MinIO object itself is removed by the
+ * caller (deleteReceiptImage). filePath is a NOT NULL column so it is emptied,
+ * not nulled (matches the createReceipt `filePath || ''` convention).
+ */
+export const userHideReceipt = async (id: number, conn?: Connection) => {
+    const db = conn || pool;
+    await db.query(
+        "UPDATE Receipt SET userDeletedAt = NOW(), tripId = NULL, shoppingListId = NULL, filePath = '' WHERE id = ?",
+        [id]
+    );
+};
+
+/**
+ * Un-hide a previously user-hidden receipt — the re-upload path: the user
+ * removed a scan pre-swipe (keeping its idempotent prices) and re-photographed
+ * the same paper. Clears userDeletedAt so it becomes visible + linkable again.
+ */
+export const reactivateHiddenReceipt = async (id: number, conn?: Connection) => {
+    const db = conn || pool;
+    await db.query('UPDATE Receipt SET userDeletedAt = NULL WHERE id = ?', [id]);
+};
+
+/**
+ * CROSS-USER re-upload of a relinquished (hidden) receipt: a DIFFERENT user
+ * re-photographs the same physical paper that its original uploader had hidden
+ * (userDeletedAt set, prices KEPT). The global unique key means one row per
+ * physical receipt, so instead of 409 we hand the row to the new uploader:
+ * clear userDeletedAt and transfer BOTH the owner (userId — drives ownership
+ * middleware + the user's history read) and uploaderUserId to them. Prices /
+ * ReceiptItem / learning rows are untouched; the caller re-links trip/list and
+ * re-stores the image.
+ */
+export const reassignAndReactivateReceipt = async (id: number, newUserId: string, conn?: Connection) => {
+    const db = conn || pool;
+    await db.query(
+        'UPDATE Receipt SET userDeletedAt = NULL, userId = ?, uploaderUserId = ? WHERE id = ?',
+        [newUserId, newUserId, id],
+    );
 };
 
 export const updateReceiptStore = async (id: number, storeId: number, conn?: Connection) => {

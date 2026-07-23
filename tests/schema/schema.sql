@@ -506,6 +506,8 @@ CREATE TABLE `Receipt` (
   `hasBurstSwipes` tinyint(1) NOT NULL DEFAULT 0,
   `savedAmount` decimal(10,2) NOT NULL DEFAULT 0.00,
   `adminEditedAt` datetime DEFAULT NULL,
+  `userDeletedAt` datetime DEFAULT NULL,
+  `uploadedAt` datetime NOT NULL DEFAULT current_timestamp(),
   `tripId` int(11) DEFAULT NULL,
   `uploaderUserId` char(36) DEFAULT NULL,
   PRIMARY KEY (`id`),

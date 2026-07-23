@@ -21,6 +21,8 @@ import {
     logAnalizeFailure,
     logReocrTelemetry,
     markSwipesDone,
+    hideReceiptForUser,
+    deleteReceiptImageOnly,
 } from '../controllers/receiptController.js';
 import { getFlaggedReceiptCrop } from '../controllers/adminReceiptCropController.js';
 import {
@@ -89,6 +91,15 @@ router.post('/receipts/:id/lines/:idx/vote', requireUser, owns, submitReceiptLin
 // non-admin reuse of the flagged-crop controller, which keys on receiptId/lineIdx).
 router.get('/receipts/:id/resolve-queue', requireUser, owns, getReceiptResolveQueue);
 router.get('/receipts/:receiptId/lines/:lineIdx/crop', requireUser, requireReceiptOwner('receiptId'), getFlaggedReceiptCrop);
+
+// User-facing "remove this scan" BEFORE the mandatory queue is cleared: soft-hide
+// (userDeletedAt) + detach trip/list + wipe the photo, KEEPING the shared price /
+// learning rows (so a re-upload un-hides). 423 once swipes are cleared — use the
+// photo-only delete below instead. Ownership-bound.
+router.delete('/receipts/:id/user', requireUser, owns, hideReceiptForUser);
+// Photo-only delete (post-swipe): drop the MinIO image + clear filePath, keeping
+// the row + prices + trip link. Allowed regardless of swipe state. Ownership-bound.
+router.delete('/receipts/:id/image', requireUser, owns, deleteReceiptImageOnly);
 
 // DEV-ONLY hard delete: receipt + its prices + orphan SPs/Products + MinIO
 // image. The controller refuses when NODE_ENV==='production' (prod/staging).

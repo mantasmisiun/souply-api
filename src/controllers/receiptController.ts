@@ -1,9 +1,10 @@
 import { Request, Response, NextFunction } from "express";
-import { ensureTripForReceipt } from '../services/tripLinkService.js';
+import { ensureTripForReceipt, relinkReceiptToListTrip, notifyTripReceiptPublished } from '../services/tripLinkService.js';
 import sharp from "sharp";
 import pool from "../config/db.js";
 import { isTripMember } from "../models/tripModel.js";
-import { createReceipt, getReceiptsByUserId, getReceiptById, deleteReceipt, getReceiptItemsWithDetails, updateReceiptFilePath, getReceiptByReceiptNoAndUser, getReceiptByAnyReceiptNoAndUser, getReceiptByAnyReceiptNoStoreDate, completeMandatorySwipes } from "../models/receiptModel.js";
+import { createReceipt, getReceiptsByUserId, getReceiptById, deleteReceipt, getReceiptItemsWithDetails, updateReceiptFilePath, getReceiptByReceiptNoAndUser, getReceiptByAnyReceiptNoAndUser, getReceiptByAnyReceiptNoStoreDate, completeMandatorySwipes, userHideReceipt, reactivateHiddenReceipt, reassignAndReactivateReceipt } from "../models/receiptModel.js";
+import { linkReceiptToList } from "../models/shoppingListModel.js";
 import {
     getSwipeCandidatesWithDetails,
     getVerifiedStoreProductIdsForReceipt,
@@ -18,7 +19,7 @@ import {
     upsertReceiptLineIssue,
     type IssueFlags,
 } from "../models/receiptLineIssueModel.js";
-import { getPresignedUrl } from "../services/storageService.js";
+import { getPresignedUrl, deleteReceiptImage } from "../services/storageService.js";
 import { persistReceiptPrices, applyReceiptAutosave } from '../services/receiptSaveService.js';
 import { withDeadlockRetry } from '../utils/withDeadlockRetry.js';
 import { demoteReceiptLineDirect } from '../services/receiptLineDemotionService.js';
@@ -40,6 +41,11 @@ export const markSwipesDone = async (req: Request, res: Response, next: NextFunc
     try {
         const id = Number(req.params.id);
         if (!Number.isFinite(id)) { res.status(400).json({ error: 'Invalid id' }); return; }
+        // Snapshot the publish state BEFORE clearing, so we notify trip members
+        // exactly once — on the real transition to published (a receipt with a
+        // mandatory queue becoming cleared). Already-published rows (required 0,
+        // handled at link time) and repeat calls don't re-notify.
+        const beforeSwipes = await getReceiptById(id);
         await completeMandatorySwipes(id);
         // Terminal ask-once: the resolve-queue Card-B lines offered this session that
         // the user did NOT resolve (a vote marks them resolved_user at the /vote path)
@@ -62,6 +68,18 @@ export const markSwipesDone = async (req: Request, res: Response, next: NextFunc
             }
         } catch (ledgerErr) {
             console.warn(`[markSwipesDone] ask-once ledger write failed for receipt ${id}:`, ledgerErr);
+        }
+        // Publish notification (re-timed off link): a queued receipt attached to
+        // a trip has just cleared → tell the other members. Fire only on the true
+        // pending→published transition to avoid double-fire with the link path.
+        if (beforeSwipes && beforeSwipes.tripId != null) {
+            const reqd = Number(beforeSwipes.mandatorySwipesRequired ?? 0);
+            const done = Number(beforeSwipes.mandatorySwipesCompleted ?? 0);
+            const wasPublished = reqd === 0 || done >= reqd;
+            if (!wasPublished) {
+                notifyTripReceiptPublished(id).catch(e =>
+                    console.warn('[markSwipesDone] publish notify failed:', e?.message ?? e));
+            }
         }
         res.json({ ok: true });
     } catch (error) {
@@ -122,6 +140,98 @@ export const removeReceipt = async (req: Request, res: Response, next: NextFunct
             return;
         }
         res.status(200).json(result);
+    } catch (error) {
+        next(error);
+    }
+};
+
+/**
+ * DELETE /api/receipts/:id/user
+ *
+ * User-facing "remove this scan" BEFORE the mandatory swipe queue is cleared.
+ * Soft-hides the receipt from every user-facing list (userDeletedAt), detaches
+ * it from its trip/list, and deletes the stored photo — but KEEPS the shared
+ * Price / ReceiptItem / learning rows (unlike the dev-only hard purge). Because
+ * the prices survive, a later re-upload of the same paper un-hides + re-links
+ * the row instead of erroring (see createReceiptFromOcr).
+ *
+ * GATE: allowed only while the mandatory queue is NOT cleared. "Cleared" =
+ * required > 0 AND completed >= required — the paid-for swipe work is done, so
+ * the row must stay; only the photo may be dropped (DELETE /:id/image → 423
+ * points the client there). required === 0 (no queue) counts as NOT cleared.
+ *
+ * Ownership is proven by requireReceiptOwner middleware.
+ */
+export const hideReceiptForUser = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const id = Number(req.params.id);
+        if (isNaN(id)) {
+            res.status(400).json({ error: 'Invalid receipt ID' });
+            return;
+        }
+        const receipt = await getReceiptById(id);
+        if (!receipt) {
+            res.status(404).json({ error: 'Receipt not found' });
+            return;
+        }
+        const required = Number(receipt.mandatorySwipesRequired ?? 0);
+        const completed = Number(receipt.mandatorySwipesCompleted ?? 0);
+        const cleared = required > 0 && completed >= required;
+        if (cleared) {
+            res.status(423).json({
+                error: 'swipes-cleared',
+                message: 'Mandatory swipes are done — only the photo can be deleted now',
+            });
+            return;
+        }
+        const filePath = typeof receipt.filePath === 'string' ? receipt.filePath : null;
+        await userHideReceipt(id);
+        // MinIO is not transactional — do it after the DB write, best-effort. A
+        // stranded object is harmless and a missing one is fine, so a failure here
+        // must not fail the hide the client already acted on.
+        try {
+            await deleteReceiptImage(filePath);
+        } catch (e: any) {
+            console.warn(`[hideReceipt] image delete failed for receipt ${id}:`, e?.message ?? e);
+        }
+        res.status(200).json({ ok: true, hidden: true });
+    } catch (error) {
+        next(error);
+    }
+};
+
+/**
+ * DELETE /api/receipts/:id/image
+ *
+ * Photo-only delete (post-swipe): drop the stored MinIO image and clear
+ * filePath. The Receipt row, ReceiptItem, Price and trip link all stay intact.
+ * Allowed regardless of swipe state — this is the alternative the hide gate
+ * (423) points the client to once the mandatory queue is cleared.
+ *
+ * Ownership is proven by requireReceiptOwner middleware.
+ */
+export const deleteReceiptImageOnly = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const id = Number(req.params.id);
+        if (isNaN(id)) {
+            res.status(400).json({ error: 'Invalid receipt ID' });
+            return;
+        }
+        const receipt = await getReceiptById(id);
+        if (!receipt) {
+            res.status(404).json({ error: 'Receipt not found' });
+            return;
+        }
+        const filePath = typeof receipt.filePath === 'string' ? receipt.filePath : null;
+        try {
+            await deleteReceiptImage(filePath);
+        } catch (e: any) {
+            console.warn(`[deleteReceiptImage] MinIO delete failed for receipt ${id}:`, e?.message ?? e);
+        }
+        // filePath is NOT NULL — empty it (matches the createReceipt `filePath || ''`
+        // convention). Keeps the row + prices + trip link untouched.
+        await updateReceiptFilePath(id, '');
+        res.status(200).json({ ok: true, imageDeleted: true });
     } catch (error) {
         next(error);
     }
@@ -213,6 +323,26 @@ export const createReceiptFromOcr = async (req: Request, res: Response, next: Ne
             res.status(400).json({ error: 'auth and parsedData are required' });
             return;
         }
+        // Shared re-link for a reactivated (un-hidden) receipt — mirrors a fresh
+        // upload's trip/list wiring and restores the photo if the body carried one.
+        // A list-scoped upload points the receipt at the list's trip (like the link
+        // endpoint); a bare upload re-mints an ad-hoc trip (ensureTripForReceipt is a
+        // no-op when tripId is already set, and hide/relinquish nulled it).
+        const relinkReactivatedReceipt = async (rowId: number) => {
+            if (filePath) {
+                try { await updateReceiptFilePath(rowId, filePath); }
+                catch (e: any) { console.warn(`[reactivate] filePath restore failed for receipt ${rowId}:`, e?.message ?? e); }
+            }
+            const reListId = Number.isFinite(Number(req.body?.shoppingListId)) && Number(req.body.shoppingListId) > 0
+                ? Number(req.body.shoppingListId)
+                : null;
+            if (reListId != null) {
+                await linkReceiptToList(rowId, reListId);
+                await relinkReceiptToListTrip(rowId, reListId);
+            } else {
+                await ensureTripForReceipt(rowId, String(userId), null);
+            }
+        };
         // Reject duplicates early so re-photographing the same receipt doesn't
         // create parallel records. IKI synthesizes a `{date}-{time}-{cents}-iki-receipt`
         // number specifically so this check works when the receipt format has no
@@ -230,6 +360,18 @@ export const createReceiptFromOcr = async (req: Request, res: Response, next: Ne
             const existing = (await getReceiptByAnyReceiptNoAndUser(candidateReceiptNos, String(userId)))
                 ?? (candidateReceiptNo ? await getReceiptByReceiptNoAndUser(candidateReceiptNo, String(userId)) : null);
             if (existing) {
+                // RE-UPLOAD OF A HIDDEN RECEIPT: the user removed this scan pre-swipe
+                // (DELETE /receipts/:id/user set userDeletedAt, detached trip/list, wiped
+                // the photo) but its idempotent Price rows were KEPT. Re-photographing the
+                // same paper should ATTACH it back, not 409. Un-hide, re-link to the new
+                // upload's context, and re-store the photo — WITHOUT re-ingesting prices
+                // (they were kept) or re-firing the receipt_buy interaction.
+                if (existing.userDeletedAt != null) {
+                    await reactivateHiddenReceipt(existing.id);
+                    await relinkReactivatedReceipt(existing.id);
+                    res.status(200).json({ reactivated: true, receiptId: existing.id });
+                    return;
+                }
                 // Same-user duplicate. The most common real-world cause is the ABORT-THEN-RETRY
                 // case (receipt-238): the first POST exceeded the client timeout, the server
                 // committed anyway, and the retry collides here. Hand back everything the client
@@ -266,6 +408,18 @@ export const createReceiptFromOcr = async (req: Request, res: Response, next: Ne
                     candidateReceiptNos, Number(dupStoreId), String(dupDate), String(userId),
                 );
                 if (other) {
+                    // RELINQUISHED CROSS-USER RECEIPT: the colliding row was HIDDEN by
+                    // its original uploader (userDeletedAt set, prices kept). One row per
+                    // physical receipt — so instead of 409, hand it to THIS uploader:
+                    // clear the hide + transfer ownership (userId + uploaderUserId), then
+                    // re-link to the new upload's context. Prices/learning stay put; no
+                    // receipt_buy re-fire.
+                    if (other.userDeletedAt != null) {
+                        await reassignAndReactivateReceipt(other.id, String(userId));
+                        await relinkReactivatedReceipt(other.id);
+                        res.status(200).json({ reactivated: true, receiptId: other.id });
+                        return;
+                    }
                     // Souply 2.0 SAME-TRIP EXEMPTION: a fellow trip member
                     // re-uploading the same physical receipt is EXPECTED
                     // ("either can upload") — hand back the existing receipt
@@ -351,6 +505,28 @@ export const createReceiptFromOcr = async (req: Request, res: Response, next: Ne
                 console.warn('Failed to clean up orphan receipt', receiptId, cleanupErr);
             }
             if (err?.code === 'ER_DUP_ENTRY' && /unique_receipt/i.test(String(err?.sqlMessage ?? ''))) {
+                // Before declaring cross-account, check whether the colliding row is a
+                // RELINQUISHED (hidden) receipt — the upfront witness check can miss it
+                // when only the exact canonical collides. If so, transfer + reactivate
+                // it to this uploader instead of erroring (same as branch above).
+                try {
+                    const dupStoreId = parsedData.header?.storeId ?? null;
+                    const dupDate = parsedData.footer?.date ?? null;
+                    if (candidateReceiptNos.length && dupStoreId != null && dupDate) {
+                        const hidden = await getReceiptByAnyReceiptNoStoreDate(
+                            candidateReceiptNos, Number(dupStoreId), String(dupDate),
+                        );
+                        if (hidden && hidden.userDeletedAt != null) {
+                            await reassignAndReactivateReceipt(hidden.id, String(userId));
+                            await relinkReactivatedReceipt(hidden.id);
+                            res.status(200).json({ reactivated: true, receiptId: hidden.id });
+                            return;
+                        }
+                    }
+                } catch (reErr: any) {
+                    console.warn('[reactivate] cross-user hidden-row transfer failed:', reErr?.message ?? reErr);
+                    // fall through to the crossAccount 409
+                }
                 // Cross-account: a DIFFERENT user already uploaded this
                 // physical receipt. Flag it so the client doesn't tell the
                 // current user "you already uploaded this" (they didn't) and
