@@ -18,7 +18,12 @@ jest.unstable_mockModule('../src/models/storeModel.js', () => ({
     getClosestStorePerChainToStore: mockGetClosestStorePerChainToStore,
 }));
 
-let getReceiptComparison: (id: number) => Promise<any>;
+const mockGetPersonalEquivalentProductIds = jest.fn<any>();
+jest.unstable_mockModule('../src/models/userEquivalenceModel.js', () => ({
+    getPersonalEquivalentProductIds: mockGetPersonalEquivalentProductIds,
+}));
+
+let getReceiptComparison: (id: number, opts?: any) => Promise<any>;
 
 beforeAll(async () => {
     const mod = await import('../src/services/receiptComparisonService.js');
@@ -27,6 +32,8 @@ beforeAll(async () => {
 
 beforeEach(() => {
     jest.clearAllMocks();
+    // Default: no personal equivalences — global-only behaviour.
+    mockGetPersonalEquivalentProductIds.mockResolvedValue(new Map());
 });
 
 const MAXIMA = {
@@ -51,8 +58,8 @@ function setStore(altStores: any[] = [RIMI_ALT]) {
     mockGetClosestStorePerChainToStore.mockResolvedValue(altStores);
 }
 
-// Queue the SP-lookup result (SELECT id, productId FROM StoreProduct WHERE id IN (?))
-function setSpLookup(rows: { id: number; productId: number }[]) {
+// Queue the SP-lookup result (SELECT id, productId, unit FROM StoreProduct WHERE id IN (?))
+function setSpLookup(rows: { id: number; productId: number; unit?: string }[]) {
     mockPoolQuery.mockResolvedValueOnce([rows]);
 }
 
@@ -349,5 +356,95 @@ describe('item total calculation — unit-family guard (Šafranas 0.010 g blow-u
         const result = await getReceiptComparison(1);
         const rimi = result.alternatives.find((a: any) => a.chainId === 2);
         expect(rimi.total).toBe(3.00); // 2 × 1.50
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Owner personal 'same' equivalences enrich the cross-store price pool
+// ---------------------------------------------------------------------------
+
+describe('receipt-owner personal equivalences (BOOSTER)', () => {
+    // Line SP 10 → product 100. The alt chain (Rimi) does NOT carry product
+    // 100, but the OWNER has personally swiped "same" linking product 100 to a
+    // cheaper other-chain product 200, which Rimi DOES carry at 1.50.
+    function setEquivScenario() {
+        mockGetReceiptById.mockResolvedValue({
+            id: 1, storeId: 1, uploaderUserId: 'owner-1',
+            parsedData: { products: [
+                { storeProductId: 10, quantity: 1, price: 3.00, promoPrice: null, matchConfirmed: true, unit: 'vnt' },
+            ] },
+        });
+        setStore(); // Rimi only
+        setSpLookup([{ id: 10, productId: 100, unit: 'vnt' }]);
+        // product 100 NOT carried at Rimi; product 200 carried at 1.50.
+        setBatchPrices([
+            { productId: 200, isWeighable: 0, amount: 1, unit: 'vnt', storeId: 2, price: 1.50, promoPrice: null },
+        ]);
+    }
+
+    it("adds the owner's cheaper cross-chain sibling price to the comparison", async () => {
+        setEquivScenario();
+        mockGetPersonalEquivalentProductIds.mockResolvedValue(new Map([[100, [200]]]));
+
+        const result = await getReceiptComparison(1);
+        const rimi = result.alternatives.find((a: any) => a.chainId === 2);
+
+        expect(mockGetPersonalEquivalentProductIds).toHaveBeenCalledWith('owner-1', [100]);
+        // Real sibling price enters → Rimi is now a KNOWN 1.50, not imputed 3.00.
+        expect(rimi.total).toBe(1.50);
+        expect(rimi.knownItems).toBe(1);
+        expect(rimi.imputedItems).toBe(0);
+        expect(rimi.savings).toBe(1.50); // 3.00 paid − 1.50
+    });
+
+    it('without any personal edge, behaviour is unchanged (imputed, not sibling)', async () => {
+        setEquivScenario();
+        mockGetPersonalEquivalentProductIds.mockResolvedValue(new Map()); // no edge
+
+        const result = await getReceiptComparison(1);
+        const rimi = result.alternatives.find((a: any) => a.chainId === 2);
+
+        // No sibling → product 100 uncarried at Rimi → imputed avg(3.00) = 3.00.
+        expect(rimi.total).toBe(3.00);
+        expect(rimi.imputedItems).toBe(1);
+        expect(rimi.knownItems).toBe(0);
+        expect(rimi.savings).toBe(0);
+    });
+
+    it('safeguard: an equivalent SP in a different unit family is NOT admitted', async () => {
+        // Owner linked product 100 (vnt) to product 200, but Rimi carries 200
+        // only as a weighable kg row — a different canonical family. The guard
+        // must reject it, so Rimi falls back to imputation (no fabricated price).
+        mockGetReceiptById.mockResolvedValue({
+            id: 1, storeId: 1, uploaderUserId: 'owner-1',
+            parsedData: { products: [
+                { storeProductId: 10, quantity: 1, price: 3.00, promoPrice: null, matchConfirmed: true, unit: 'vnt' },
+            ] },
+        });
+        setStore();
+        setSpLookup([{ id: 10, productId: 100, unit: 'vnt' }]); // ref family = count
+        setBatchPrices([
+            { productId: 200, isWeighable: 1, amount: 1, unit: 'kg', storeId: 2, price: 1.50, promoPrice: null },
+        ]);
+        mockGetPersonalEquivalentProductIds.mockResolvedValue(new Map([[100, [200]]]));
+
+        const result = await getReceiptComparison(1);
+        const rimi = result.alternatives.find((a: any) => a.chainId === 2);
+
+        expect(rimi.total).toBe(3.00); // family mismatch rejected → imputed
+        expect(rimi.imputedItems).toBe(1);
+        expect(rimi.knownItems).toBe(0);
+    });
+
+    it('fails open: if the equivalence lookup throws, falls back to global-only', async () => {
+        setEquivScenario();
+        mockGetPersonalEquivalentProductIds.mockRejectedValue(new Error('db down'));
+
+        const result = await getReceiptComparison(1);
+        const rimi = result.alternatives.find((a: any) => a.chainId === 2);
+
+        // No crash; behaves as if no personal edge existed → imputed 3.00.
+        expect(rimi.total).toBe(3.00);
+        expect(rimi.imputedItems).toBe(1);
     });
 });

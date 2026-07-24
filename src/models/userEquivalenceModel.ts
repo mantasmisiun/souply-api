@@ -220,6 +220,57 @@ export const getEquivalentSpIds = async (
 };
 
 /**
+ * For a set of productIds, return each product's owner-personal 'same'
+ * equivalent productIds — ONE HOP, both directions of the edge. Only
+ * cross-product edges count (sp1.productId != sp2.productId): two SPs of the
+ * SAME product are already unified by the plain StoreProduct→productId lookup,
+ * so they add nothing here.
+ *
+ * Returns Map<inputProductId, equivalentProductId[]> (only products with at
+ * least one equivalent appear). Used by the receipt cross-store pricer to add
+ * the receipt OWNER's personally-identified cross-chain siblings to the
+ * candidate price pool — so an owner's 'same' swipe improves their comparison
+ * before community consensus, and even when the swipe didn't relink the line.
+ *
+ * Because 'same' rows are normalised to point at a component root, a MEMBER
+ * product resolves to {root} and a ROOT resolves to {all members}; two members
+ * of the same component don't see each other directly (that's the one-hop
+ * contract — additive, conservative).
+ */
+export const getPersonalEquivalentProductIds = async (
+    userId: string,
+    productIds: number[],
+): Promise<Map<number, number[]>> => {
+    if (!userId || productIds.length === 0) return new Map();
+    const [rows]: any = await pool.query(
+        `SELECT sp1.productId AS productIdA, sp2.productId AS productIdB
+           FROM UserStoreProductEquivalence e
+           JOIN StoreProduct sp1 ON sp1.id = e.spIdA
+           JOIN StoreProduct sp2 ON sp2.id = e.spIdB
+          WHERE e.userId = ?
+            AND e.verdict = 'same'
+            AND sp1.productId != sp2.productId
+            AND (sp1.productId IN (?) OR sp2.productId IN (?))`,
+        [userId, productIds, productIds],
+    );
+    const inputSet = new Set(productIds);
+    const map = new Map<number, number[]>();
+    const add = (k: number, v: number) => {
+        if (k === v) return;
+        const arr = map.get(k) ?? [];
+        if (!arr.includes(v)) arr.push(v);
+        map.set(k, arr);
+    };
+    for (const r of rows) {
+        const a = Number(r.productIdA);
+        const b = Number(r.productIdB);
+        if (inputSet.has(a)) add(a, b);
+        if (inputSet.has(b)) add(b, a);
+    }
+    return map;
+};
+
+/**
  * For a browse product list, return { hideProductId → keepProductId } based on
  * the user's personal 'same' verdicts. Winner = shortest product name (lower id
  * tiebreak), matching the global merge rule so personal and global views are

@@ -1,7 +1,8 @@
 import pool from '../config/db.js';
 import { getReceiptById } from '../models/receiptModel.js';
 import { getStoreById, getClosestStorePerChainToStore, ClosestChainStore } from '../models/storeModel.js';
-import { unitFamily } from './canonicalUnit.js';
+import { unitFamily, UnitFamily } from './canonicalUnit.js';
+import { getPersonalEquivalentProductIds } from '../models/userEquivalenceModel.js';
 
 interface ParsedReceiptItem {
     storeProductId: number | null;
@@ -216,6 +217,15 @@ const buildStoreBaskets = async (
     productIdByStoreProductId: Map<number, number>,
     allStores: ClosestChainStore[],
     currentStoreId: number,
+    // BOOSTER (additive, never subtractive): the receipt owner's personal
+    // 'same' equivalences, lineProductId → equivalent (cross-chain) productIds.
+    // Their price points join the candidate pool so an owner-identified sibling
+    // can supply a real alt-store price the global catalog alone would miss.
+    personalEquivProductIds: Map<number, number[]> = new Map(),
+    // Safeguard reference: lineProductId → its canonical unit family. An
+    // equivalent option is only admitted when its own family matches (or the
+    // reference family is unknown) — same guard the rest of the pricer uses.
+    refFamilyByProduct: Map<number, UnitFamily | null> = new Map(),
 ): Promise<Map<number, StoreBasket>> => {
     const baskets = new Map<number, StoreBasket>();
     for (const store of allStores) {
@@ -228,10 +238,39 @@ const buildStoreBaskets = async (
             .map(i => productIdByStoreProductId.get(i.storeProductId!))
             .filter((id): id is number => id !== undefined)
     ));
+    // Union in the owner's personal-equivalent products so the batch fetch also
+    // pulls THEIR verified prices at the alt stores.
+    const pricedProductIds = Array.from(new Set([
+        ...recognizedProductIds,
+        ...Array.from(personalEquivProductIds.values()).flat(),
+    ]));
     const altStoreIds = allStores
         .filter(s => s.storeId !== currentStoreId)
         .map(s => s.storeId);
-    const priceCache = await batchGetLatestVerifiedPricesForStores(recognizedProductIds, altStoreIds);
+    const priceCache = await batchGetLatestVerifiedPricesForStores(pricedProductIds, altStoreIds);
+
+    // Gather the priceable options for a product at a store: the product's own
+    // options PLUS any owner-personal-equivalent product's options, gated to
+    // the same canonical unit family. Personal edges only ADD candidates; the
+    // global options are always kept.
+    const optionsFor = (storeId: number, productId: number): SpOption[] => {
+        const own = priceCache.get(storeId)?.get(productId) ?? [];
+        const equiv = personalEquivProductIds.get(productId);
+        if (!equiv || equiv.length === 0) return own;
+        const refFamily = refFamilyByProduct.get(productId) ?? null;
+        const merged = [...own];
+        for (const eqPid of equiv) {
+            const eqOpts = priceCache.get(storeId)?.get(eqPid) ?? [];
+            for (const o of eqOpts) {
+                // Safeguard: admit only a plausible same item — matching unit
+                // family (when the reference family is known). Never fabricate a
+                // price; these are real Price rows already in the cache.
+                if (refFamily !== null && unitFamily(o.unit) !== refFamily) continue;
+                merged.push(o);
+            }
+        }
+        return merged;
+    };
 
     for (const item of items) {
         if (!(item.price > 0) || !(item.quantity > 0)) continue;
@@ -270,7 +309,7 @@ const buildStoreBaskets = async (
 
         for (const store of allStores) {
             if (store.storeId === currentStoreId) continue;
-            const options = priceCache.get(store.storeId)?.get(productId!) ?? [];
+            const options = optionsFor(store.storeId, productId!);
             const t = calculateItemTotalSync(options, item.quantity, item.unit);
             if (t !== null) {
                 known.set(store.storeId, t);
@@ -300,6 +339,12 @@ export interface ReceiptComparisonOptions {
     /** Hard cap on alternative-store distance from the visited store.
      *  Falls back to DEFAULT_MAX_DISTANCE_KM when omitted. */
     maxDistanceKm?: number;
+    /** Override for whose personal 'same' equivalences enrich the candidate
+     *  price pool. Defaults to the receipt OWNER (uploaderUserId ?? userId) —
+     *  NOT the viewer — because a ReceiptComparisonSnapshot is one shared row
+     *  per receipt, so every trip member sees the same owner-informed result.
+     *  Callers normally omit this; the owner is resolved from the receipt. */
+    ownerUserId?: string | null;
 }
 
 export const getReceiptComparison = async (
@@ -427,13 +472,49 @@ export const getReceiptComparison = async (
         )
     );
     const productIdByStoreProductId = new Map<number, number>();
+    // Reference canonical unit family per product, keyed off the receipt line's
+    // OWN store product — the safeguard baseline for admitting personal-
+    // equivalent options (must share the family).
+    const refFamilyByProduct = new Map<number, UnitFamily | null>();
     if (recognizedStoreProductIds.length) {
         const [spRows]: any = await pool.query(
-            `SELECT id, productId FROM StoreProduct WHERE id IN (?)`,
+            `SELECT id, productId, unit FROM StoreProduct WHERE id IN (?)`,
             [recognizedStoreProductIds]
         );
         for (const row of spRows) {
-            productIdByStoreProductId.set(Number(row.id), Number(row.productId));
+            const productId = Number(row.productId);
+            productIdByStoreProductId.set(Number(row.id), productId);
+            if (!refFamilyByProduct.has(productId)) {
+                refFamilyByProduct.set(productId, unitFamily(row.unit));
+            } else if (refFamilyByProduct.get(productId) == null) {
+                // Prefer the first non-null family seen for the product.
+                refFamilyByProduct.set(productId, unitFamily(row.unit));
+            }
+        }
+    }
+
+    // Receipt-owner personal 'same' equivalences (BOOSTER, fail-open): key off
+    // the OWNER, resolved from the receipt unless explicitly overridden. If the
+    // lookup throws, fall back silently to today's global-only comparison.
+    const ownerUserId = opts.ownerUserId
+        ?? (receipt as any).uploaderUserId
+        ?? (receipt as any).userId
+        ?? null;
+    let personalEquivProductIds = new Map<number, number[]>();
+    const lineProductIds = Array.from(new Set(productIdByStoreProductId.values()));
+    if (ownerUserId && lineProductIds.length) {
+        try {
+            personalEquivProductIds = await getPersonalEquivalentProductIds(
+                String(ownerUserId),
+                lineProductIds,
+            );
+        } catch (e) {
+            console.warn(
+                `[receiptComparison] personal-equivalence lookup failed for receipt ` +
+                `${receiptId} (owner ${ownerUserId}); falling back to global-only. ` +
+                `${(e as Error)?.message ?? e}`,
+            );
+            personalEquivProductIds = new Map();
         }
     }
 
@@ -442,6 +523,8 @@ export const getReceiptComparison = async (
         productIdByStoreProductId,
         allStores,
         currentStore.id,
+        personalEquivProductIds,
+        refFamilyByProduct,
     );
 
     const currentBasket = baskets.get(currentStore.id)!;
