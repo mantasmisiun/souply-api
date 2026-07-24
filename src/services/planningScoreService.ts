@@ -281,10 +281,22 @@ export const computePlanningScore = async (tripId: number): Promise<PlanningScor
         snapRows++;
     }
     let storeChoice: number | null = null;
-    if (snapRows > 0 && (M - C) >= 0.01) {
-        storeChoice = Math.min(1, Math.max(0, 0.5 + 0.5 * (M - P) / (M - C)));
-        base.storeChoice = Math.round(storeChoice * 100) / 100;
-        base.storeHeadroomEur = Math.round(Math.max(0, P - C) * 100) / 100;
+    if (snapRows > 0) {
+        if ((M - C) >= 0.01) {
+            // Normal spread: map paid from median (0.5) down to cheapest (1.0).
+            storeChoice = Math.min(1, Math.max(0, 0.5 + 0.5 * (M - P) / (M - C)));
+        } else if (C >= 0.01) {
+            // NO spread — every comparable store costs ~C (e.g. one product, uniform
+            // catalog price). Paying at/below it is a perfect choice (you could not
+            // have done better elsewhere); paying above scales down to 0 at 2× the
+            // alt price. Previously this was NULLED, which scored a clearly-cheapest
+            // ad-hoc trip 0/100 (receipt 116: paid €2,28 vs €4,98 everywhere else).
+            storeChoice = Math.min(1, Math.max(0, 1 - Math.max(0, P - C) / C));
+        }
+        if (storeChoice != null) {
+            base.storeChoice = Math.round(storeChoice * 100) / 100;
+            base.storeHeadroomEur = Math.round(Math.max(0, P - C) * 100) / 100;
+        }
     }
 
     base.matchedListItemCount = pairs.length;
