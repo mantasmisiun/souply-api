@@ -1,5 +1,5 @@
 import pool from '../config/db.js';
-import { computeReceiptSavings, UNCATEGORISED_CAT } from './statsService.js';
+import { computeReceiptSavings, comboDiscountOf, UNCATEGORISED_CAT } from './statsService.js';
 import { tripSavingsDeltas, type TripSavingsDeltas } from './comparisonSnapshotService.js';
 import { fetchUserPersonalRescues } from './receiptHydrationService.js';
 import type { Locale } from '../middleware/locale.js';
@@ -102,7 +102,8 @@ export const getTripStats = async (
     locale: Locale = 'lt',
 ): Promise<TripStats> => {
     const [receipts]: any = await pool.query(
-        `SELECT r.id, r.uploaderUserId, r.userId, sc.name AS chainName
+        `SELECT r.id, r.uploaderUserId, r.userId, sc.name AS chainName,
+                JSON_EXTRACT(r.parsedData, '$.footer.comboDiscount') AS comboDiscount
            FROM Receipt r
            LEFT JOIN Store s ON s.id = r.storeId
            LEFT JOIN StoreChain sc ON sc.id = s.chainId
@@ -212,11 +213,21 @@ export const getTripStats = async (
         catMap[catFinal] = (catMap[catFinal] ?? 0) + itemTotal;
     }
 
-    const savings = await computeReceiptSavings(itemRows.map((i: any) => ({
+    const itemSavings = await computeReceiptSavings(itemRows.map((i: any) => ({
         storeProductId: Number(i.storeProductId) || 0,
         price: (i.promoPrice != null && parseFloat(i.promoPrice) > 0) ? parseFloat(i.promoPrice) : parseFloat(i.price) || 0,
         quantity: parseFloat(i.quantity) || 1,
     })));
+    // A receipt-level combo/set-deal discount (IKI "RINKINYS") is real money the
+    // shopper saved that is NOT on any line price, so per-item savings miss it and a
+    // genuine saving reads as "overpaid" (receipt 116: 2×€2,49 dešra − €2,70 combo =
+    // €2,28 paid, yet the lines still say €2,49). ADD it to savings — the same
+    // contract the comparison basket uses (it SUBTRACTS combo from the visited total).
+    const comboTotal = receipts.reduce(
+        (s: number, r: any) => s + comboDiscountOf({ footer: { comboDiscount: r.comboDiscount } }),
+        0,
+    );
+    const savings = itemSavings + comboTotal;
 
     // Member breakdown across EVERY trip member (0 for non-uploaders), with the
     // name + avatar colour for the per-user card. Two queries (no User JOIN) to
