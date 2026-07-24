@@ -1434,6 +1434,10 @@ export const healReceiptFromRetake = async (req: Request, res: Response, next: N
         const identity = (pd: any) => ({
             chainId: numOrNull(pd?.header?.chainId),
             receiptNo: pd?.footer?.receiptNo != null ? String(pd.footer.receiptNo) : null,
+            // ALL printed id forms — so a retake that garbled one form still matches on another.
+            receiptNos: Array.isArray(pd?.footer?.receiptNos)
+                ? pd.footer.receiptNos.filter((v: any) => typeof v === 'string')
+                : null,
             date: pd?.footer?.date != null ? String(pd.footer.date) : null,
             total: numOrNull(pd?.footer?.total),
         });
@@ -1449,7 +1453,20 @@ export const healReceiptFromRetake = async (req: Request, res: Response, next: N
 
         // No improvement → touch nothing (don't reset the user's completed swipes).
         if (plan.healedCount === 0 && plan.insertedCount === 0) {
-            res.json({ changed: false, healed: 0, inserted: 0, kept: plan.keptCount });
+            // No line improvement → leave the ITEMS (and completed swipes) untouched.
+            // A retake still delivers fresh reproducibility geometry the stored blob
+            // may lack: `wordsDump` (the off-device reparse input). Persist it into
+            // parsedData ONLY (never the products/items) so a same-parse retake still
+            // makes the receipt reparseable — the interactive scan stores wordsDump,
+            // but a queue/heal receipt otherwise never gets one.
+            const candWd = (parsedData as any)?.wordsDump;
+            let wordsDumpStored = false;
+            if (candWd != null && JSON.stringify(existingParsed?.wordsDump ?? null) !== JSON.stringify(candWd)) {
+                const nextParsed = { ...existingParsed, wordsDump: candWd };
+                await pool.query('UPDATE Receipt SET parsedData = ? WHERE id = ?', [JSON.stringify(nextParsed), receiptId]);
+                wordsDumpStored = true;
+            }
+            res.json({ changed: false, healed: 0, inserted: 0, kept: plan.keptCount, wordsDumpStored });
             return;
         }
 

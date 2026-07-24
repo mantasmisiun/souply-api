@@ -132,26 +132,57 @@ export const assessQuality = (lines: HealLine[], total: number | null): QualityA
 export interface ReceiptIdentity {
     chainId: number | null;
     receiptNo: string | null;
+    /** ALL printed forms of the id (IKI: composite "Kvito Nr. 168/645/104148", VMI
+     *  "Kvito numeris 104148", "Kvitas 3157", + a deterministic date+time+total synthetic).
+     *  A retake that garbles ONE form (redaction clipping the composite) still matches on
+     *  another — the same set duplicate detection uses. Falls back to [receiptNo]. */
+    receiptNos?: string[] | null;
     date: string | null;   // "YYYY-MM-DD..." — compared by day
     total: number | null;
 }
 
 const dayOf = (d: string | null): string | null => (d ? String(d).slice(0, 10) : null);
 
-/** Is the retake the SAME physical receipt? A hard NO on receiptNo/chain/date
- *  mismatch; totals must agree within tolerance. When a field is missing on
- *  either side it can't disprove identity (so it doesn't block) — but at least
- *  one strong signal (receiptNo or chain+date) must positively agree. */
+/** Receipt ids worth matching on: composite (has '/') or ≥6 digits — filters short/noise
+ *  ids like "3157". Mirrors receiptModel.isDistinctiveReceiptNo (the dedup path). */
+const distinctiveReceiptIds = (idty: ReceiptIdentity): string[] => {
+    const arr = idty.receiptNos && idty.receiptNos.length
+        ? idty.receiptNos
+        : (idty.receiptNo ? [idty.receiptNo] : []);
+    return [...new Set(
+        arr.filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
+           .filter((v) => v.includes('/') || v.replace(/\D/g, '').length >= 6),
+    )];
+};
+
+/** Two printed ids are the same number if equal, or one's digit-string is a suffix of the
+ *  other's (≥6 digits): the VMI "104148" is the tail of the composite "168/645/104148". */
+const receiptIdsMatch = (x: string, y: string): boolean => {
+    if (x === y) return true;
+    const dx = x.replace(/\D/g, ''), dy = y.replace(/\D/g, '');
+    return dx.length >= 6 && dy.length >= 6 && (dx.endsWith(dy) || dy.endsWith(dx));
+};
+
+/** Is the retake the SAME physical receipt? Hard NO on a chain/date/total contradiction.
+ *  Receipt-number agreement is checked across ALL printed forms (receiptNos), so a retake
+ *  that mis-read one form still matches on another; if BOTH sides produced distinctive ids
+ *  yet none overlap, that's a genuinely different receipt. When a field is missing it can't
+ *  disprove identity — but at least one strong signal (any id overlap, or chain+date) must
+ *  positively agree. */
 export const isSameReceipt = (a: ReceiptIdentity, b: ReceiptIdentity): boolean => {
-    if (a.receiptNo && b.receiptNo && a.receiptNo !== b.receiptNo) return false;
     if (a.chainId != null && b.chainId != null && a.chainId !== b.chainId) return false;
     const da = dayOf(a.date), db = dayOf(b.date);
     if (da && db && da !== db) return false;
     if (a.total != null && b.total != null && a.total > 0 && b.total > 0
         && Math.abs(a.total - b.total) / Math.max(a.total, b.total) > CFG.sameReceiptTotalFrac) return false;
-    const receiptNoAgrees = !!(a.receiptNo && b.receiptNo && a.receiptNo === b.receiptNo);
-    const chainDayAgrees = a.chainId != null && b.chainId != null && a.chainId === b.chainId && !!da && !!db && da === db;
-    return receiptNoAgrees || chainDayAgrees;
+    const aIds = distinctiveReceiptIds(a), bIds = distinctiveReceiptIds(b);
+    const idsOverlap = aIds.some((x) => bIds.some((y) => receiptIdsMatch(x, y)));
+    if (idsOverlap) return true;                             // any shared printed form → same
+    // Both scans produced distinctive ids yet NONE match → genuinely different receipts.
+    if (aIds.length > 0 && bIds.length > 0) return false;
+    // Neither side offered a distinctive id to arbitrate — fall back to the raw canonical id.
+    if (a.receiptNo && b.receiptNo && a.receiptNo !== b.receiptNo) return false;
+    return a.chainId != null && b.chainId != null && a.chainId === b.chainId && !!da && !!db && da === db;
 };
 
 // ── sequence alignment (price-first Needleman–Wunsch over parsed lines) ───────
@@ -272,8 +303,26 @@ export const healReceipt = <R>(
         // match — per-field best-of, never-downgrade.
         const e = existing[op.i], c = candidate[op.j];
         if (e.confirmed) {
-            lines.push({ op: 'kept', changed: false, existing: e, candidate: c, name: e.name, price: e.price, quantity: e.quantity, takeCandidateMatch: false, takeCandidatePrice: false });
-            keptCount++;
+            // Keep the user-confirmed MATCH (the swipe), but a retake may still CORRECT a
+            // grossly wrong PRICE the parser produced — the user confirmed the product, not
+            // the price. Adopt the candidate's price ONLY when it's sound AND it moves the
+            // receipt line-sum toward the printed total (closes a real reconciliation gap);
+            // otherwise the line is kept verbatim. The SP + matchConfirmed are preserved
+            // (takeCandidateMatch stays false), so no re-swipe is triggered.
+            const cGood = c.price > 0 && !c.implausible;
+            const reprice = cGood && total != null && total > 0 && !priceClose(e.price, c.price) &&
+                Math.abs(existingSum - e.price + c.price - total) + tol < Math.abs(existingSum - total);
+            lines.push({
+                op: reprice ? 'healed' : 'kept',
+                changed: reprice,
+                existing: e, candidate: c,
+                name: e.name,                     // a confirmed name is never overwritten
+                price: reprice ? c.price : e.price,
+                quantity: reprice ? c.quantity : e.quantity,
+                takeCandidateMatch: false,        // keep the confirmed SP + matchConfirmed
+                takeCandidatePrice: reprice,
+            });
+            if (reprice) healedCount++; else keptCount++;
             continue;
         }
         // Name: the higher-quality side wins; a usable existing name isn't lost to a garbled retake.

@@ -96,6 +96,26 @@ describe('receiptHeal — best-of merge (never downgrade)', () => {
         expect(plan.lines[0].price).toBeCloseTo(1.29);
         expect(plan.lines[0].op).toBe('healed');
     });
+
+    it('re-prices a CONFIRMED line when the retake price closes the reconciliation gap (match kept)', () => {
+        // Salmon: stored net 3,19 (parser double-discount bug), retake net 10,67; total 26,52.
+        const existing = [L('Salmon', 3.19, { confirmed: true, matched: true }), L('Rest', 15.89, { matched: true })];
+        const candidate = [L('Salmon', 10.67, { matched: true }), L('Rest', 15.89, { matched: true })];
+        const plan = healReceipt(existing, candidate, 26.52);
+        const salmon = plan.lines.find((l) => l.name === 'Salmon')!;
+        expect(salmon.op).toBe('healed');
+        expect(salmon.price).toBeCloseTo(10.67);
+        expect(salmon.takeCandidatePrice).toBe(true);
+        expect(salmon.takeCandidateMatch).toBe(false); // SP + matchConfirmed preserved (no re-swipe)
+    });
+
+    it('does NOT re-price a confirmed line when the receipt already reconciles', () => {
+        const existing = [L('Milk', 1.19, { confirmed: true, matched: true })];
+        const candidate = [L('Milk', 1.49, { matched: true })];
+        const plan = healReceipt(existing, candidate, 1.19); // already balances → a differing retake can't override
+        expect(plan.lines[0].op).toBe('kept');
+        expect(plan.lines[0].price).toBeCloseTo(1.19);
+    });
 });
 
 describe('receiptHeal — same-receipt guard', () => {
@@ -114,6 +134,28 @@ describe('receiptHeal — same-receipt guard', () => {
     });
     it('accepts on chain+day when receipt numbers are absent', () => {
         expect(isSameReceipt({ ...base, receiptNo: null }, { ...base, receiptNo: null })).toBe(true);
+    });
+
+    // A retake that garbled the composite canonical ("168/645/104148" → "168/645/04142")
+    // still matches on another printed form (VMI "104148", "3157", the synthetic).
+    const stored = { chainId: 3, receiptNo: '168/645/104148', date: '2026-06-11', total: 26.52,
+        receiptNos: ['168/645/104148', '104148', '3157', '20260611-2107-2652-iki-receipt'] };
+    const retake = { chainId: 3, receiptNo: '168/645/04142', date: '2026-06-11', total: 26.52,
+        receiptNos: ['168/645/04142', '104148', '3157', '168/645/104148', '20260611-2107-2652-iki-receipt'] };
+    it('accepts a retake whose canonical garbled but another printed form matches', () => {
+        expect(isSameReceipt(stored, retake)).toBe(true);
+    });
+    it('matches the VMI id as a suffix of the composite even without an exact array entry', () => {
+        expect(isSameReceipt(
+            { chainId: 3, receiptNo: '168/645/104148', date: '2026-06-11', total: 26.52, receiptNos: ['168/645/104148'] },
+            { chainId: 3, receiptNo: '104148', date: '2026-06-11', total: 26.52, receiptNos: ['104148'] },
+        )).toBe(true);
+    });
+    it('rejects when both have distinctive ids that share nothing', () => {
+        expect(isSameReceipt(
+            { chainId: 3, receiptNo: '168/645/104148', date: '2026-06-11', total: 26.52, receiptNos: ['168/645/104148'] },
+            { chainId: 3, receiptNo: '999/111/222333', date: '2026-06-11', total: 26.52, receiptNos: ['999/111/222333'] },
+        )).toBe(false);
     });
 });
 
