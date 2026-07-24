@@ -5,7 +5,11 @@ import { loadCanonicalsForProducts } from './productCanonical.js';
 
 const UNASSIGNED_CATEGORY = 688; // "Nepriskirta" — never counts as a category match
 // Filler tokens that must not create a false name match on their own.
-const NAME_STOP = new Set(['bon', 'via', 'clever', 'lengvai', 'ekologiskas', 'lietuviski', 'lietuviskas', 'didziosios', 'smulkiavaisiai', 'smulki', 'skonio', 'salt', 'hill']);
+// Noise tokens that must NOT bind two different products together. 'rieb'
+// (riebumas / fat-%) appears in almost every dairy name — "sūrelis 24 % rieb."
+// and "grietinė 30 % rieb." share only 'rieb', which greedily mis-paired the
+// planned sūrelis to a receipt sour cream. Fat-% is never identifying.
+const NAME_STOP = new Set(['bon', 'via', 'clever', 'lengvai', 'ekologiskas', 'lietuviski', 'lietuviskas', 'didziosios', 'smulkiavaisiai', 'smulki', 'skonio', 'salt', 'hill', 'rieb', 'riebumo', 'riebumas', 'riebalu']);
 /** Significant name tokens (≥4 chars, not a filler) for fuzzy same-item match. */
 const nameTokens = (name: string | null): Set<string> => {
     const out = new Set<string>();
@@ -72,6 +76,15 @@ export interface PlanningPair {
     canonicalStep: number | null;
     listQty: number;
     receiptQty: number;
+    /** Pack size for the DISPLAY amount. listQty is a PACK COUNT (2 × 250 g),
+     *  not kilograms — the client formats "N × packAmount packUnit" via
+     *  formatItemAmount so a 2-pack plan never renders as "2 kg". Bought side
+     *  uses the receipt line's OWN unit/amount/weighable. */
+    listPackAmount: number | null;
+    listPackUnit: string | null;
+    receiptUnit: string | null;
+    receiptAmount: number | null;
+    receiptWeighable: boolean;
     /** Predicted (list) vs actual (receipt) TOTAL for this matched item — feeds
      *  the prediction-accuracy metric. listPrice is null when the list item has
      *  no calculated price. */
@@ -119,7 +132,7 @@ export interface PlanningScore {
     impulseReceiptItemIds: number[];
     /** Every list item classified bought (ANY-MATCH some receipt line) or missed,
      *  with render data for the Missed sheet's cards. */
-    listItemsDetail: { listItemId: number; name: string; imageUrls: string | (string | null)[] | null; quantity: number; isWeighable: boolean; canonicalStep: number | null; bought: boolean }[];
+    listItemsDetail: { listItemId: number; name: string; imageUrls: string | (string | null)[] | null; quantity: number; isWeighable: boolean; canonicalStep: number | null; packAmount: number | null; packUnit: string | null; bought: boolean }[];
 }
 
 export const computePlanningScore = async (tripId: number): Promise<PlanningScore> => {
@@ -147,6 +160,7 @@ export const computePlanningScore = async (tripId: number): Promise<PlanningScor
         `SELECT sli.id, sli.quantity, sli.customName, sli.price,
                 COALESCE(sli.productId, sp.productId) AS productId,
                 p.name AS productName, sp.storeProductName AS spName,
+                sp.amount AS packAmount, sp.unit AS packUnit,
                 ${localizedProductNameSql('lt', { productAlias: 'p' }).imageUrlsSql} AS imageUrls,
                 -- Weighable is a PRODUCT property; sli.isWeighable is NOT NULL
                 -- DEFAULT 0 so it can't lead the COALESCE (mirrors the shopping
@@ -170,6 +184,7 @@ export const computePlanningScore = async (tripId: number): Promise<PlanningScor
     // Receipt lines with resolved productId, name + L3 category.
     const [receiptItems]: any = await pool.query(
         `SELECT ri.id, ri.name, ri.price, ri.promoPrice, ri.quantity,
+                ri.unit AS unit, ri.amount AS amount, ri.isWeighable AS isWeighable,
                 sp.productId AS productId,
                 p.name AS resolvedName, sp.storeProductName AS spName,
                 p.categoryId AS l3
@@ -226,6 +241,11 @@ export const computePlanningScore = async (tripId: number): Promise<PlanningScor
             receiptName: ri.resolvedName ?? ri.spName ?? ri.name,
             imageUrls: li.imageUrls ?? null, isWeighable: !!li.isWeighable, canonicalStep: stepOf(li),
             listQty: parseFloat(li.quantity) || 1, receiptQty: parseFloat(ri.quantity) || 1,
+            listPackAmount: li.packAmount != null ? parseFloat(li.packAmount) : null,
+            listPackUnit: li.packUnit ?? null,
+            receiptUnit: ri.unit ?? null,
+            receiptAmount: ri.amount != null ? parseFloat(ri.amount) : null,
+            receiptWeighable: !!ri.isWeighable,
             listPrice: li.price != null ? parseFloat(li.price) : null, receiptPrice: spend(ri),
         });
     }
@@ -245,6 +265,11 @@ export const computePlanningScore = async (tripId: number): Promise<PlanningScor
             receiptName: ri.resolvedName ?? ri.spName ?? ri.name,
             imageUrls: li.imageUrls ?? null, isWeighable: !!li.isWeighable, canonicalStep: stepOf(li),
             listQty: parseFloat(li.quantity) || 1, receiptQty: parseFloat(ri.quantity) || 1,
+            listPackAmount: li.packAmount != null ? parseFloat(li.packAmount) : null,
+            listPackUnit: li.packUnit ?? null,
+            receiptUnit: ri.unit ?? null,
+            receiptAmount: ri.amount != null ? parseFloat(ri.amount) : null,
+            receiptWeighable: !!ri.isWeighable,
             listPrice: li.price != null ? parseFloat(li.price) : null, receiptPrice: spend(ri),
         });
     }
@@ -319,6 +344,8 @@ export const computePlanningScore = async (tripId: number): Promise<PlanningScor
         quantity: parseFloat(li.quantity) || 1,
         isWeighable: !!li.isWeighable,
         canonicalStep: stepOf(li),
+        packAmount: li.packAmount != null ? parseFloat(li.packAmount) : null,
+        packUnit: li.packUnit ?? null,
         bought: receiptItems.some((ri: any) => sameKind(li, ri)),
     }));
     // Prediction accuracy: predicted (list) vs actual (receipt) over matched
