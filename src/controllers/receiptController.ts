@@ -11,7 +11,8 @@ import {
     getVotedPairKeysForUser,
 } from "../models/receiptSwipeCandidateModel.js";
 import { buildSwipeQueue } from "../services/swipeQueueService.js";
-import { getMandatoryQueue } from "../services/mandatoryQueueService.js";
+import { getMandatoryQueue, getServedResolveLineIdxs } from "../services/mandatoryQueueService.js";
+import { snapshotReceiptComparison } from "../services/comparisonSnapshotService.js";
 import { normalizeReceiptNo, normalizeReceiptNos } from "../utils/receiptMetadata.js";
 import { getReverificationPairKeysForReceipt } from "../models/userEquivalenceModel.js";
 import {
@@ -21,6 +22,12 @@ import {
 } from "../models/receiptLineIssueModel.js";
 import { getPresignedUrl, deleteReceiptImage } from "../services/storageService.js";
 import { persistReceiptPrices, applyReceiptAutosave } from '../services/receiptSaveService.js';
+import { getReceiptItemLines, replaceReceiptItems } from '../models/receiptItemModel.js';
+import { getCachedChainCandidates, getCachedCrossChainCandidates } from '../models/storeProductModel.js';
+import { findBestProductMatches } from '../utils/productMatcher.js';
+import { computeItemConfidence } from '../services/itemConfidence.js';
+import { RECOGNITION } from '../../../shared/recognitionConfig.js';
+import { healReceipt as computeHealPlan, isSameReceipt, type HealLine } from '../services/receiptHealService.js';
 import { withDeadlockRetry } from '../utils/withDeadlockRetry.js';
 import { demoteReceiptLineDirect } from '../services/receiptLineDemotionService.js';
 import { buildReceiptResolveCards, markServedResolveLinesAsked } from '../services/receiptResolveQueueService.js';
@@ -47,24 +54,36 @@ export const markSwipesDone = async (req: Request, res: Response, next: NextFunc
         // handled at link time) and repeat calls don't re-notify.
         const beforeSwipes = await getReceiptById(id);
         await completeMandatorySwipes(id);
-        // Terminal ask-once: the resolve-queue Card-B lines offered this session that
-        // the user did NOT resolve (a vote marks them resolved_user at the /vote path)
-        // are recorded 'asked' now, so future sessions don't re-nag them. This is the
-        // ledger write that USED to live on the resolve-queue GET — moved here (a real
-        // completion event) so serving the queue stays idempotent and re-fetches never
-        // delete the user's cards mid-session. Fail-soft: a ledger hiccup must not fail
-        // the completion the client already acted on.
+        // Terminal ask-once: mark ONLY the Card-B lines actually SERVED this session
+        // 'asked' (those the user did NOT resolve stay suppressed; a vote already marked
+        // resolved_user at the /vote path). The served set is the client's own reported
+        // indices when present, else the mandatory-queue snapshot the client was served —
+        // NEVER a fresh recompute at completion, which would pick the NEXT top uncertain
+        // lines (already-resolved served lines now excluded) and burn lines the user never
+        // saw, permanently hiding them from future voluntary sessions. This is the ledger
+        // write that USED to live on the resolve-queue GET — moved here (a real completion
+        // event) so serving the queue stays idempotent and re-fetches never delete the
+        // user's cards mid-session. Fail-soft: a ledger hiccup must not fail the completion
+        // the client already acted on.
         try {
-            const conn = await (pool as any).getConnection();
-            try {
-                await conn.beginTransaction();
-                await markServedResolveLinesAsked(id, conn);
-                await conn.commit();
-            } catch (e) {
-                await conn.rollback();
-                throw e;
-            } finally {
-                conn.release();
+            const bodyIdxs = Array.isArray(req.body?.servedResolveLineIdxs)
+                ? (req.body.servedResolveLineIdxs as unknown[])
+                      .map((v) => Number(v))
+                      .filter((n) => Number.isInteger(n) && n >= 0)
+                : null;
+            const servedIdxs = bodyIdxs ?? (req.authUserId ? getServedResolveLineIdxs(req.authUserId, id) : null);
+            if (servedIdxs && servedIdxs.length > 0) {
+                const conn = await (pool as any).getConnection();
+                try {
+                    await conn.beginTransaction();
+                    await markServedResolveLinesAsked(id, conn, servedIdxs);
+                    await conn.commit();
+                } catch (e) {
+                    await conn.rollback();
+                    throw e;
+                } finally {
+                    conn.release();
+                }
             }
         } catch (ledgerErr) {
             console.warn(`[markSwipesDone] ask-once ledger write failed for receipt ${id}:`, ledgerErr);
@@ -1178,6 +1197,13 @@ export const submitReceiptLineVote = async (req: Request, res: Response, next: N
             await markLineResolved(receiptId, lineIdx, 'user', vote, conn);
             await conn.commit();
             res.json({ ok: true, line: line ?? null });
+            // A line-mutating vote (link OR demote) changes the cross-store comparison —
+            // recompute the FROZEN ReceiptComparisonSnapshot so Sutaupyta + Planavimas
+            // (storeChoice) adapt to the new knowledge. Fire-and-forget + idempotent; it
+            // re-reads getReceiptById which already reflects the just-committed link, and
+            // it covers the VOLUNTARY path (which never calls /complete-swipes).
+            if (line) void snapshotReceiptComparison(receiptId).catch((e) =>
+                console.warn(`[vote] snapshot recompute failed r${receiptId}:`, (e as Error)?.message));
         } catch (e) {
             await conn.rollback();
             throw e;
@@ -1357,4 +1383,230 @@ export const fetchMandatoryQueue = async (req: Request, res: Response, next: Nex
     } catch (error) {
         next(error);
     }
+};
+
+// ── RETAKE / HEAL ─────────────────────────────────────────────────────────────
+// POST /receipts/:id/heal — a retake is a SECOND observation of the SAME receipt.
+// The app re-runs the on-device OCR+parse+match and posts the candidate parse; we
+// align it against the stored lines and heal (best-of, never-downgrade), then
+// replace the item set in place — kept lines stay identical (their SP survives),
+// only healed/inserted lines re-swipe. Different receipt → 409 (client offers a
+// full replace). Owner-gated by the `owns` middleware on the route.
+
+const lineTotalOf = (l: any): number => {
+    const unit = (l?.promoPrice != null && Number(l.promoPrice) > 0) ? Number(l.promoPrice) : Number(l?.price);
+    return (Number.isFinite(unit) ? unit : 0) * (Number(l?.quantity) > 0 ? Number(l.quantity) : 1);
+};
+const confScore = (ic: any): number => {
+    if (ic == null) return 0.5;
+    if (typeof ic === 'number') return ic;
+    if (typeof ic === 'object' && typeof ic.score === 'number') return ic.score;
+    return 0.5;
+};
+const toHealLine = (l: any): HealLine<any> => ({
+    price: lineTotalOf(l),
+    quantity: Number(l?.quantity) > 0 ? Number(l.quantity) : 1,
+    name: typeof l?.name === 'string' ? l.name : '',
+    matched: l?.storeProductId != null && Number(l.storeProductId) > 0,
+    confirmed: !!l?.matchConfirmed,
+    confidence: confScore(l?.itemConfidence),
+    implausible: !!l?.priceImplausible,
+    ref: l,
+});
+
+export const healReceiptFromRetake = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const receiptId = Number(req.params.id);
+        const parsedData = req.body?.parsedData;
+        const newFilePath = typeof req.body?.filePath === 'string' && req.body.filePath ? req.body.filePath : null;
+        // The client uploads the retake IMAGE separately (after this call), so it
+        // signals here that the stored image is being replaced → adopt the retake's
+        // geometry (regions/dims) so the bands + crops line up with the new photo.
+        const swapImage = req.body?.swapImage === true || newFilePath != null;
+        if (!Number.isFinite(receiptId) || !parsedData) { res.status(400).json({ error: 'receiptId and parsedData required' }); return; }
+
+        const [[receipt]]: any = await pool.query('SELECT id, parsedData, filePath FROM Receipt WHERE id = ?', [receiptId]);
+        if (!receipt) { res.status(404).json({ error: 'not found' }); return; }
+        const existingParsed = typeof receipt.parsedData === 'string' ? JSON.parse(receipt.parsedData) : (receipt.parsedData ?? {});
+
+        // Same-receipt guard — a retake of a DIFFERENT receipt aborts (→ full replace).
+        const numOrNull = (v: any): number | null => (v != null && Number.isFinite(Number(v)) ? Number(v) : null);
+        const identity = (pd: any) => ({
+            chainId: numOrNull(pd?.header?.chainId),
+            receiptNo: pd?.footer?.receiptNo != null ? String(pd.footer.receiptNo) : null,
+            date: pd?.footer?.date != null ? String(pd.footer.date) : null,
+            total: numOrNull(pd?.footer?.total),
+        });
+        if (!isSameReceipt(identity(existingParsed), identity(parsedData))) {
+            res.status(409).json({ error: 'different-receipt' });
+            return;
+        }
+
+        const existingLines = await getReceiptItemLines(receiptId);
+        const candidateLines: any[] = Array.isArray(parsedData.products) ? parsedData.products : [];
+        const total = numOrNull(existingParsed?.footer?.total);
+        const plan = computeHealPlan(existingLines.map(toHealLine), candidateLines.map(toHealLine), total);
+
+        // No improvement → touch nothing (don't reset the user's completed swipes).
+        if (plan.healedCount === 0 && plan.insertedCount === 0) {
+            res.json({ changed: false, healed: 0, inserted: 0, kept: plan.keptCount });
+            return;
+        }
+
+        // Splice the healed line set from the two parsed-line lists.
+        const healedLines = plan.lines.map((pl) => {
+            if (pl.op === 'inserted') return { ...(pl.candidate!.ref as any) };
+            const base: any = { ...(pl.existing!.ref as any) };
+            // The stored image becomes the RETAKE photo, so a line's crop geometry
+            // must come from the retake (candidate) — keeping the OLD region would
+            // crop the new image at stale coordinates. (Retake-missed lines have no
+            // candidate → keep the old region; they're rare.)
+            if (pl.candidate?.ref) {
+                const c: any = pl.candidate.ref;
+                base.region = c.region ?? base.region;
+                base.rawLines = c.rawLines ?? base.rawLines;
+            }
+            if (pl.op !== 'healed') return base;
+            base.name = pl.name;
+            if (pl.takeCandidatePrice && pl.candidate?.ref) {
+                const c: any = pl.candidate.ref;
+                base.price = c.price; base.promoPrice = c.promoPrice; base.quantity = c.quantity;
+                base.unit = c.unit; base.pricePerUnit = c.pricePerUnit; base.amount = c.amount; base.sizeUnit = c.sizeUnit;
+                base.priceImplausible = false;
+            }
+            if (pl.takeCandidateMatch && pl.candidate?.ref) {
+                const c: any = pl.candidate.ref;
+                base.storeProductId = c.storeProductId;
+                base.matchedName = c.matchedName;
+                base.storeProductImageUrl = c.storeProductImageUrl;
+                base.matchConfidence = c.matchConfidence;
+                base.categoryId = c.categoryId; base.categoryName = c.categoryName; base.categoryL2Name = c.categoryL2Name;
+                base.itemConfidence = c.itemConfidence; base.altMatches = c.altMatches;
+                base.matchSource = 'heal';
+                base.matchConfirmed = false; // healed match must be re-verified
+            }
+            return base;
+        });
+
+        // RE-MATCH unmatched lines against the CURRENT server catalogue. The
+        // original scan matched against a staler catalogue / worse OCR, leaving
+        // altMatches empty — so nothing could auto-apply AND the voluntary crop
+        // queue had no candidate to offer. This re-runs the SAME matcher the scan
+        // uses (findBestProductMatches): confident same-chain hits auto-apply, the
+        // rest get populated altMatches (→ crop cards) + kept surface-eligible (S3).
+        const rematchChainId = numOrNull(existingParsed?.header?.chainId);
+        let rematched = 0;
+        if (rematchChainId != null) {
+            try {
+                const cands = await getCachedChainCandidates(rematchChainId, req.locale);
+                const autoApply = RECOGNITION.match.autoApplyThreshold;
+                for (const line of healedLines) {
+                    const nm = String(line.name ?? '');
+                    if (line.storeProductId != null && Number(line.storeProductId) > 0) {
+                        // Already matched (kept/heal). Recompute a band-less confidence
+                        // (heal-applied lines were persisted without a computed band);
+                        // leave good ones untouched so a confirmed line isn't disturbed.
+                        const ic: any = line.itemConfidence;
+                        if (nm && (!ic || typeof ic.band !== 'string')) {
+                            line.itemConfidence = computeItemConfidence({
+                                nameConf: Number(line.matchConfidence) || 0.9, nameText: nm,
+                                priceVerified: !!line.priceVerified, viaPromo: false, gapToRunnerUp: 0,
+                                source: 'reused', priceImplausible: !!line.priceImplausible,
+                                userConfirmed: !!line.matchConfirmed,
+                            });
+                        }
+                        continue;
+                    }
+                    if (!nm) continue;
+                    let ms = findBestProductMatches(nm, null, line.unit ?? null, cands, undefined, undefined, !!line.isWeighable);
+                    let crossChain = false;
+                    if (ms.length === 0) {
+                        const xc = await getCachedCrossChainCandidates(rematchChainId, req.locale);
+                        ms = findBestProductMatches(nm, null, line.unit ?? null, xc, RECOGNITION.match.minConfidenceCrossChain, undefined, !!line.isWeighable);
+                        crossChain = ms.length > 0;
+                    }
+                    // Store candidates (strip the big image urls — never rendered from altMatches).
+                    line.altMatches = ms.map((m: any) => { const { imageUrl: _drop, ...rest } = m; return rest; });
+                    const gap = ms.length >= 2 ? ms[0].confidence - ms[1].confidence : 0;
+                    if (ms.length > 0 && ms[0].confidence >= autoApply && !crossChain) {
+                        const top: any = ms[0];
+                        line.storeProductId = top.storeProductId;
+                        line.matchedName = top.name;
+                        line.matchConfidence = top.confidence;
+                        line.matchConfirmed = false;
+                        line.matchSource = 'heal-rematch';
+                        // Consistent confidence for a matched line — no stale unmatched veto.
+                        line.itemConfidence = computeItemConfidence({
+                            nameConf: top.confidence, nameText: nm, priceVerified: false, viaPromo: false,
+                            gapToRunnerUp: gap, source: 'reused', priceImplausible: !!line.priceImplausible,
+                        });
+                        rematched++;
+                    } else {
+                        // Unmatched (candidates or none) → a clean 'unmatched' confidence
+                        // (band S3 + the honest veto) so a crop card can still surface it.
+                        line.itemConfidence = computeItemConfidence({
+                            nameConf: ms.length > 0 ? ms[0].confidence : 0, nameText: nm, priceVerified: false,
+                            viaPromo: false, gapToRunnerUp: gap, source: 'unmatched', priceImplausible: !!line.priceImplausible,
+                        });
+                    }
+                }
+            } catch (e) {
+                console.warn(`[heal] re-match failed for receipt ${receiptId}:`, (e as Error)?.message);
+            }
+        }
+
+        const conn = await (pool as any).getConnection();
+        try {
+            await conn.beginTransaction();
+            await replaceReceiptItems(receiptId, healedLines, conn);
+            // NB: mandatory swipes are NOT reset — that would re-lock the stats and
+            // bounce the user into a fresh swipe flow. Healed lines that are still
+            // uncertain surface through the voluntary "identify products" queue.
+            // GEOMETRY comes from the RETAKE parse: the stored image is now the
+            // retake photo, so header/footer band regions (address, PVM, date, time,
+            // total, receipt-no) + the image dims + product crops must all come from
+            // the candidate — keeping the OLD regions draws every band at stale
+            // coordinates (shifted overlays / crops "between products"). We keep only
+            // the TRUSTED identity VALUES (they cleared the capture gate). No new image
+            // → keep the existing geometry (nothing was swapped).
+            const mergedParsed = !swapImage
+                ? { ...existingParsed, products: healedLines }
+                : {
+                    ...parsedData, // retake: header, image, footer.lineRegions
+                    footer: {
+                        ...(parsedData?.footer ?? {}),
+                        receiptNo: existingParsed?.footer?.receiptNo ?? parsedData?.footer?.receiptNo,
+                        receiptNos: existingParsed?.footer?.receiptNos ?? parsedData?.footer?.receiptNos,
+                        date: existingParsed?.footer?.date ?? parsedData?.footer?.date,
+                        time: existingParsed?.footer?.time ?? parsedData?.footer?.time,
+                        total: existingParsed?.footer?.total ?? parsedData?.footer?.total,
+                        totalSavings: existingParsed?.footer?.totalSavings ?? parsedData?.footer?.totalSavings,
+                    },
+                    products: healedLines,
+                };
+            const params: any[] = [JSON.stringify(mergedParsed)];
+            let sql = 'UPDATE Receipt SET parsedData = ?';
+            if (newFilePath) { sql += ', filePath = ?'; params.push(newFilePath); }
+            sql += ' WHERE id = ?'; params.push(receiptId);
+            await conn.query(sql, params);
+            await conn.commit();
+        } catch (e) {
+            await conn.rollback();
+            throw e;
+        } finally {
+            conn.release();
+        }
+
+        // Re-freeze the cross-store comparison against the healed line set.
+        snapshotReceiptComparison(receiptId).catch((e) =>
+            console.warn(`[heal] snapshot recompute failed for receipt ${receiptId}:`, (e as Error)?.message));
+
+        res.json({
+            changed: true,
+            healed: plan.healedCount,
+            inserted: plan.insertedCount,
+            kept: plan.keptCount,
+            rematched,
+        });
+    } catch (error) { next(error); }
 };

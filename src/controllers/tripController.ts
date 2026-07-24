@@ -4,6 +4,7 @@ import { listTripsForUser } from '../services/tripListService.js';
 import { isTripMember } from '../models/tripModel.js';
 import { getTripStats, getMonthlyTripSpend } from '../services/tripStatsService.js';
 import { computePlanningScore, monthlyPlanningScores, planningBaselineDelta } from '../services/planningScoreService.js';
+import { assessQuality } from '../services/receiptHealService.js';
 import { getTripComparison } from '../services/tripComparisonService.js';
 
 export const listTrips = async (req: Request, res: Response, next: NextFunction) => {
@@ -33,7 +34,7 @@ export const fetchTripStats = async (req: Request, res: Response, next: NextFunc
         const tripId = Number(req.params.id);
         if (!Number.isFinite(tripId)) { res.status(400).json({ error: 'bad id' }); return; }
         if (!(await isTripMember(tripId, req.authUserId!))) { res.status(404).json({ error: 'not found' }); return; }
-        res.json(await getTripStats(tripId));
+        res.json(await getTripStats(tripId, req.authUserId!, (req as any).locale ?? 'lt'));
     } catch (error) { next(error); }
 };
 
@@ -156,8 +157,12 @@ export const fetchTripReceipts = async (req: Request, res: Response, next: NextF
                     -- Old-receipt flag: the receipt was already >30 days old WHEN
                     -- UPLOADED (uploadedAt is frozen at insert, so this never drifts
                     -- — fresh-at-upload stays fresh forever). Seen by all members.
-                    (r.receiptDate IS NOT NULL AND DATEDIFF(r.uploadedAt, r.receiptDate) > 30) AS staleReceipt
+                    -- SUPPRESSED for ad-hoc trips: the trip IS this uploaded receipt,
+                    -- so an old date is intentional, not a "wrong receipt?" warning.
+                    (t.isAdHoc = 0 AND r.receiptDate IS NOT NULL AND DATEDIFF(r.uploadedAt, r.receiptDate) > 30) AS staleReceipt,
+                    JSON_EXTRACT(r.parsedData, '$.footer.total') AS printedTotal
                FROM Receipt r
+               JOIN Trip t ON t.id = r.tripId
                LEFT JOIN Store s ON s.id = r.storeId
                LEFT JOIN StoreChain c ON c.id = s.chainId
               WHERE r.tripId = ?
@@ -171,11 +176,28 @@ export const fetchTripReceipts = async (req: Request, res: Response, next: NextF
         for (const r of rows as any[]) {
             const [items] = await pool.query(
                 `SELECT id, lineIdx, name, price, quantity, unit, sizeUnit, matchedSpId, matchedName, storeProductImageUrl,
+                        itemConfidence, priceImplausible,
                         ROUND((CASE WHEN promoPrice IS NOT NULL AND promoPrice > 0 THEN promoPrice ELSE price END)
                               * COALESCE(quantity, 1), 2) AS lineTotal
                    FROM ReceiptItem WHERE receiptId = ? ORDER BY lineIdx ASC`,
                 [r.id]) as any;
-            receipts.push({ ...r, items });
+            // Scan-quality signal → drives the "Perfotografuoti" (retake) banner.
+            // lowQuality trips on unreadable-line fraction OR a reconciliation gap
+            // vs the printed total; unmatchedCount is the user-facing "N unrecognised".
+            const quality = assessQuality(
+                (items as any[]).map((it) => ({
+                    price: Number(it.lineTotal) || 0,
+                    quantity: Number(it.quantity) || 1,
+                    name: it.name ?? '',
+                    matched: it.matchedSpId != null,
+                    confirmed: false,
+                    confidence: it.itemConfidence != null ? Number(it.itemConfidence) : 0.5,
+                    implausible: !!it.priceImplausible,
+                })),
+                r.printedTotal != null ? Number(r.printedTotal) : null,
+            );
+            const { printedTotal, ...rr } = r;
+            receipts.push({ ...rr, items, lowQuality: quality.lowQuality, unmatchedCount: quality.unmatchedCount });
         }
         res.json(receipts);
     } catch (error) { next(error); }

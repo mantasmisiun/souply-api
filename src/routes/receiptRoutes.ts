@@ -6,6 +6,7 @@ import {
     // ^ dev-only cascade purge; route below is gated server-side too.
     fetchReceiptImage,
     createReceiptFromOcr,
+    healReceiptFromRetake,
     updateReceiptFromOcr,
     updateReceiptRegions,
     getReceiptUploadUrl,
@@ -53,6 +54,8 @@ router.post('/receipts/batch-log/finalize', finalizeBatchReport);
 // Create a new receipt from OCR results — called once on receipt-process screen mount.
 // The receipt is owned by the token subject (req.authUserId), NOT a body userId.
 router.post('/receipts', requireUser, createReceiptFromOcr);
+// Retake/heal: merge a re-scan of the SAME receipt into the stored parse.
+router.post('/receipts/:id/heal', requireUser, owns, healReceiptFromRetake);
 
 // Analize-flow bail path: log a receipt that couldn't be processed
 // (OCR produced nothing, chain not detected, or store lookup failed).
