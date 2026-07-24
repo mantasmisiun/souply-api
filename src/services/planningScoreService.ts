@@ -85,6 +85,12 @@ export interface PlanningPair {
     receiptUnit: string | null;
     receiptAmount: number | null;
     receiptWeighable: boolean;
+    /** Price per canonical unit (planned vs bought) + its unit — the Prognozė
+     *  row's headline comparison ("€23.96/kg → €19.98/kg"). Bought falls back to
+     *  the PLANNED amount when the receipt has no reliable size. null → hide. */
+    listUnitPrice: number | null;
+    receiptUnitPrice: number | null;
+    unitPriceUnit: string;
     /** Predicted (list) vs actual (receipt) TOTAL for this matched item — feeds
      *  the prediction-accuracy metric. listPrice is null when the list item has
      *  no calculated price. */
@@ -182,7 +188,7 @@ export const computePlanningScore = async (tripId: number): Promise<PlanningScor
         [tripId],
     );
     // Receipt lines with resolved productId, name + L3 category.
-    const [receiptItems]: any = await pool.query(
+    const [rawReceiptItems]: any = await pool.query(
         `SELECT ri.id, ri.name, ri.price, ri.promoPrice, ri.quantity,
                 ri.unit AS unit, ri.amount AS amount, ri.isWeighable AS isWeighable,
                 sp.productId AS productId,
@@ -195,6 +201,20 @@ export const computePlanningScore = async (tripId: number): Promise<PlanningScor
           WHERE r.tripId = ?`,
         [tripId],
     );
+    // ROBUSTNESS: a receipt line with a non-positive effective price is a
+    // PARSE FAILURE (a tilted receipt shears the price off its row — see the
+    // band-skew issue). Such a line can't be reasoned about (a €0 "purchase"
+    // would pair to a plan item and render an impossible 100 % discount), so
+    // drop it before any pairing / stats / Prognozė. It stays a raw ReceiptItem
+    // for the receipt view + the swipe/heal queue to fix, it just never taints
+    // the comparison.
+    const effPrice = (ri: any): number => {
+        const promo = parseFloat(ri.promoPrice);
+        if (Number.isFinite(promo) && promo > 0) return promo;
+        const reg = parseFloat(ri.price);
+        return Number.isFinite(reg) ? reg : 0;
+    };
+    const receiptItems = (rawReceiptItems as any[]).filter(ri => effPrice(ri) > 0);
     base.listItemCount = listItems.length;
     base.hasList = listItems.length > 0;
     if (listItems.length === 0 && receiptItems.length === 0) return base;
@@ -206,6 +226,44 @@ export const computePlanningScore = async (tripId: number): Promise<PlanningScor
         (listItems as any[]).map(li => Number(li.productId)).filter((n: number) => Number.isFinite(n) && n > 0))];
     const canonById = await loadCanonicalsForProducts(canonProductIds);
     const stepOf = (li: any): number | null => canonById.get(Number(li.productId))?.step ?? null;
+
+    // ── Price per canonical unit (Prognozė headline) ────────────────────────
+    const toKg = (amount: number, unit: string | null): number => {
+        const u = (unit ?? '').toLowerCase();
+        return (u === 'g' || u === 'ml') ? amount / 1000 : amount;
+    };
+    // Canonical amount: weighable → qty (already kg/l); fluid pack → qty × pack
+    // size; count → qty (packs); unknown → null.
+    const canonAmount = (qty: number, isWeighable: boolean, family: string | null, packAmount: number | null, packUnit: string | null): number | null => {
+        if (isWeighable) return qty > 0 ? qty : null;
+        if (family === 'fluid' && packAmount != null && packAmount > 0) return qty * toKg(packAmount, packUnit);
+        if (family === 'count') return qty > 0 ? qty : null;
+        return null;
+    };
+    const r2 = (n: number) => Math.round(n * 100) / 100;
+    // Bought amount falls back to the PLANNED amount when the receipt gives no
+    // reliable size (a packed item with no weight + an ambiguous SP match), so a
+    // Lavazza reads "€23.96/kg → €19.98/kg" rather than an impossible €/kg off a
+    // mis-sized pack. Weighable/known-amount receipt lines use their own size.
+    const unitPriceFields = (li: any, ri: any, listQty: number, receiptQty: number, listPrice: number | null, receiptPrice: number) => {
+        const meta = canonById.get(Number(li.productId));
+        const family = meta?.family ?? null;
+        const packAmount = li.packAmount != null ? parseFloat(li.packAmount) : null;
+        const plannedAmt = canonAmount(listQty, !!li.isWeighable, family, packAmount, li.packUnit ?? null);
+        const rAmount = ri.amount != null ? parseFloat(ri.amount) : null;
+        const boughtAmt = ri.isWeighable
+            ? (receiptQty > 0 ? receiptQty : null)              // weighable → the weighed amount
+            : family === 'count'
+                ? (receiptQty > 0 ? receiptQty : null)          // count → the receipt pack count (known)
+                : rAmount != null && rAmount > 0                // fluid → own size, else fall back to plan
+                    ? canonAmount(receiptQty, false, family, rAmount, ri.unit ?? null)
+                    : plannedAmt;
+        return {
+            unitPriceUnit: family === 'fluid' ? (meta?.unit === 'l' ? 'l' : 'kg') : 'vnt',
+            listUnitPrice: (listPrice != null && plannedAmt != null && plannedAmt > 0) ? r2(listPrice / plannedAmt) : null,
+            receiptUnitPrice: (boughtAmt != null && boughtAmt > 0) ? r2(receiptPrice / boughtAmt) : null,
+        };
+    };
 
     // Manual corrections.
     const [links]: any = await pool.query(
@@ -246,6 +304,7 @@ export const computePlanningScore = async (tripId: number): Promise<PlanningScor
             receiptUnit: ri.unit ?? null,
             receiptAmount: ri.amount != null ? parseFloat(ri.amount) : null,
             receiptWeighable: !!ri.isWeighable,
+            ...unitPriceFields(li, ri, parseFloat(li.quantity) || 1, parseFloat(ri.quantity) || 1, li.price != null ? parseFloat(li.price) : null, spend(ri)),
             listPrice: li.price != null ? parseFloat(li.price) : null, receiptPrice: spend(ri),
         });
     }
@@ -270,6 +329,7 @@ export const computePlanningScore = async (tripId: number): Promise<PlanningScor
             receiptUnit: ri.unit ?? null,
             receiptAmount: ri.amount != null ? parseFloat(ri.amount) : null,
             receiptWeighable: !!ri.isWeighable,
+            ...unitPriceFields(li, ri, parseFloat(li.quantity) || 1, parseFloat(ri.quantity) || 1, li.price != null ? parseFloat(li.price) : null, spend(ri)),
             listPrice: li.price != null ? parseFloat(li.price) : null, receiptPrice: spend(ri),
         });
     }
