@@ -42,7 +42,31 @@ export const getOwnHousehold = async (req: Request, res: Response, next: NextFun
         const userId = req.authUserId!;
         const household = await getHouseholdForUser(userId);
         if (!household) { res.status(404).json({ error: 'not found' }); return; }
-        const members = await getHouseholdMembers(household.id);
+        // Enriched roster (mirrors listTripMembers): display label + avatarColor
+        // so the family invite sheet shows real names/initials, not "Member N".
+        // Two single-table queries (no cross-table JOIN) — HouseholdMember.userId
+        // and User.id can carry different collations, and joining them throws an
+        // "illegal mix of collations". Own email local-part only for the caller.
+        const raw = await getHouseholdMembers(household.id);
+        const profiles = new Map<string, any>();
+        const ids = raw.map(m => m.userId);
+        if (ids.length) {
+            const [urows]: any = await pool.query(
+                'SELECT id, displayName, username, firstName, avatarColor, email FROM User WHERE id IN (?)',
+                [ids]);
+            for (const u of urows as any[]) profiles.set(u.id, u);
+        }
+        const members = raw.map(m => {
+            const u = profiles.get(m.userId);
+            return {
+                userId: m.userId,
+                role: m.role,
+                joinedAt: m.joinedAt,
+                label: u?.displayName ?? (u?.username ? `@${u.username}` : null)
+                    ?? u?.firstName ?? (m.userId === userId && u?.email ? String(u.email).split('@')[0] : null) ?? null,
+                avatarColor: u?.avatarColor ?? null,
+            };
+        });
         res.json({ ...household, members });
     } catch (error) { next(error); }
 };
@@ -70,7 +94,39 @@ export const createHouseholdInvite = async (req: Request, res: Response, next: N
         const household = await getHouseholdForUser(userId);
         if (!household) { res.status(404).json({ error: 'not found' }); return; }
         const token = await getOrCreateInviteToken('household', household.id, userId);
-        res.json({ code: token.code });
+        // ADDRESSED invite (handle/email) — same oracle-free shape as trips: the
+        // response never reveals whether the target exists. Registered users get
+        // the in-app notification; an address with no account gets a real email.
+        const handle = typeof req.body?.handle === 'string' ? req.body.handle.trim().replace(/^@/, '') : null;
+        const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : null;
+        if (handle || email) {
+            void (async () => {
+                try {
+                    const [rows]: any = handle
+                        ? await pool.query('SELECT id FROM User WHERE username = ? LIMIT 1', [handle])
+                        : await pool.query('SELECT id FROM User WHERE email = ? LIMIT 1', [email]);
+                    const target = rows[0]?.id;
+                    if (target && target !== userId) {
+                        await notifyUser(target, 'household_invite', {
+                            title: 'Kvietimas į šeimos sąrašą',
+                            body: 'Tave pakvietė į bendrą šeimos apsipirkimų sąrašą.',
+                            route: `/join/${token.code}`,
+                        });
+                    } else if (!target && email) {
+                        const [me]: any = await pool.query(
+                            'SELECT displayName, firstName, username FROM User WHERE id = ? LIMIT 1', [userId]);
+                        const inviterName = me[0]?.displayName ?? me[0]?.firstName ?? (me[0]?.username ? `@${me[0].username}` : null);
+                        const { sendTripInviteEmail } = await import('../services/emailService.js');
+                        await sendTripInviteEmail({
+                            to: email,
+                            joinUrl: `https://souply.lt/join/${token.code}`,
+                            inviterName,
+                        });
+                    }
+                } catch {}
+            })();
+        }
+        res.json({ code: token.code, addressed: !!(handle || email) });
     } catch (error) { next(error); }
 };
 
