@@ -193,6 +193,7 @@ export const computePlanningScore = async (tripId: number): Promise<PlanningScor
                 ri.unit AS unit, ri.amount AS amount, ri.isWeighable AS isWeighable,
                 sp.productId AS productId,
                 p.name AS resolvedName, sp.storeProductName AS spName,
+                ${localizedProductNameSql('lt', { productAlias: 'p' }).imageUrlsSql} AS imageUrls,
                 p.categoryId AS l3
            FROM ReceiptItem ri
            JOIN Receipt r ON r.id = ri.receiptId
@@ -297,7 +298,10 @@ export const computePlanningScore = async (tripId: number): Promise<PlanningScor
             productName: li.productName ?? li.customName ?? ri.name,
             listName: li.productName ?? li.customName ?? li.spName ?? null,
             receiptName: ri.resolvedName ?? ri.spName ?? ri.name,
-            imageUrls: li.imageUrls ?? null, isWeighable: !!li.isWeighable, canonicalStep: stepOf(li),
+            // Prefer the RECEIPT item's image so the thumbnail MATCHES the Kvitas tab (same bought
+            // product) — the planned-list product can be a different SP with a stale/other image;
+            // fall back to the list image only when the receipt line has no matched product.
+            imageUrls: ri.imageUrls ?? li.imageUrls ?? null, isWeighable: !!li.isWeighable, canonicalStep: stepOf(li),
             listQty: parseFloat(li.quantity) || 1, receiptQty: parseFloat(ri.quantity) || 1,
             listPackAmount: li.packAmount != null ? parseFloat(li.packAmount) : null,
             listPackUnit: li.packUnit ?? null,
@@ -322,7 +326,10 @@ export const computePlanningScore = async (tripId: number): Promise<PlanningScor
             productName: li.productName ?? li.customName ?? ri.name,
             listName: li.productName ?? li.customName ?? li.spName ?? null,
             receiptName: ri.resolvedName ?? ri.spName ?? ri.name,
-            imageUrls: li.imageUrls ?? null, isWeighable: !!li.isWeighable, canonicalStep: stepOf(li),
+            // Prefer the RECEIPT item's image so the thumbnail MATCHES the Kvitas tab (same bought
+            // product) — the planned-list product can be a different SP with a stale/other image;
+            // fall back to the list image only when the receipt line has no matched product.
+            imageUrls: ri.imageUrls ?? li.imageUrls ?? null, isWeighable: !!li.isWeighable, canonicalStep: stepOf(li),
             listQty: parseFloat(li.quantity) || 1, receiptQty: parseFloat(ri.quantity) || 1,
             listPackAmount: li.packAmount != null ? parseFloat(li.packAmount) : null,
             listPackUnit: li.packUnit ?? null,
