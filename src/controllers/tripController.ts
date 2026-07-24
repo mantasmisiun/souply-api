@@ -196,8 +196,15 @@ export const fetchTripReceipts = async (req: Request, res: Response, next: NextF
                 })),
                 r.printedTotal != null ? Number(r.printedTotal) : null,
             );
+            // printedTotal = the receipt's OWN footer total (what the user actually paid).
+            // Surfaced so the detail card shows the recognised total, not a line-item sum
+            // that a single mis-parsed line can throw off.
             const { printedTotal, ...rr } = r;
-            receipts.push({ ...rr, items, lowQuality: quality.lowQuality, unmatchedCount: quality.unmatchedCount });
+            receipts.push({
+                ...rr, items,
+                printedTotal: printedTotal != null ? Number(printedTotal) : null,
+                lowQuality: quality.lowQuality, unmatchedCount: quality.unmatchedCount,
+            });
         }
         res.json(receipts);
     } catch (error) { next(error); }
