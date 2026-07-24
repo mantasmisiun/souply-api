@@ -7,6 +7,7 @@ import {
     fetchReceiptImage,
     createReceiptFromOcr,
     healReceiptFromRetake,
+    devReplaceReceiptParse,
     updateReceiptFromOcr,
     updateReceiptRegions,
     getReceiptUploadUrl,
@@ -56,6 +57,8 @@ router.post('/receipts/batch-log/finalize', finalizeBatchReport);
 router.post('/receipts', requireUser, createReceiptFromOcr);
 // Retake/heal: merge a re-scan of the SAME receipt into the stored parse.
 router.post('/receipts/:id/heal', requireUser, owns, healReceiptFromRetake);
+// DEV-ONLY: full re-parse REPLACE (bypasses the conservative heal). Refused in production.
+router.post('/receipts/:id/dev-replace', requireUser, owns, devReplaceReceiptParse);
 
 // Analize-flow bail path: log a receipt that couldn't be processed
 // (OCR produced nothing, chain not detected, or store lookup failed).

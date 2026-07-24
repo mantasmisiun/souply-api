@@ -1627,3 +1627,36 @@ export const healReceiptFromRetake = async (req: Request, res: Response, next: N
         });
     } catch (error) { next(error); }
 };
+
+// POST /receipts/:id/dev-replace — DEV-ONLY full re-parse REPLACE.
+// The retake/heal endpoint above MERGES conservatively (keeps existing plausible line values), so a
+// parser change that only CORRECTS an already-priced line (e.g. removing a phantom discount) never
+// surfaces on an already-stored receipt. This endpoint overwrites the receipt's lines + blob
+// ENTIRELY with the fresh parse, so the dev re-run button can verify parser changes on the cached
+// photo. Refused in production (like the dev hard-purge) so it can never clobber a real receipt.
+export const devReplaceReceiptParse = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        if (process.env.NODE_ENV === 'production') { res.status(403).json({ error: 'dev-only' }); return; }
+        const receiptId = Number(req.params.id);
+        const parsedData = req.body?.parsedData;
+        if (!Number.isFinite(receiptId) || !parsedData) { res.status(400).json({ error: 'receiptId and parsedData required' }); return; }
+        const [[receipt]]: any = await pool.query('SELECT id FROM Receipt WHERE id = ?', [receiptId]);
+        if (!receipt) { res.status(404).json({ error: 'not found' }); return; }
+
+        const products = Array.isArray(parsedData.products) ? parsedData.products : [];
+        const conn = await (pool as any).getConnection();
+        try {
+            await conn.beginTransaction();
+            await replaceReceiptItems(receiptId, products, conn);
+            // Overwrite the whole blob so wordsDump/footer/header/regions match the fresh parse
+            // (products[] are re-derived from ReceiptItem on read, per the ReceiptItem migration).
+            await conn.query('UPDATE Receipt SET parsedData = ? WHERE id = ?', [JSON.stringify(parsedData), receiptId]);
+            await conn.commit();
+        } catch (e) { await conn.rollback(); throw e; } finally { conn.release(); }
+
+        snapshotReceiptComparison(receiptId).catch((e) =>
+            console.warn(`[dev-replace] snapshot recompute failed for receipt ${receiptId}:`, (e as Error)?.message));
+
+        res.json({ changed: true, replaced: products.length });
+    } catch (error) { next(error); }
+};
