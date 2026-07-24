@@ -55,6 +55,11 @@ export interface TripSummary {
     } | null;
     slots: TripSlotSummary[];
     receiptCount: number;
+    /** Total parsed lines across the trip's receipts (all ReceiptItem rows). */
+    recognisedItemCount: number;
+    /** Unique chains involved (planned + receipt), each flagged whether a receipt
+     *  for it exists — drives the card's logo strip (full colour vs dimmed). */
+    chains: { chainId: number; chainName: string | null; hasReceipt: boolean }[];
 }
 
 export const listTripsForUser = async (userId: string, locale: Locale = 'lt', limit = 100): Promise<TripSummary[]> => {
@@ -141,13 +146,35 @@ export const listTripsForUser = async (userId: string, locale: Locale = 'lt', li
     }
 
     const [receipts]: any = await pool.query(
-        `SELECT tripId, COUNT(*) AS n, MAX(receiptDate) AS lastDate
-           FROM Receipt WHERE tripId IN (?) AND userDeletedAt IS NULL
-             AND (COALESCE(uploaderUserId, userId) = ?
-                  OR mandatorySwipesRequired = 0 OR mandatorySwipesCompleted >= mandatorySwipesRequired)
-          GROUP BY tripId`,
+        `SELECT r.tripId, COUNT(DISTINCT r.id) AS n, MAX(r.receiptDate) AS lastDate,
+                COUNT(ri.id) AS recognisedItemCount
+           FROM Receipt r
+           LEFT JOIN ReceiptItem ri ON ri.receiptId = r.id
+          WHERE r.tripId IN (?) AND r.userDeletedAt IS NULL
+             AND (COALESCE(r.uploaderUserId, r.userId) = ?
+                  OR r.mandatorySwipesRequired = 0 OR r.mandatorySwipesCompleted >= r.mandatorySwipesRequired)
+          GROUP BY r.tripId`,
         [ids, userId]);
     const receiptAggByTrip = new Map<number, any>(receipts.map((r: any) => [r.tripId, r]));
+
+    // Chains the trip's RECEIPTS came from (via each receipt's resolved store) —
+    // needed for the card's logo strip on ad-hoc/receipt-only trips, which have no
+    // shopping-list slots to read chains from.
+    const [rcChains]: any = await pool.query(
+        `SELECT DISTINCT r.tripId, s.chainId, sc.name AS chainName
+           FROM Receipt r
+           JOIN Store s ON s.id = r.storeId
+           JOIN StoreChain sc ON sc.id = s.chainId
+          WHERE r.tripId IN (?) AND r.userDeletedAt IS NULL AND s.chainId IS NOT NULL
+            AND (COALESCE(r.uploaderUserId, r.userId) = ?
+                 OR r.mandatorySwipesRequired = 0 OR r.mandatorySwipesCompleted >= r.mandatorySwipesRequired)`,
+        [ids, userId]);
+    const receiptChainsByTrip = new Map<number, { chainId: number; chainName: string | null }[]>();
+    for (const rc of rcChains) {
+        const arr = receiptChainsByTrip.get(rc.tripId) ?? [];
+        arr.push({ chainId: rc.chainId, chainName: rc.chainName ?? null });
+        receiptChainsByTrip.set(rc.tripId, arr);
+    }
 
     return trips.map((t: any): TripSummary => {
         const basket = basketByTrip.get(t.id) ?? null;
@@ -206,6 +233,25 @@ export const listTripsForUser = async (userId: string, locale: Locale = 'lt', li
             } : null,
             slots,
             receiptCount: Number(receiptAgg?.n) || 0,
+            // ALL parsed lines across the trip's receipts (what the parser recognised) —
+            // drives the receipt-icon badge count on the shopping card.
+            recognisedItemCount: Number(receiptAgg?.recognisedItemCount) || 0,
+            // Unique chains for the card's logo strip: planned (list) chains + receipt
+            // chains, merged; hasReceipt=true when ANY source for that chain has one
+            // (full-colour logo) — planned-only chains render dimmed.
+            chains: (() => {
+                const m = new Map<number, { chainId: number; chainName: string | null; hasReceipt: boolean }>();
+                for (const s of slots) {
+                    if (s.chainId == null) continue;
+                    const ex = m.get(s.chainId);
+                    m.set(s.chainId, { chainId: s.chainId, chainName: s.chainName ?? ex?.chainName ?? null, hasReceipt: (ex?.hasReceipt ?? false) || s.hasReceipt });
+                }
+                for (const rc of receiptChainsByTrip.get(t.id) ?? []) {
+                    const ex = m.get(rc.chainId);
+                    m.set(rc.chainId, { chainId: rc.chainId, chainName: rc.chainName ?? ex?.chainName ?? null, hasReceipt: true });
+                }
+                return [...m.values()];
+            })(),
         };
     });
 };
