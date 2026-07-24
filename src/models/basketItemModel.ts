@@ -47,10 +47,18 @@ export const getBasketItemsByBasketId = async (basketId: number, userId?: string
     const canonicals = rows.length > 0
         ? await loadCanonicalsForProducts(rows.map((r: any) => Number(r.productId)))
         : new Map();
-    const withUnit = (r: any) => ({
-        ...r,
-        canonicalUnit: canonicals.get(Number(r.productId))?.unit ?? null,
-    });
+    const withUnit = (r: any) => {
+        const meta = canonicals.get(Number(r.productId));
+        return {
+            ...r,
+            canonicalUnit: meta?.unit ?? null,
+            // Family + step let the client decide weight-vs-count the SAME way
+            // the catalog does (utils/amountDisplay), so a multi-pack fluid item
+            // shows its weight in the basket sheet, not a phantom count.
+            canonicalFamily: meta?.family ?? null,
+            canonicalStep: meta?.step ?? null,
+        };
+    };
 
     if (!userId || rows.length === 0) {
         return rows.map((r: any) => ({ ...withUnit(r), isCritical: false }));
