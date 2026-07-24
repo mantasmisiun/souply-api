@@ -160,7 +160,8 @@ export const fetchTripReceipts = async (req: Request, res: Response, next: NextF
                     -- SUPPRESSED for ad-hoc trips: the trip IS this uploaded receipt,
                     -- so an old date is intentional, not a "wrong receipt?" warning.
                     (t.isAdHoc = 0 AND r.receiptDate IS NOT NULL AND DATEDIFF(r.uploadedAt, r.receiptDate) > 30) AS staleReceipt,
-                    JSON_EXTRACT(r.parsedData, '$.footer.total') AS printedTotal
+                    JSON_EXTRACT(r.parsedData, '$.footer.total') AS printedTotal,
+                    JSON_EXTRACT(r.parsedData, '$.footer.comboDiscount') AS comboDiscount
                FROM Receipt r
                JOIN Trip t ON t.id = r.tripId
                LEFT JOIN Store s ON s.id = r.storeId
@@ -199,10 +200,13 @@ export const fetchTripReceipts = async (req: Request, res: Response, next: NextF
             // printedTotal = the receipt's OWN footer total (what the user actually paid).
             // Surfaced so the detail card shows the recognised total, not a line-item sum
             // that a single mis-parsed line can throw off.
-            const { printedTotal, ...rr } = r;
+            const { printedTotal, comboDiscount, ...rr } = r;
             receipts.push({
                 ...rr, items,
                 printedTotal: printedTotal != null ? Number(printedTotal) : null,
+                // Footer combo/set-deal discount (e.g. IKI RINKINYS) — the client applies
+                // it proportionally for the receipt's net item prices + discount view.
+                comboDiscount: Number(comboDiscount) > 0 ? Number(comboDiscount) : 0,
                 lowQuality: quality.lowQuality, unmatchedCount: quality.unmatchedCount,
             });
         }
