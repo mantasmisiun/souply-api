@@ -103,7 +103,8 @@ export const getTripStats = async (
 ): Promise<TripStats> => {
     const [receipts]: any = await pool.query(
         `SELECT r.id, r.uploaderUserId, r.userId, sc.name AS chainName,
-                JSON_EXTRACT(r.parsedData, '$.footer.comboDiscount') AS comboDiscount
+                JSON_EXTRACT(r.parsedData, '$.footer.comboDiscount') AS comboDiscount,
+                JSON_EXTRACT(r.parsedData, '$.footer.total') AS printedTotal
            FROM Receipt r
            LEFT JOIN Store s ON s.id = r.storeId
            LEFT JOIN StoreChain sc ON sc.id = s.chainId
@@ -177,6 +178,37 @@ export const getTripStats = async (
     const chainMap: Record<string, number> = {};
     const memberMap: Record<string, { total: number; receipts: Set<number> }> = {};
 
+    // ── COMBO / SET-DEAL reconciliation ───────────────────────────────────────
+    // A receipt-level combo discount (IKI "RINKINYS") is money paid off the whole
+    // receipt that belongs to NO single product — line prices stay gross. So the
+    // ACTUAL spend is below the line-sum. Anchor each combo receipt to its printed
+    // footer total (the paid truth) and scale ITS display contributions (spend,
+    // donut, members, chains) by net/gross, so everything reconciles to what was
+    // really paid. Reference prices / per-item savings stay gross-based (project
+    // rule: combo is never distributed onto lines). `comboTotal` (the applied
+    // discount) is ADDED back to savings — the mirror of the comparison basket,
+    // which SUBTRACTS it from the visited-store total.
+    const grossByReceipt = new Map<number, number>();
+    for (const item of itemRows) {
+        const promo = item.promoPrice != null ? parseFloat(item.promoPrice) : 0;
+        const unit = promo > 0 ? promo : (parseFloat(item.price) || 0);
+        const it = unit * (parseFloat(item.quantity) || 1);
+        if (it > 0) grossByReceipt.set(Number(item.receiptId), (grossByReceipt.get(Number(item.receiptId)) ?? 0) + it);
+    }
+    const netScaleByReceipt = new Map<number, number>();
+    let comboTotal = 0;
+    for (const [rid, r] of receiptById) {
+        const combo = comboDiscountOf({ footer: { comboDiscount: r.comboDiscount } });
+        if (combo <= 0) continue;
+        const gross = grossByReceipt.get(Number(rid)) ?? 0;
+        if (gross <= 0) continue;
+        const printed = Number(r.printedTotal);
+        // Paid = the printed total when readable & below the line-sum; else line-sum − combo.
+        const net = (Number.isFinite(printed) && printed > 0 && printed <= gross) ? printed : Math.max(0, gross - combo);
+        netScaleByReceipt.set(Number(rid), net / gross);
+        comboTotal += (gross - net);
+    }
+
     for (const item of itemRows) {
         const regular = parseFloat(item.price) || 0;
         const promo = item.promoPrice != null ? parseFloat(item.promoPrice) : 0;
@@ -184,17 +216,19 @@ export const getTripStats = async (
         const qty = parseFloat(item.quantity) || 1;
         const itemTotal = unitPrice * qty;
         if (itemTotal <= 0) continue;
-        totalSpent += itemTotal;
+        // Net (combo-adjusted) contribution for the display totals; 1× when no combo.
+        const disp = itemTotal * (netScaleByReceipt.get(Number(item.receiptId)) ?? 1);
+        totalSpent += disp;
         // Discount captured: a promo below the regular price.
         if (promo > 0 && regular > promo) { promoItemCount += 1; promoSavings += (regular - promo) * qty; }
 
         const receipt = receiptById.get(Number(item.receiptId));
         const chain = receipt?.chainName ?? 'Kita';
-        chainMap[chain] = (chainMap[chain] ?? 0) + itemTotal;
+        chainMap[chain] = (chainMap[chain] ?? 0) + disp;
 
         const member = receipt?.uploaderUserId ?? receipt?.userId ?? 'unknown';
         const m = (memberMap[member] ??= { total: 0, receipts: new Set() });
-        m.total += itemTotal;
+        m.total += disp;
         m.receipts.add(Number(item.receiptId));
 
         // Items whose SP has no resolved L2 category (uncategorised / unmatched /
@@ -210,7 +244,7 @@ export const getTripStats = async (
             if (rescued) cat = rescued;
         }
         const catFinal = cat || UNCATEGORISED_CAT;
-        catMap[catFinal] = (catMap[catFinal] ?? 0) + itemTotal;
+        catMap[catFinal] = (catMap[catFinal] ?? 0) + disp;
     }
 
     const itemSavings = await computeReceiptSavings(itemRows.map((i: any) => ({
@@ -218,15 +252,8 @@ export const getTripStats = async (
         price: (i.promoPrice != null && parseFloat(i.promoPrice) > 0) ? parseFloat(i.promoPrice) : parseFloat(i.price) || 0,
         quantity: parseFloat(i.quantity) || 1,
     })));
-    // A receipt-level combo/set-deal discount (IKI "RINKINYS") is real money the
-    // shopper saved that is NOT on any line price, so per-item savings miss it and a
-    // genuine saving reads as "overpaid" (receipt 116: 2×€2,49 dešra − €2,70 combo =
-    // €2,28 paid, yet the lines still say €2,49). ADD it to savings — the same
-    // contract the comparison basket uses (it SUBTRACTS combo from the visited total).
-    const comboTotal = receipts.reduce(
-        (s: number, r: any) => s + comboDiscountOf({ footer: { comboDiscount: r.comboDiscount } }),
-        0,
-    );
+    // Add the applied combo/set-deal discount (computed above, mirrors the net-spend
+    // adjustment) so a genuine saving no longer reads as "overpaid".
     const savings = itemSavings + comboTotal;
 
     // Member breakdown across EVERY trip member (0 for non-uploaders), with the
