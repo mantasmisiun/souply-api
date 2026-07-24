@@ -25,6 +25,24 @@ export const itemPreviewSql = (locale: Locale, basketIdExpr: string): string => 
          WHERE bipv.basketId = ${basketIdExpr})`;
 };
 
+/**
+ * SHOPPING-LIST counterpart of `itemPreviewSql` — newest-first item names (max 5)
+ * for one list. Once a basket becomes lists its own preview goes stale/empty, so
+ * the trip card previews the LIST items from here instead. Name resolution mirrors
+ * the planning pairing: localized product name > store-product name > custom name.
+ */
+export const listItemPreviewSql = (locale: Locale, listIdExpr: string): string => {
+    const { nameSql } = localizedProductNameSql(locale, { productAlias: 'plpv' });
+    return `(SELECT SUBSTRING_INDEX(
+                GROUP_CONCAT(CONVERT(COALESCE(${nameSql}, splpv.storeProductName, slipv.customName) USING utf8mb4)
+                             ORDER BY slipv.id DESC SEPARATOR '~|~'),
+                '~|~', 5)
+          FROM ShoppingListItem slipv
+          LEFT JOIN StoreProduct splpv ON splpv.id = slipv.storeProductId
+          LEFT JOIN Product plpv ON plpv.id = COALESCE(slipv.productId, splpv.productId)
+         WHERE slipv.listId = ${listIdExpr})`;
+};
+
 export const createBasket = async (userId: string, sourceTemplateId: number | null = null, conn?: Connection) => {
     const db = (conn ?? pool) as any;
     const [result]: any = await db.query(

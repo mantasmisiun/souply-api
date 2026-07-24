@@ -1,5 +1,5 @@
 import pool from '../config/db.js';
-import { itemPreviewSql } from '../models/basketModel.js';
+import { itemPreviewSql, listItemPreviewSql } from '../models/basketModel.js';
 import type { Locale } from '../middleware/locale.js';
 import { deriveTripStage, type TripSlotFacts, type TripStage } from './tripStageService.js';
 
@@ -25,6 +25,9 @@ export interface TripSlotSummary {
     /** Checked/total items for the stage-3 progress pills ("2/10"). */
     checkedCount: number;
     itemCount: number;
+    /** Newest-first item names (max 5) for the card's preview row once the trip
+     *  has lists — the basket's preview goes stale/empty after it becomes lists. */
+    itemPreview: string[];
 }
 
 export interface TripMemberPreview { initial: string; color: string | null; }
@@ -67,7 +70,12 @@ export const listTripsForUser = async (userId: string, locale: Locale = 'lt', li
         // Active first, then by ANCHOR date desc: a trip with receipts sorts by
         // its (latest) receipt date — so an uploaded OLD receipt sinks to the
         // bottom (just above the archive) — while a still-planning trip sorts by
-        // last edit (updatedAt). Mirrors the anchorDate computed per row below.
+        // its LAST ACTIVITY. Trip.updatedAt is NOT bumped when the trip's basket
+        // is edited, so a basket-only trip (stage 1-2) must read the BASKET's
+        // updatedAt or it sorts/labels by its creation date and looks stale —
+        // the card then disagreed with the basket sheet (which uses basket
+        // updatedAt) and a freshly-edited basket sank below older trips.
+        // MUST mirror the anchorDate computed per row below.
         `SELECT t.* FROM Trip t
           JOIN TripMember tm ON tm.tripId = t.id
          WHERE tm.userId = ?
@@ -75,7 +83,11 @@ export const listTripsForUser = async (userId: string, locale: Locale = 'lt', li
                   COALESCE(
                       (SELECT MAX(r.receiptDate) FROM Receipt r
                         WHERE r.tripId = t.id AND r.userDeletedAt IS NULL),
-                      t.updatedAt
+                      GREATEST(
+                          COALESCE((SELECT MAX(sl.createdAt) FROM ShoppingList sl WHERE sl.tripId = t.id), t.createdAt),
+                          COALESCE((SELECT MAX(b.updatedAt) FROM Basket b WHERE b.tripId = t.id), t.createdAt),
+                          t.updatedAt
+                      )
                   ) DESC
          LIMIT ?`,
         [userId, limit],
@@ -117,7 +129,7 @@ export const listTripsForUser = async (userId: string, locale: Locale = 'lt', li
     }
 
     const [baskets]: any = await pool.query(
-        `SELECT b.tripId, b.id, b.status, b.name, b.hasBeenCalculated,
+        `SELECT b.tripId, b.id, b.status, b.name, b.hasBeenCalculated, b.updatedAt,
                 (SELECT COUNT(*) FROM BasketItem bi WHERE bi.basketId = b.id) AS itemCount,
                 ${itemPreviewSql(locale, 'b.id')} AS itemPreview
            FROM Basket b WHERE b.tripId IN (?)`,
@@ -130,6 +142,7 @@ export const listTripsForUser = async (userId: string, locale: Locale = 'lt', li
                 sc.name AS chainName,
                 (SELECT COUNT(*) FROM ShoppingListItem sli WHERE sli.listId = sl.id) AS itemCount,
                 (SELECT COUNT(*) FROM ShoppingListItem sli WHERE sli.listId = sl.id AND sli.isChecked = 1) AS checkedCount,
+                ${listItemPreviewSql(locale, 'sl.id')} AS itemPreview,
                 (SELECT COUNT(*) FROM Receipt r WHERE r.shoppingListId = sl.id AND r.userDeletedAt IS NULL
                     AND (COALESCE(r.uploaderUserId, r.userId) = ?
                          OR r.mandatorySwipesRequired = 0 OR r.mandatorySwipesCompleted >= r.mandatorySwipesRequired)) AS receiptCount
@@ -195,6 +208,9 @@ export const listTripsForUser = async (userId: string, locale: Locale = 'lt', li
             receiptSkipped: l.receiptSkippedAt != null,
             checkedCount: Number(l.checkedCount) || 0,
             itemCount: Number(l.itemCount) || 0,
+            itemPreview: typeof l.itemPreview === 'string' && l.itemPreview.length > 0
+                ? l.itemPreview.split('~|~')
+                : [],
         }));
 
         const stageFactsSlots: TripSlotFacts[] = slots.map(s => ({
@@ -208,9 +224,27 @@ export const listTripsForUser = async (userId: string, locale: Locale = 'lt', li
             slots: stageFactsSlots,
         });
 
-        const anchorDate: string = receiptAgg?.lastDate
-            ?? tripLists.reduce((max: string | null, l: any) => (max == null || l.createdAt > max ? l.createdAt : max), null)
-            ?? t.createdAt;
+        // ANCHOR = when this trip last MATTERED. A shopped trip anchors at its
+        // receipt date; otherwise take the LATEST of its list creation, its
+        // basket's last edit and the trip's own timestamps. Including the basket
+        // is what keeps a basket-only trip (stage 1-2) honest: Trip.updatedAt
+        // never moves when its basket changes, so it previously showed its
+        // CREATION date — disagreeing with the basket sheet (which labels by
+        // basket updatedAt) and sinking a just-edited basket below older trips.
+        // MUST mirror the ORDER BY above, or the list sorts differently to what
+        // the cards read.
+        const latestOf = (...vals: unknown[]): unknown => {
+            let best: unknown = null;
+            for (const v of vals) {
+                if (v == null) continue;
+                if (best == null || new Date(v as string) > new Date(best as string)) best = v;
+            }
+            return best;
+        };
+        const lastListAt = tripLists.reduce(
+            (max: string | null, l: any) => (max == null || l.createdAt > max ? l.createdAt : max), null);
+        const anchorDate: string = (receiptAgg?.lastDate
+            ?? latestOf(lastListAt, basket?.updatedAt, t.updatedAt, t.createdAt)) as string;
 
         return {
             id: t.id,
@@ -241,11 +275,17 @@ export const listTripsForUser = async (userId: string, locale: Locale = 'lt', li
             // (full-colour logo) — planned-only chains render dimmed.
             chains: (() => {
                 const m = new Map<number, { chainId: number; chainName: string | null; hasReceipt: boolean }>();
+                // PLANNED chains first, but ONLY for slots still awaiting a receipt — they
+                // render DIMMED ("still to visit"). A slot that already has a receipt is
+                // represented by that RECEIPT's chain below, so planning Maxima and handing
+                // in an IKI receipt shows IKI alone, not both (slot.hasReceipt is chain-
+                // agnostic, so keeping it here lit the planned logo from a foreign receipt).
                 for (const s of slots) {
-                    if (s.chainId == null) continue;
+                    if (s.chainId == null || s.hasReceipt) continue;
                     const ex = m.get(s.chainId);
-                    m.set(s.chainId, { chainId: s.chainId, chainName: s.chainName ?? ex?.chainName ?? null, hasReceipt: (ex?.hasReceipt ?? false) || s.hasReceipt });
+                    m.set(s.chainId, { chainId: s.chainId, chainName: s.chainName ?? ex?.chainName ?? null, hasReceipt: false });
                 }
+                // RECEIPT chains always win and render FULL COLOUR — where you actually shopped.
                 for (const rc of receiptChainsByTrip.get(t.id) ?? []) {
                     const ex = m.get(rc.chainId);
                     m.set(rc.chainId, { chainId: rc.chainId, chainName: rc.chainName ?? ex?.chainName ?? null, hasReceipt: true });
@@ -253,5 +293,12 @@ export const listTripsForUser = async (userId: string, locale: Locale = 'lt', li
                 return [...m.values()];
             })(),
         };
-    });
+    })
+    // PHANTOM GUARD: an ad-hoc trip is BORN from a receipt (ensureTripForReceipt),
+    // so one with no receipt, no list and no basket is an orphan — its receipt was
+    // hard-deleted (the dev cascade purge drops the Receipt but leaves the Trip).
+    // It would render a nonsense card: "Neplanuotas pirkinys", stage 5 (ad-hoc is
+    // terminal by definition) → a "Statistika" CTA over no data, badge 0, no
+    // preview, no logos. Never surface it; a real ad-hoc trip always has ≥1 receipt.
+    .filter((t: TripSummary) => !(t.isAdHoc && t.receiptCount === 0 && t.slots.length === 0 && t.basket == null));
 };
