@@ -135,10 +135,17 @@ export const markBasketUserEdited = async (id: number, conn?: Connection) => {
  * at any given time.
  */
 export const getUserDraftBasketId = async (userId: string): Promise<number | null> => {
+    // The idempotent-create backstop: only a LIVE, resumable personal draft
+    // counts. A draft that is archived, or idle ≥48 h (an abandoned cart the
+    // hourly sweep hasn't reached yet), must NOT be returned — otherwise a
+    // fresh "add" silently lands in a basket the user made days ago. Same 48 h
+    // freshness the chooser (discoverOptions) uses, so the two never disagree.
     const [rows]: any = await pool.query(
         `SELECT id FROM Basket
           WHERE userId = ? AND status = 'draft'
             AND householdId IS NULL -- the shared container is NOT the personal draft
+            AND archivedAt IS NULL
+            AND updatedAt >= DATE_SUB(NOW(), INTERVAL 48 HOUR)
           ORDER BY updatedAt DESC
           LIMIT 1`,
         [userId]
@@ -182,6 +189,9 @@ export const getBasketsByUserId = async (userId: string, locale: Locale = 'lt') 
          LEFT JOIN BasketTemplate t ON t.id = Basket.sourceTemplateId
          LEFT JOIN User u ON u.id = t.userId
          WHERE Basket.userId = ?
+           -- Auto-archived (abandoned) carts leave the active/resumable list:
+           -- the chooser, silent-resume and the Krepšelis card all read this.
+           AND Basket.archivedAt IS NULL
          GROUP BY Basket.id
          ORDER BY updatedAt DESC`,
         [userId]

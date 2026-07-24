@@ -7,6 +7,7 @@ import { runLidlPromoScraper } from './lidl/index.js';
 import { runScraperWithRetry } from './shared/runWithRetry.js';
 import { recalcGlobalScores } from '../models/productInteractionModel.js';
 import { sweepTripAutoArchive } from '../services/tripArchiveService.js';
+import { sweepBasketAutoArchive } from '../services/basketArchiveService.js';
 import { refreshDiscountedSummary } from '../models/productModel.js';
 import { propagateCrossChainImages } from '../services/imagePropagationService.js';
 import { sendDailyReceiptIssuesReport } from '../services/adminDailyReportService.js';
@@ -63,6 +64,9 @@ cron.schedule('0 6 * * 6', () => run('Sat', [{ name: 'Lidl', fn: runLidlPromoScr
 // threshold crossing without any per-trip scheduling.
 cron.schedule('15 * * * *', () => {
     sweepTripAutoArchive().catch(e => console.error('[Scheduler] Trip archive sweep failed:', e.message));
+    // Abandoned-cart sweep: personal draft/compared baskets idle ≥48 h with no
+    // shopping list leave the resumable pool (never silently resurrected).
+    sweepBasketAutoArchive().catch(e => console.error('[Scheduler] Basket archive sweep failed:', e.message));
 }, { timezone: 'Europe/Vilnius' });
 
 // Nightly 03:00 — keep globalScore fresh for anonymous browse

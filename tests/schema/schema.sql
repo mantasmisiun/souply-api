@@ -155,9 +155,11 @@ CREATE TABLE `Basket` (
   `cheapestTotal` decimal(10,2) DEFAULT NULL,
   `tripId` int(11) DEFAULT NULL,
   `householdId` int(11) DEFAULT NULL,
+  `archivedAt` datetime DEFAULT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_basket_household` (`householdId`),
   KEY `idx_basket_user_status_updated` (`userId`,`status`,`updatedAt`),
+  KEY `idx_basket_user_archived` (`userId`,`archivedAt`,`status`),
   KEY `idx_b_source_template` (`sourceTemplateId`),
   CONSTRAINT `Basket_ibfk_1` FOREIGN KEY (`userId`) REFERENCES `User` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB AUTO_INCREMENT=12 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
