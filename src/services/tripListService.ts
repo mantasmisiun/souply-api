@@ -59,10 +59,19 @@ export interface TripSummary {
 
 export const listTripsForUser = async (userId: string, locale: Locale = 'lt', limit = 100): Promise<TripSummary[]> => {
     const [trips]: any = await pool.query(
+        // Active first, then by ANCHOR date desc: a trip with receipts sorts by
+        // its (latest) receipt date — so an uploaded OLD receipt sinks to the
+        // bottom (just above the archive) — while a still-planning trip sorts by
+        // last edit (updatedAt). Mirrors the anchorDate computed per row below.
         `SELECT t.* FROM Trip t
           JOIN TripMember tm ON tm.tripId = t.id
          WHERE tm.userId = ?
-         ORDER BY (t.archivedAt IS NULL) DESC, t.updatedAt DESC
+         ORDER BY (t.archivedAt IS NULL) DESC,
+                  COALESCE(
+                      (SELECT MAX(r.receiptDate) FROM Receipt r
+                        WHERE r.tripId = t.id AND r.userDeletedAt IS NULL),
+                      t.updatedAt
+                  ) DESC
          LIMIT ?`,
         [userId, limit],
     );

@@ -1,6 +1,8 @@
 import pool from '../config/db.js';
 import { computeReceiptSavings, UNCATEGORISED_CAT } from './statsService.js';
 import { tripSavingsDeltas, type TripSavingsDeltas } from './comparisonSnapshotService.js';
+import { fetchUserPersonalRescues } from './receiptHydrationService.js';
+import type { Locale } from '../middleware/locale.js';
 
 /**
  * Souply 2.0 Phase 5 (first slice) — per-trip stats: spend, category donut,
@@ -94,7 +96,11 @@ export interface TripStats {
     memberSpend: { userId: string; name: string | null; avatarColor: string | null; total: number; receiptCount: number }[];
 }
 
-export const getTripStats = async (tripId: number): Promise<TripStats> => {
+export const getTripStats = async (
+    tripId: number,
+    viewerUserId?: string,
+    locale: Locale = 'lt',
+): Promise<TripStats> => {
     const [receipts]: any = await pool.query(
         `SELECT r.id, r.uploaderUserId, r.userId, sc.name AS chainName
            FROM Receipt r
@@ -129,9 +135,15 @@ export const getTripStats = async (tripId: number): Promise<TripStats> => {
     // L3 rolls up to its parent, L1 is excluded from the donut).
     const spIds = [...new Set(itemRows.map((r: any) => Number(r.storeProductId)).filter((v: number) => v > 0))];
     const spCategory = new Map<number, string>();
+    // For the personal orphan-rescue overlay (mirrors getUserStats): sp → product,
+    // and the set of 688 orphan products so a viewer's own 'same' vote re-categorises
+    // the item in THEIR trip donut instead of it sitting in Nepriskirta.
+    const spToProductId = new Map<number, number>();
+    const orphanProductIds = new Set<number>();
+    let rescueByProduct: Awaited<ReturnType<typeof fetchUserPersonalRescues>> = new Map();
     if (spIds.length > 0) {
         const [spRows]: any = await pool.query(
-            `SELECT sp.id AS spId,
+            `SELECT sp.id AS spId, sp.productId AS productId, p.categoryId AS rawCategoryId,
                     CASE
                         WHEN c.parentCategoryId IS NULL THEN NULL
                         WHEN c2.parentCategoryId IS NULL THEN c.name
@@ -145,7 +157,12 @@ export const getTripStats = async (tripId: number): Promise<TripStats> => {
             [spIds],
         );
         for (const row of spRows) {
+            spToProductId.set(Number(row.spId), Number(row.productId));
             if (row.categoryName) spCategory.set(Number(row.spId), String(row.categoryName));
+            if (Number(row.rawCategoryId) === 688) orphanProductIds.add(Number(row.productId));
+        }
+        if (viewerUserId && orphanProductIds.size > 0) {
+            rescueByProduct = await fetchUserPersonalRescues(viewerUserId, [...orphanProductIds], locale);
         }
     }
 
@@ -181,9 +198,18 @@ export const getTripStats = async (tripId: number): Promise<TripStats> => {
 
         // Items whose SP has no resolved L2 category (uncategorised / unmatched /
         // L1) must NOT be dropped — bucket them under the shared "Nepriskirta"
-        // label so the donut's total reconciles with the real spend.
-        const cat = spCategory.get(Number(item.storeProductId)) || UNCATEGORISED_CAT;
-        catMap[cat] = (catMap[cat] ?? 0) + itemTotal;
+        // label so the donut's total reconciles with the real spend. First give a
+        // 688 orphan the viewer's PERSONAL rescue (their own 'same' vote) so a swipe
+        // moves it out of Nepriskirta on reload, keyed by product (all sibling SPs).
+        const spId = Number(item.storeProductId);
+        let cat = spCategory.get(spId);
+        if (!cat && spId) {
+            const pid = spToProductId.get(spId);
+            const rescued = pid != null ? rescueByProduct.get(pid)?.l2Name : undefined;
+            if (rescued) cat = rescued;
+        }
+        const catFinal = cat || UNCATEGORISED_CAT;
+        catMap[catFinal] = (catMap[catFinal] ?? 0) + itemTotal;
     }
 
     const savings = await computeReceiptSavings(itemRows.map((i: any) => ({

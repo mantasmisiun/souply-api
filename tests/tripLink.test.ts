@@ -114,7 +114,7 @@ describe('trip minting at persist time', () => {
         expect(r2.body.find((t: any) => t.id === tripId).stage).toBe(4);
     });
 
-    it('ad-hoc receipt mints a stage-5 scoreExempt trip; linking moves + GCs it', async () => {
+    it('ad-hoc receipt mints a stage-5 scoreable trip; linking moves + GCs it', async () => {
         const ins = await q(
             "INSERT INTO Receipt (userId, storeId, filePath, fileType) VALUES (?, ?, '', 'image/jpeg')",
             [USER, STORE_A]);
@@ -123,7 +123,9 @@ describe('trip minting at persist time', () => {
         const adhocTrip = await ensureTripForReceipt(receiptId, USER, null);
         const [t] = await q('SELECT * FROM Trip WHERE id = ?', [adhocTrip]);
         expect(t.isAdHoc).toBe(1);
-        expect(t.scoreExempt).toBe(1);
+        // NOT scoreExempt — an ad-hoc trip flows through the planning score
+        // (judged purely on store choice). scoreExempt is for historic backfill.
+        expect(t.scoreExempt).toBe(0);
         const trips = await asUser(app, USER).get('/api/trips');
         expect(trips.body.find((x: any) => x.id === adhocTrip).stage).toBe(5);
 

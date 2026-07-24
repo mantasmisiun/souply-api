@@ -327,7 +327,9 @@ export const computePlanningScore = async (tripId: number): Promise<PlanningScor
     base.impulseEur = Math.round((totalSpend - onPlanSpend) * 100) / 100;
     // Receipts not in yet → nothing to judge; score stays null until stage 5-ish.
     // storeChoice may be uninformative (null) → renormalize over coverage +
-    // discipline (0.5 / 0.5); otherwise weight 0.35 / 0.35 / 0.30.
+    // discipline (0.5 / 0.5); otherwise weight 0.35 / 0.35 / 0.30. A list-less
+    // (ad-hoc) trip has coverage = discipline = 0, so it scores purely on store
+    // choice — max 30 (0.30·storeChoice), the agreed fixed-coefficient cap.
     base.score = receiptItems.length > 0
         ? Math.min(100, Math.max(0, Math.round(100 * (storeChoice == null
             ? (coverage + discipline) / 2

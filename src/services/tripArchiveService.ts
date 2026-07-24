@@ -48,12 +48,24 @@ export const sweepTripAutoArchive = async (): Promise<ArchiveSweepResult> => {
            )`,
     );
 
+    // Ad-hoc (receipt-only) trips: an uploaded receipt LINGERS in the active list
+    // for 7 d from UPLOAD (createdAt) — regardless of how old the receipt itself
+    // is — then archives. So a receipt from 2022 uploaded today stays ~a week
+    // (sorted to the bottom by its receipt date), it isn't archived on arrival.
+    const [adhoc]: any = await pool.query(
+        `UPDATE Trip t
+         SET t.archivedAt = NOW()
+         WHERE t.archivedAt IS NULL
+           AND t.isAdHoc = 1
+           AND t.createdAt < DATE_SUB(NOW(), INTERVAL 7 DAY)`,
+    );
+
     const result = {
         formingArchived: Number(forming.affectedRows ?? 0),
-        plannedArchived: Number(planned.affectedRows ?? 0),
+        plannedArchived: Number(planned.affectedRows ?? 0) + Number(adhoc.affectedRows ?? 0),
     };
     if (result.formingArchived + result.plannedArchived > 0) {
-        console.log(`[tripArchive] archived: forming=${result.formingArchived}, planned=${result.plannedArchived}`);
+        console.log(`[tripArchive] archived: forming=${result.formingArchived}, planned=${result.plannedArchived} (adhoc=${Number(adhoc.affectedRows ?? 0)})`);
     }
     return result;
 };

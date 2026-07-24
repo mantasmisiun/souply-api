@@ -2,6 +2,7 @@ import type { Connection } from 'mysql2/promise';
 import pool from '../config/db.js';
 import { createTrip, getTripMemberIds } from '../models/tripModel.js';
 import { notifyUser } from './notificationService.js';
+import { fishListForLinkedReceipt } from './listScopedMatcher.js';
 
 /**
  * Souply 2.0 Phase 4 — trip minting at PERSIST time. The backfill
@@ -77,8 +78,10 @@ export const ensureTripForReceipt = async (
         }
     }
     if (tripId == null) {
-        // Ad-hoc: list-less trip born at stage 5 — "neplanuotas".
-        tripId = await createTrip(userId, { isAdHoc: true, scoreExempt: true }, conn);
+        // Ad-hoc: list-less trip born at stage 5 — "neplanuotas". NOT scoreExempt
+        // (that's for historic backfill): an ad-hoc trip flows through the planning
+        // score and is judged purely on store choice (planningScoreService).
+        tripId = await createTrip(userId, { isAdHoc: true, scoreExempt: false }, conn);
     }
     await db.query(
         'UPDATE Receipt SET tripId = ?, uploaderUserId = COALESCE(uploaderUserId, ?) WHERE id = ? AND tripId IS NULL',
@@ -134,6 +137,12 @@ export const relinkReceiptToListTrip = async (receiptId: number, listId: number)
     const [lists]: any = await pool.query('SELECT id, tripId, basketId, userId FROM ShoppingList WHERE id = ?', [listId]);
     const list = lists[0];
     if (!list) return;
+    // List-narrowing: the receipt now carries this list's shoppingListId (set by
+    // linkReceiptToList just before every call to this fn), so the list's products can
+    // BOOST the receipt's still-unlinked lines. Fire-and-forget + fail-open: it must
+    // never block or break linking, and runs regardless of the trip-state early-returns
+    // below. Additive only — never auto-links, never filters existing candidates.
+    void fishListForLinkedReceipt(receiptId, listId).catch(() => {});
     const listTrip = list.tripId ?? await ensureTripForList(list.id, list.userId ?? receipt.userId, list.basketId);
     const oldTrip = receipt.tripId;
     if (oldTrip === listTrip) return;
