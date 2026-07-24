@@ -154,6 +154,25 @@ export async function getMandatoryQueue(userId: string, receiptId: number, local
     return { ...payload, fromSnapshot: false };
 }
 
+/**
+ * The receipt-line indices SERVED in the receipt's mandatory session — the Card-B
+ * (cardKind:'receipt') cards in the snapshot the client was actually served. Used by
+ * POST /complete-swipes to mark EXACTLY the shown lines 'asked' (never a fresh
+ * recompute, which would burn the NEXT unseen top lines — see
+ * markServedResolveLinesAsked). getMandatoryQueue writes this snapshot on every serve
+ * (snapshot-hit and live build), so it is normally fresh at completion. Returns null
+ * when no snapshot exists for this user+receipt (unknown served set → the caller marks
+ * nothing, the safe fallback that never suppresses an unseen line).
+ */
+export function getServedResolveLineIdxs(userId: string, receiptId: number): number[] | null {
+    const snap = snapshots.get(receiptId);
+    if (!snap || snap.userId !== userId) return null;
+    return snap.payload.cards
+        .filter((c: any) => c?.cardKind === 'receipt')
+        .map((c: any) => Number(c.receiptLineIdx))
+        .filter((n: number) => Number.isInteger(n) && n >= 0);
+}
+
 /** Test seam. */
 export function _clearMandatoryQueueSnapshots(): void {
     snapshots.clear();

@@ -15,7 +15,7 @@ import type { SwipeVote } from '../services/swipeVoteService.js';
 import { getUserPointsProfile } from '../services/userPointsService.js';
 import { refillUserOrphansIfMissing } from '../services/orphanRefillService.js';
 import type { Locale } from '../middleware/locale.js';
-import { capVoluntaryQueue } from '../../../shared/swipeQueueCap.js';
+import { capVoluntaryQueue, composeVoluntaryReceiptDeck } from '../../../shared/swipeQueueCap.js';
 import { buildReceiptResolveCards } from '../services/receiptResolveQueueService.js';
 import { buildSlot2cBackfill } from '../services/slot2cBackfillService.js';
 import { RECOGNITION } from '../../../shared/recognitionConfig.js';
@@ -186,10 +186,14 @@ export async function buildSwipeQueueItems(
     relatedTo: number | undefined,
     locale: Locale,
 ): Promise<{ items: SwipeQueueCard[]; slotCounts: { slot1: number; slot2: number; slot3: number } }> {
-    const [votedPairKeys, slot1Rows, slot2Rows, slot3Rows] = await Promise.all([
-        fetchVotedPairKeys(userId),
+    // votedPairKeys is fetched FIRST (cheap indexed read) so slot-2a can advance a
+    // rejected top OSC candidate to the orphan's next-ranked one (reject → next):
+    // without the voted set, 2a would re-emit the voted rank-1 pair only for
+    // buildSlot2Queue to drop it, hiding the orphan forever instead of offering #2.
+    const votedPairKeys = await fetchVotedPairKeys(userId);
+    const [slot1Rows, slot2Rows, slot3Rows] = await Promise.all([
         fetchSlot1Rows(userId, receiptIdParam, locale),
-        fetchAllSlot2Rows(userId, receiptIdParam, locale),
+        fetchAllSlot2Rows(userId, receiptIdParam, locale, votedPairKeys),
         fetchSlot3Rows(userId, receiptIdParam, locale),
     ]);
 
@@ -233,6 +237,52 @@ export async function buildSwipeQueueItems(
     return { items, slotCounts: { slot1: slot1Items.length, slot2: slot2Items.length, slot3: slot3Items.length } };
 }
 
+/** Voluntary slot-2c fetch depth. Bounds the receipt-scoped orphan backfill so it
+ *  can fill leftover voluntary capacity (receipt budget 9, cap 10) while reliably
+ *  surfacing the receipt's OWN 688 orphan seeds (prioritised inside the builder). */
+const VOLUNTARY_SLOT2C_K = RECOGNITION.queue.voluntaryReceiptHalf;
+
+/**
+ * Receipt-scoped Slot-2c orphan backfill shaped as voluntary SwipeQueueCards —
+ * the SAME buildSlot2cBackfill the mandatory queue uses (mandatoryQueueService
+ * Stage 3), mirrored into the VOLUNTARY receipt pool so the receipt's own 688
+ * orphan lines reliably appear instead of only ever showing in the mandatory
+ * session. Cards are ordinary slot-2 cards, so the slot2 vote endpoint and the
+ * no-repeat ledgers (voted-pairs via fetchVotedPairKeys + OrphanSwipeCandidate.
+ * resolved, both applied inside buildSlot2cBackfill) handle them unchanged and
+ * nothing re-shows after resolution. `existingCardIds` dedups against any 2a/2b
+ * card of the same canonical pair already in the pool. Fail-open: any error
+ * yields [] so the queue still serves. The cap is enforced downstream by
+ * capVoluntaryQueue — these cards only ever fill leftover capacity.
+ */
+export async function buildVoluntarySlot2cCards(
+    userId: string,
+    receiptId: number,
+    locale: Locale,
+    existingCardIds: Set<string> = new Set(),
+): Promise<SwipeQueueCard[]> {
+    try {
+        const backfill = await buildSlot2cBackfill(userId, receiptId, VOLUNTARY_SLOT2C_K, locale);
+        const out: SwipeQueueCard[] = [];
+        for (const item of backfill) {
+            if (existingCardIds.has(item.cardId)) continue;
+            existingCardIds.add(item.cardId);
+            out.push({
+                cardId: item.cardId,
+                slot: 2 as const,
+                score: item.score,
+                left: { spId: item.orphanSpId, ...item.orphan },
+                right: { spId: item.candidateSpId, ...item.candidate },
+                slot2Meta: { sameChain: item.sameChain, conflictDetected: item.conflictDetected },
+            });
+        }
+        return out;
+    } catch (e) {
+        console.warn('[voluntary-slot2c] backfill failed (non-fatal):', (e as Error)?.message ?? e);
+        return [];
+    }
+}
+
 /**
  * GET /api/users/:userId/swipe-queue
  *
@@ -263,13 +313,14 @@ export const getSwipeQueue = async (
         const receiptIdParam = typeof req.query.receiptId === 'string' && req.query.receiptId.length > 0
             ? Number(req.query.receiptId)
             : undefined;
-        // `voluntary=1` is set by the Nepriskirta-modal pink button. All
-        // three slots still fire so the client's `capVoluntaryQueue` has a
-        // receipt-anchored pool to draw from (spec: 3 slot 2 → 3 slot 1 →
-        // 3 slot 3 → 1 global). We also fire an on-demand refill of
-        // OrphanSwipeCandidate for the user's missing orphans — the
-        // current response uses whatever OSC rows already exist; the
-        // refill benefits the next visit.
+        // `voluntary=1` is set by the Nepriskirta-modal pink button. All three
+        // slots still fire so the client's `capVoluntaryQueue` has a receipt-
+        // anchored pool to draw from. For a RECEIPT-scoped voluntary session the
+        // deck is relevance-only (this receipt's crops + 688 rescues + anchored
+        // identity cards, slot 2 → 1 → 3, no global fill); only the no-receipt
+        // community path draws the global pool. We also fire an on-demand refill of
+        // OrphanSwipeCandidate for the user's missing orphans — the current response
+        // uses whatever OSC rows already exist; the refill benefits the next visit.
         const voluntary = req.query.voluntary === '1' || req.query.voluntary === 'true';
 
         resetSwipeLog(`swipe-queue userId=${userId} receiptId=${receiptIdParam ?? 'none'} voluntary=${voluntary}`);
@@ -305,17 +356,37 @@ export const getSwipeQueue = async (
 
         const { items, slotCounts } = await buildSwipeQueueItems(userId, receiptIdParam, relatedTo, req.locale);
 
-        swipeLog(`[SwipeQueue] userId=${userId} receiptId=${receiptIdParam ?? 'none'} → slot1=${slotCounts.slot1} slot2=${slotCounts.slot2} slot3=${slotCounts.slot3} total=${items.length}`);
-        for (const card of items) {
+        // VOLUNTARY receipt pool: PREPEND the receipt-scoped Slot-2c orphan backfill so
+        // the receipt's own 688 orphan lines reach the voluntary session too (the
+        // mandatory queue already does this; the voluntary build previously never did).
+        // Prepended (not appended) so the receipt's OWN 688 rescues (slot-2c, seeds
+        // first) rank AHEAD of the precomputed 2a/2b slot-2 cards within slot 2 — the
+        // client's capVoluntaryQueue regroups by slot and takes them in this order, so
+        // the receipt's uncategorised items are never crowded out. Cross-slot order is
+        // irrelevant (regrouped); only the within-slot-2 order matters. Mirrored in
+        // getVoluntaryQueueCount so the badge equals what opens.
+        let outItems = items;
+        if (voluntary && receiptIdParam !== undefined && Number.isFinite(receiptIdParam)) {
+            const slot2c = await buildVoluntarySlot2cCards(
+                userId, receiptIdParam, req.locale, new Set(items.map((c) => c.cardId)),
+            );
+            if (slot2c.length > 0) {
+                outItems = [...slot2c, ...items];
+                swipeLog(`[Voluntary] slot-2c backfill prepended ${slot2c.length} receipt-orphan card(s) (ranked ahead of 2a/2b in slot 2)`);
+            }
+        }
+
+        swipeLog(`[SwipeQueue] userId=${userId} receiptId=${receiptIdParam ?? 'none'} → slot1=${slotCounts.slot1} slot2=${slotCounts.slot2} slot3=${slotCounts.slot3} total=${outItems.length}`);
+        for (const card of outItems) {
             swipeLog(`[SwipeQueue]   [slot${card.slot}] "${card.left.name}" (${card.left.chainName}) vs "${card.right.name}" (${card.right.chainName}) score=${card.score.toFixed(3)}`);
         }
         // CONSOLE summary (the per-card list above is in swipe-debug.log). This is the POOL the
         // client draws from — the client mixes it with Card-B crop cards and caps the session via
         // capVoluntaryQueue (shared/swipeQueueCap.ts). So a low slot1 here = few related candidates
         // existed, NOT a cap; a high slot1 that still serves few on-device = the client cap.
-        console.log(`[GLOBAL-QUEUE] pool for receipt ${receiptIdParam ?? 'none'}: slot1(cross-chain related)=${slotCounts.slot1} · slot2(orphan-rescue)=${slotCounts.slot2} · slot3(same-chain dedup)=${slotCounts.slot3} · total=${items.length}`);
+        console.log(`[GLOBAL-QUEUE] pool for receipt ${receiptIdParam ?? 'none'}: slot1(cross-chain related)=${slotCounts.slot1} · slot2(orphan-rescue)=${slotCounts.slot2} · slot3(same-chain dedup)=${slotCounts.slot3} · total=${outItems.length}`);
 
-        res.json({ items, slotCounts });
+        res.json({ items: outItems, slotCounts });
     } catch (error) {
         next(error);
     }
@@ -325,11 +396,12 @@ export const getSwipeQueue = async (
  * GET /api/users/:userId/voluntary-queue-count?receiptId=…
  *
  * SINGLE SOURCE OF TRUTH for the "Improve price comparison" button's badge. Runs the
- * EXACT voluntary served-queue assembly server-side — the relatedTo-gated receipt +
- * global pools through capVoluntaryQueue, plus up to 5 prepended Card-B resolve cards
- * — and returns the final count. The button hides at 0 and shows a number that equals
- * what actually opens (kills the "advertises 10 → opens empty" divergence, which came
- * from the old count omitting the relatedTo gate AND the resolve-queue cards).
+ * EXACT receipt-scoped voluntary served-queue assembly server-side — the receipt's own
+ * relatedTo-gated pool + slot-2c through capVoluntaryQueue in relevance-only mode (NO
+ * global fill), plus up to voluntaryCropComfortCap prepended Card-B crop cards — and
+ * returns the final count. The button hides at 0 and shows a number that equals what
+ * actually opens (kills the "advertises 10 → opens empty" divergence, which came from
+ * the old count omitting the relatedTo gate AND the resolve-queue cards).
  */
 export const getVoluntaryQueueCount = async (
     req: Request,
@@ -347,29 +419,37 @@ export const getVoluntaryQueueCount = async (
             return;
         }
 
-        // Mirror SwipeQueue.loadQueue's voluntary branch exactly:
-        //   receiptItems = swipe-queue(receiptId, relatedTo=receiptId)
-        //   globalItems  = swipe-queue(relatedTo=receiptId)   (no receiptId)
-        //   capVoluntaryQueue({receiptItems, globalItems}); then prepend ≤5 Card-B, cap 10.
-        const [receiptPool, globalPool] = await Promise.all([
-            buildSwipeQueueItems(userId, receiptId, receiptId, req.locale),
-            buildSwipeQueueItems(userId, undefined, receiptId, req.locale),
-        ]);
-        const capped = capVoluntaryQueue({ receiptItems: receiptPool.items, globalItems: globalPool.items }).items;
+        // Mirror SwipeQueue.loadQueue's RECEIPT-SCOPED voluntary branch exactly
+        // (relevance-only — NO global "community" pool):
+        //   receiptItems = swipe-queue(receiptId, relatedTo=receiptId) + slot-2c (seeds first)
+        //   capVoluntaryQueue({receiptItems, globalItems:[], receiptScoped:true});
+        //   then prepend ≤voluntaryCropComfortCap Card-B crops, cap 10.
+        const receiptPool = await buildSwipeQueueItems(userId, receiptId, receiptId, req.locale);
+        // PREPEND the SAME receipt-scoped Slot-2c backfill the served queue adds (seeds
+        // ranked ahead of 2a/2b in slot 2) so this count equals what actually opens.
+        const slot2c = await buildVoluntarySlot2cCards(
+            userId, receiptId, req.locale, new Set(receiptPool.items.map((c) => c.cardId)),
+        );
+        const receiptItems = slot2c.length > 0 ? [...slot2c, ...receiptPool.items] : receiptPool.items;
+        const capped = capVoluntaryQueue({ receiptItems, globalItems: [], receiptScoped: true }).items;
 
-        const max = RECOGNITION.queue.voluntaryReceiptHalf;
+        // Crops (Card-B) fill FIRST up to the comfort cap; the remainder is the capped
+        // slot pool. Matches the client's `[...crops.slice(0,cap), ...capped].slice(0,10)`.
+        const cropCap = RECOGNITION.queue.voluntaryCropComfortCap;
         const conn = await (pool as any).getConnection();
         let cardBCount = 0;
         try {
-            const { cards } = await buildReceiptResolveCards(receiptId, conn, max);
+            const { cards } = await buildReceiptResolveCards(receiptId, conn, cropCap, /* quiet */ true);
             cardBCount = cards.length;
         } finally {
             conn.release();
         }
 
-        const count = cardBCount > 0
-            ? Math.min(10, Math.min(max, cardBCount) + capped.length)
-            : capped.length;
+        // Count via the SAME shared merge the served client deck uses (crops up to the
+        // comfort cap, then slot cards, cap 10) so the badge can never diverge from what
+        // actually opens — placeholder crop ids stand in for the cardBCount crop cards.
+        const cropPlaceholders = Array.from({ length: cardBCount }, (_, i) => ({ cardId: `crop-${i}` }));
+        const count = composeVoluntaryReceiptDeck(cropPlaceholders, capped, cropCap).length;
         res.json({ count });
     } catch (error) {
         next(error);

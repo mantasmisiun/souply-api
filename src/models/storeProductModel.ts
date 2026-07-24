@@ -173,6 +173,62 @@ export const getStoreProductsForCluster = async (productId: number, userId?: str
     return rows;
 };
 
+/**
+ * List-scoped candidate resolution (listScopedMatcher.fishListScopedCandidates):
+ * given a set of PRODUCT ids (a shopping list's products) resolve them to their
+ * SAME-CHAIN StoreProducts, carrying the exact fields an altMatches entry needs
+ * (mirrors getChainSpsByRegularPrice's SELECT shape so a fished list candidate can
+ * sit in altMatches verbatim). Non-provisional catalog + orphan SPs; a product with
+ * no SP in this chain simply drops out (fail-open — nothing to propose there).
+ */
+export const getChainSpsByProductIds = async (
+    chainId: number,
+    productIds: number[],
+    conn?: Connection,
+): Promise<Array<{
+    storeProductId: number; productId: number; categoryId: number | null;
+    categoryName: string | null; categoryL2Name: string | null; name: string;
+    brandName: string | null; amount: number | null; unit: string | null;
+    isWeighable: boolean; isCatalog: boolean; imageUrl: string | null;
+}>> => {
+    const db = conn || pool;
+    const ids = [...new Set(productIds.map(Number).filter((n) => Number.isFinite(n) && n > 0))];
+    if (ids.length === 0) return [];
+    const [rows]: any = await db.query(
+        `SELECT sp.id AS storeProductId, sp.productId, sp.storeProductName AS name,
+                sp.brandName, sp.amount, sp.unit, sp.isWeighable, sp.imageUrl,
+                p.categoryId, c.name AS categoryName,
+                CASE
+                  WHEN c.parentCategoryId IS NULL  THEN NULL
+                  WHEN c2.parentCategoryId IS NULL THEN c.name
+                  ELSE c2.name
+                END AS categoryL2Name,
+                EXISTS(SELECT 1 FROM Price pr2 WHERE pr2.storeProductId = sp.id AND pr2.receiptId IS NULL) AS isCatalog
+           FROM StoreProduct sp
+           JOIN Product p ON p.id = sp.productId
+           LEFT JOIN Category c  ON c.id = p.categoryId
+           LEFT JOIN Category c2 ON c2.id = c.parentCategoryId
+          WHERE sp.chainId = ?
+            AND sp.productId IN (?)
+            AND sp.provisional = 0`,
+        [chainId, ids],
+    );
+    return rows.map((r: any) => ({
+        storeProductId: Number(r.storeProductId),
+        productId: Number(r.productId),
+        categoryId: r.categoryId != null ? Number(r.categoryId) : null,
+        categoryName: r.categoryName ?? null,
+        categoryL2Name: r.categoryL2Name ?? null,
+        name: String(r.name),
+        brandName: r.brandName ?? null,
+        amount: r.amount != null ? parseFloat(r.amount) : null,
+        unit: r.unit ?? null,
+        isWeighable: !!r.isWeighable,
+        isCatalog: !!r.isCatalog,
+        imageUrl: r.imageUrl ?? null,
+    }));
+};
+
 export const getStoreProductsByChainId = async (chainId: number) => {
     const [rows]: any = await pool.query(
         `SELECT StoreProduct.*, StoreChain.name AS chainName, StoreChain.logoUrl

@@ -120,3 +120,65 @@ describe('buildSlot2cBackfill', () => {
         expect(await buildSlot2cBackfill('u1', 237, 0)).toEqual([]);
     });
 });
+
+/**
+ * TARGETED SEED CANDIDATE rescue — the coverage fix. The scope candidate pool is a
+ * bounded LIMIT sample of a large sibling-broadened family, so it routinely EXCLUDES
+ * the exact categorised sibling a receipt's OWN orphan (688 seed) needs — leaving the
+ * seed with no pair. For each seed we fish its counterpart from the WHOLE catalog by a
+ * significant-token name search (the `categoryId <> 688` query below), merge it into the
+ * pool, and let the existing floor/pairing gates decide.
+ */
+function wireSeeded(opts: {
+    seeds: Array<{ spId: number }>;
+    scopeCandidates: any[];
+    orphans: any[];
+    targeted: any[];
+    aliases?: any[];
+    prices?: Array<{ storeProductId: number; price: number }>;
+}) {
+    const { seeds, scopeCandidates, orphans, targeted, aliases = [], prices = [] } = opts;
+    mockQuery.mockImplementation(async (sql: string) => {
+        if (/FROM ReceiptItem/.test(sql)) return [seeds];
+        if (/FROM OrphanSwipeCandidate/.test(sql)) return [[]];          // skip the precomputed fast path
+        if (/FROM StoreProductReceiptAlias/.test(sql)) return [aliases];
+        if (/categoryId <> 688/.test(sql)) return [targeted];           // the targeted seed search
+        if (/categoryId IN/.test(sql)) return [scopeCandidates];        // scope pool (excludes the sibling)
+        if (/categoryId = 688/.test(sql)) return [orphans];
+        if (/FROM Price WHERE storeProductId IN/.test(sql)) return [prices];
+        return [[]];
+    });
+}
+
+describe('buildSlot2cBackfill — targeted seed candidate rescue', () => {
+    it('rescues a seed whose categorised sibling was sampled OUT of the scope pool', async () => {
+        mockScope.mockResolvedValue({ categoryIds: new Set([5]), lineNames: [], chainIds: new Set([3]) });
+        wireSeeded({
+            seeds: [{ spId: 300 }],
+            // scope pool holds an unrelated categorised product — the real sibling is NOT here.
+            scopeCandidates: [poolRow(100, 1000, 'Šampūnas su kofeinu ALPECIN', { categoryId: 20 })],
+            // the receipt's OWN orphan line (688) — the seed.
+            orphans: [poolRow(300, 3000, 'Plautos morkos CLEVER', { categoryId: 688, categoryName: 'Nepriskirta' })],
+            // its categorised sibling, reachable ONLY via the targeted name search.
+            targeted: [poolRow(101, 1001, 'Plautos morkos', { categoryId: 5, categoryName: 'Daržovės' })],
+        });
+        const items = await buildSlot2cBackfill('u1', 237, 2);
+        expect(items).toHaveLength(1);
+        expect(items[0].source).toBe('2c');
+        expect(items[0].orphanSpId).toBe(300);
+        expect(items[0].candidateSpId).toBe(101); // came from the targeted search, not the scope pool
+        expect(items[0].cardId).toBe('101-300');
+    });
+
+    it('a seed with no floor-clearing counterpart yields no card (search runs, still honest)', async () => {
+        mockScope.mockResolvedValue({ categoryIds: new Set([109]), lineNames: [], chainIds: new Set([3]) });
+        wireSeeded({
+            seeds: [{ spId: 400 }],
+            scopeCandidates: [],
+            orphans: [poolRow(400, 4000, 'Atlantinė lašiša VICI', { categoryId: 688, categoryName: 'Nepriskirta' })],
+            // targeted search returns a token-adjacent but unrelated product — below the name floor.
+            targeted: [poolRow(101, 1001, 'Bananai prinokę', { categoryId: 16, categoryName: 'Vaisiai' })],
+        });
+        expect(await buildSlot2cBackfill('u1', 237, 2)).toEqual([]);
+    });
+});
