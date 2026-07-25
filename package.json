@@ -10,6 +10,7 @@
         "receipts:batch": "tsx src/scripts/receiptBatch/importReceiptBatch.ts",
         "receipts:reparse": "tsx src/scripts/receiptBatch/reparseMetrics.ts",
         "receipts:matchaudit": "tsx src/scripts/receiptBatch/matchAudit.ts",
+        "pairing:why": "tsx src/scripts/pairingWhy.ts",
         "receipts:stage": "tsx src/scripts/receiptBatch/stageReceiptsOnDevice.ts",
         "receipts:cleanup": "tsx src/scripts/receiptBatch/cleanupTestReceipts.ts",
         "receipts:backfillitems": "tsx src/scripts/backfillReceiptItems.ts",
