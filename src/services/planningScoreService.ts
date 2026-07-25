@@ -1,5 +1,6 @@
 import pool from '../config/db.js';
 import { normalizeProductName } from '../utils/productNameNormalize.js';
+import { lemmaOf } from '../utils/ltLemmas.js';
 import { localizedProductNameSql } from '../middleware/locale.js';
 import { loadCanonicalsForProducts } from './productCanonical.js';
 
@@ -10,17 +11,30 @@ const UNASSIGNED_CATEGORY = 688; // "Nepriskirta" — never counts as a category
 // and "grietinė 30 % rieb." share only 'rieb', which greedily mis-paired the
 // planned sūrelis to a receipt sour cream. Fat-% is never identifying.
 const NAME_STOP = new Set(['bon', 'via', 'clever', 'lengvai', 'ekologiskas', 'lietuviski', 'lietuviskas', 'didziosios', 'smulkiavaisiai', 'smulki', 'skonio', 'salt', 'hill', 'rieb', 'riebumo', 'riebumas', 'riebalu']);
-/** Significant name tokens (≥4 chars, not a filler) for fuzzy same-item match. */
-const nameTokens = (name: string | null): Set<string> => {
+/**
+ * Significant name tokens (≥4 chars, not a filler) for fuzzy same-item match.
+ *
+ * Each token is LEMMATISED first (utils/ltLemmas): Lithuanian declines, and
+ * receipts print a different case from the catalogue — a list "Spirito ACTAS"
+ * against a receipt "Maistinė ACTO rūgštis" shared no token, so one purchase was
+ * counted BOTH as a missed list item and as an extra receipt line. Lemmatising
+ * before the length filter matters too: a short inflected form maps up to its
+ * longer lemma and survives instead of being dropped.
+ */
+export const nameTokens = (name: string | null): Set<string> => {
     const out = new Set<string>();
     for (const w of normalizeProductName(name ?? '').split(' ')) {
-        if (w.length >= 4 && !NAME_STOP.has(w)) out.add(w);
+        if (NAME_STOP.has(w)) continue;
+        const lemma = lemmaOf(w);
+        if (lemma.length >= 4) out.add(lemma);
     }
     return out;
 };
 /** Do a list item and a receipt item refer to the same KIND of product? Exact
- *  product id, else a shared significant name token, else the same real L3. */
-const sameKind = (li: any, ri: any): boolean => {
+ *  product id, else a shared significant name token, else the same real L3.
+ *  Exported for tests + the `pairing:why` diagnostic, which must reason about the
+ *  SAME tiers production uses — a re-implementation would drift. */
+export const sameKind = (li: any, ri: any): boolean => {
     if (li.productId != null && ri.productId != null && Number(li.productId) === Number(ri.productId)) return true;
     const lt = li._tokens ?? (li._tokens = nameTokens(li.productName ?? li.spName ?? li.customName));
     const rt = ri._tokens ?? (ri._tokens = nameTokens(ri.resolvedName ?? ri.spName ?? ri.name));
