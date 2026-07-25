@@ -105,7 +105,17 @@ export interface QualityAssessment {
 /** Assess a stored parse: enough UNREADABLE lines, most lines UNMATCHED (a strong
  *  bad-scan signal), or a big reconciliation gap vs the printed `total` (null →
  *  gap check skipped). */
-export const assessQuality = (lines: HealLine[], total: number | null): QualityAssessment => {
+export const assessQuality = (
+    lines: HealLine[],
+    total: number | null,
+    /** Receipt-level set-deal discount (IKI "RINKINYS"). It is deducted at the
+     *  FOOTER, never from the line prices, so the line sum legitimately exceeds
+     *  the printed total by exactly this much. Without subtracting it a perfectly
+     *  captured receipt looks broken — a €2.35 receipt with a €1.90 set deal
+     *  showed a 71 % gap and raised the "Perfotografuoti" retake banner on a scan
+     *  whose every line was correct and matched. */
+    comboDiscount: number | null = null,
+): QualityAssessment => {
     const lineCount = lines.length;
     const unreadableCount = lines.filter(isUnreadable).length;
     const unmatchedCount = lines.filter((l) => !l.matched).length;
@@ -113,7 +123,8 @@ export const assessQuality = (lines: HealLine[], total: number | null): QualityA
     const fracUnmatched = lineCount > 0 ? unmatchedCount / lineCount : 0;
     let gapTrips = false;
     if (total != null && total > 0) {
-        const sum = lines.reduce((s, l) => s + (l.price > 0 ? l.price : 0), 0);
+        const combo = comboDiscount != null && comboDiscount > 0 ? comboDiscount : 0;
+        const sum = lines.reduce((s, l) => s + (l.price > 0 ? l.price : 0), 0) - combo;
         gapTrips = Math.abs(total - sum) / total > CFG.reconcileGapFrac;
     }
     return {

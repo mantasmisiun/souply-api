@@ -4,6 +4,7 @@ import { listTripsForUser } from '../services/tripListService.js';
 import { isTripMember } from '../models/tripModel.js';
 import { getTripStats, getMonthlyTripSpend } from '../services/tripStatsService.js';
 import { computePlanningScore, monthlyPlanningScores, planningBaselineDelta } from '../services/planningScoreService.js';
+import { attributeComboDiscount } from '../services/comboAttribution.js';
 import { assessQuality } from '../services/receiptHealService.js';
 import { getTripComparison } from '../services/tripComparisonService.js';
 
@@ -161,7 +162,8 @@ export const fetchTripReceipts = async (req: Request, res: Response, next: NextF
                     -- so an old date is intentional, not a "wrong receipt?" warning.
                     (t.isAdHoc = 0 AND r.receiptDate IS NOT NULL AND DATEDIFF(r.uploadedAt, r.receiptDate) > 30) AS staleReceipt,
                     JSON_EXTRACT(r.parsedData, '$.footer.total') AS printedTotal,
-                    JSON_EXTRACT(r.parsedData, '$.footer.comboDiscount') AS comboDiscount
+                    JSON_EXTRACT(r.parsedData, '$.footer.comboDiscount') AS comboDiscount,
+                    JSON_EXTRACT(r.parsedData, '$.footer.comboDiscountAnchors') AS comboAnchors
                FROM Receipt r
                JOIN Trip t ON t.id = r.tripId
                LEFT JOIN Store s ON s.id = r.storeId
@@ -196,17 +198,47 @@ export const fetchTripReceipts = async (req: Request, res: Response, next: NextF
                     implausible: !!it.priceImplausible,
                 })),
                 r.printedTotal != null ? Number(r.printedTotal) : null,
+                // Set-deal discounts come off the FOOTER, not the lines — without
+                // this the line sum legitimately overshoots the total and a clean
+                // receipt gets flagged for a retake.
+                Number.isFinite(Number(r.comboDiscount)) ? Number(r.comboDiscount) : null,
             );
             // printedTotal = the receipt's OWN footer total (what the user actually paid).
             // Surfaced so the detail card shows the recognised total, not a line-item sum
             // that a single mis-parsed line can throw off.
-            const { printedTotal, comboDiscount, ...rr } = r;
+            const { printedTotal, comboDiscount, comboAnchors, ...rr } = r;
+            const combo = Number(comboDiscount) > 0 ? Number(comboDiscount) : 0;
+            // WHICH lines the set deal is shown against. A deal needs 2+ qualifying
+            // items, so spreading it over every line made unrelated products (a lone
+            // bottle of vinegar next to 2× water) look discounted. Tiered: the line
+            // it was printed under → plain multiples → everything. DISPLAY ONLY —
+            // item price/promoPrice are untouched so price learning and cross-store
+            // comparison keep the true unit prices.
+            let anchors: number[] = [];
+            try {
+                const a = typeof comboAnchors === 'string' ? JSON.parse(comboAnchors) : comboAnchors;
+                if (Array.isArray(a)) anchors = a.filter((n: any) => Number.isInteger(n));
+            } catch { /* no anchors → the tiers below still apply */ }
+            const attribution = attributeComboDiscount(
+                (items as any[]).map((it) => ({
+                    matchedSpId: it.matchedSpId ?? null,
+                    name: it.name ?? '',
+                    quantity: Number(it.quantity) || 1,
+                    lineTotal: Number(it.lineTotal) || 0,
+                })),
+                combo, anchors,
+            );
+            const itemsWithShare = (items as any[]).map((it, i) => ({
+                ...it, comboShare: attribution.shares[i] ?? 0,
+            }));
             receipts.push({
-                ...rr, items,
+                ...rr, items: itemsWithShare,
                 printedTotal: printedTotal != null ? Number(printedTotal) : null,
-                // Footer combo/set-deal discount (e.g. IKI RINKINYS) — the client applies
-                // it proportionally for the receipt's net item prices + discount view.
-                comboDiscount: Number(comboDiscount) > 0 ? Number(comboDiscount) : 0,
+                comboDiscount: combo,
+                /** Deal amount that couldn't be placed on any line (all capped) —
+                 *  keep showing this at footer level so the total still adds up. */
+                comboUnattributed: attribution.unattributed,
+                comboBasis: attribution.basis,
                 lowQuality: quality.lowQuality, unmatchedCount: quality.unmatchedCount,
             });
         }
