@@ -1,8 +1,40 @@
 import { Request, Response, NextFunction } from 'express';
 import { createBasketItem, getBasketItemById, getBasketItemsByBasketId, updateBasketItemQuantity, deleteBasketItem, getBasketItemByBasketAndProduct, convertBasketItemsMode } from '../models/basketItemModel.js';
 import { getProductById } from '../models/productModel.js';
-import { getBasketById, updateBasketUpdatedAt, markBasketUserEdited } from '../models/basketModel.js';
+import { getBasketById, updateBasketUpdatedAt, markBasketUserEdited, updateBasketStatus } from '../models/basketModel.js';
 import { logInteraction } from '../models/productInteractionModel.js';
+
+/**
+ * EDIT GATE for a basket's items. A 'compared' basket is one we have PRICED, not
+ * one that is finished — editing it is normal (the user adds a forgotten item
+ * after seeing the store results), it just invalidates those results. So editing
+ * REVERTS it to 'draft' rather than being refused.
+ *
+ * This used to reject anything non-draft, and only the basket-detail screen knew
+ * to call its own revertToDraftIfCompared() first. Every other entry point (the
+ * catalog card + amount modal, product detail, search, the session dock) hit a
+ * silent 400: the spinner ran, the item never landed, the button fell back to
+ * "Add". Enforcing the rule HERE — the one choke point all of them share — fixes
+ * every path at once instead of duplicating the revert into each surface.
+ *
+ * 'inProgress' / 'completed' stay refused: those have shopping lists or receipts
+ * hanging off them, so mutating their items really would corrupt state.
+ *
+ * Returns `reverted` so the response can tell the client its cached price
+ * results for this basket are now stale.
+ */
+type EditGate = { ok: true; reverted: boolean } | { ok: false; status: number; error: string };
+
+export const ensureBasketEditable = async (basketId: number): Promise<EditGate> => {
+    const basket = await getBasketById(basketId);
+    if (!basket) return { ok: false, status: 404, error: 'Basket not found' };
+    if (basket.status === 'draft') return { ok: true, reverted: false };
+    if (basket.status === 'compared') {
+        await updateBasketStatus(basketId, 'draft');
+        return { ok: true, reverted: true };
+    }
+    return { ok: false, status: 400, error: 'Cannot modify a basket that is not in draft status' };
+};
 
 export const addBasketItem = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -22,8 +54,9 @@ export const addBasketItem = async (req: Request, res: Response, next: NextFunct
             res.status(404).json({ error: 'Basket not found' });
             return;
         }
-        if (basket.status !== 'draft') {
-            res.status(400).json({ error: 'Cannot modify a basket that is not in draft status' });
+        const gate = await ensureBasketEditable(basketId);
+        if (!gate.ok) {
+            res.status(gate.status).json({ error: gate.error });
             return;
         }
 
@@ -46,7 +79,9 @@ export const addBasketItem = async (req: Request, res: Response, next: NextFunct
         // the basket is no longer "untouched template instance".
         await markBasketUserEdited(basketId);
         logInteraction(basket.userId, productId, 'basket_add').catch(() => {});
-        res.status(201).json({ id, basketId, productId, quantity, matchMode: resolvedMatchMode });
+        // `revertedToDraft` → the client drops its cached price results for this
+        // basket; they were computed before this item existed.
+        res.status(201).json({ id, basketId, productId, quantity, matchMode: resolvedMatchMode, revertedToDraft: gate.reverted });
     } catch (error) {
         next(error);
     }
@@ -83,21 +118,17 @@ export const updateBasketItem = async (req: Request, res: Response, next: NextFu
             return;
         }
 
-        // Check basket status
-        const basket = await getBasketById(basketItem.basketId);
-        if (!basket) {
-            res.status(404).json({ error: 'Basket not found' });
-            return;
-        }
-        if (basket.status !== 'draft') {
-            res.status(400).json({ error: 'Cannot modify a basket that is not in draft status' });
+        // Editing quantity is an edit like any other — a priced basket reverts.
+        const gate = await ensureBasketEditable(basketItem.basketId);
+        if (!gate.ok) {
+            res.status(gate.status).json({ error: gate.error });
             return;
         }
 
         await updateBasketItemQuantity(id, quantity);
         await updateBasketUpdatedAt(basketItem.basketId);
         await markBasketUserEdited(basketItem.basketId);
-        res.json({ id, quantity });
+        res.json({ id, quantity, revertedToDraft: gate.reverted });
     } catch (error) {
         next(error);
     }
@@ -112,6 +143,15 @@ export const removeBasketItem = async (req: Request, res: Response, next: NextFu
         }
         // Look up the row before deleting so we know which basket to bump.
         const basketItem = await getBasketItemById(id);
+        if (basketItem) {
+            // Removing an item from a priced basket reverts it too — otherwise the
+            // stored results would price a line the basket no longer holds.
+            const gate = await ensureBasketEditable(basketItem.basketId);
+            if (!gate.ok) {
+                res.status(gate.status).json({ error: gate.error });
+                return;
+            }
+        }
         await deleteBasketItem(id);
         if (basketItem) {
             await updateBasketUpdatedAt(basketItem.basketId);
