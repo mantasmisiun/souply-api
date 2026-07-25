@@ -242,25 +242,55 @@ export const computePlanningScore = async (tripId: number): Promise<PlanningScor
         return null;
     };
     const r2 = (n: number) => Math.round(n * 100) / 100;
-    // Bought amount falls back to the PLANNED amount when the receipt gives no
-    // reliable size (a packed item with no weight + an ambiguous SP match), so a
-    // Lavazza reads "€23.96/kg → €19.98/kg" rather than an impossible €/kg off a
-    // mis-sized pack. Weighable/known-amount receipt lines use their own size.
+    /**
+     * ONE unit for the whole row, and BOTH sides expressed in it.
+     *
+     * The comparison is only meaningful per unit, so it must never mix bases.
+     * It used to: a planned product with no canonical family produced a null
+     * unit price, the client fell back to the raw line total, and the row read
+     * "2,58 € → 2,49 €/kg" — a line price against a per-kilo price.
+     *
+     * Rules:
+     *   · If EITHER side is weighed (or the product is fluid) the row is per
+     *     kg / l; otherwise it is per piece (vnt), where the amount is simply
+     *     the quantity — so an amount is always derivable.
+     *   · A side that cannot express its own size in that unit borrows the
+     *     other side's amount. Both figures then stay comparable instead of
+     *     one silently degrading to a line total.
+     */
+    const amountIn = (
+        unit: string, qty: number, isWeighable: boolean,
+        packAmount: number | null, packUnit: string | null,
+    ): number | null => {
+        if (unit === 'vnt') return qty > 0 ? qty : null;          // pieces
+        if (isWeighable) return qty > 0 ? qty : null;             // weighed → qty IS the weight
+        if (packAmount != null && packAmount > 0) return qty * toKg(packAmount, packUnit);
+        // A FRACTIONAL quantity on a per-weight row is itself a weight: pack
+        // counts are whole numbers, so "0,5" can only mean half a kilo. List rows
+        // routinely carry the weight here while their isWeighable flag is unset
+        // (it is derived, and a custom/unmatched item has nothing to derive from)
+        // — without this, planned 0,5 kg of tomatoes borrowed the receipt's
+        // 0,14 kg and priced them at €18,43/kg instead of €5,16/kg.
+        if (qty > 0 && !Number.isInteger(qty)) return qty;
+        return null;                                              // packed, size unknown
+    };
     const unitPriceFields = (li: any, ri: any, listQty: number, receiptQty: number, listPrice: number | null, receiptPrice: number) => {
         const meta = canonById.get(Number(li.productId));
         const family = meta?.family ?? null;
         const packAmount = li.packAmount != null ? parseFloat(li.packAmount) : null;
-        const plannedAmt = canonAmount(listQty, !!li.isWeighable, family, packAmount, li.packUnit ?? null);
         const rAmount = ri.amount != null ? parseFloat(ri.amount) : null;
-        const boughtAmt = ri.isWeighable
-            ? (receiptQty > 0 ? receiptQty : null)              // weighable → the weighed amount
-            : family === 'count'
-                ? (receiptQty > 0 ? receiptQty : null)          // count → the receipt pack count (known)
-                : rAmount != null && rAmount > 0                // fluid → own size, else fall back to plan
-                    ? canonAmount(receiptQty, false, family, rAmount, ri.unit ?? null)
-                    : plannedAmt;
+
+        const perWeight = !!li.isWeighable || !!ri.isWeighable || family === 'fluid';
+        const unit = perWeight ? (family === 'fluid' && meta?.unit === 'l' ? 'l' : 'kg') : 'vnt';
+
+        let plannedAmt = amountIn(unit, listQty, !!li.isWeighable, packAmount, li.packUnit ?? null);
+        let boughtAmt = amountIn(unit, receiptQty, !!ri.isWeighable, rAmount, ri.unit ?? null);
+        // Symmetric borrow — a side with no size of its own uses the other's.
+        if (plannedAmt == null) plannedAmt = boughtAmt;
+        if (boughtAmt == null) boughtAmt = plannedAmt;
+
         return {
-            unitPriceUnit: family === 'fluid' ? (meta?.unit === 'l' ? 'l' : 'kg') : 'vnt',
+            unitPriceUnit: unit,
             listUnitPrice: (listPrice != null && plannedAmt != null && plannedAmt > 0) ? r2(listPrice / plannedAmt) : null,
             receiptUnitPrice: (boughtAmt != null && boughtAmt > 0) ? r2(receiptPrice / boughtAmt) : null,
         };
@@ -312,14 +342,7 @@ export const computePlanningScore = async (tripId: number): Promise<PlanningScor
             listPrice: li.price != null ? parseFloat(li.price) : null, receiptPrice: spend(ri),
         });
     }
-    for (const li of listItems) {
-        if (usedList.has(li.id)) continue;
-        // Same product id → same name token → same real L3 (not just exact id):
-        // the list and receipt routinely resolve one real item to two product
-        // rows, and receipt mints are uncategorised.
-        const ri = receiptItems.find((r: any) =>
-            !usedReceipt.has(r.id) && sameKind(li, r) && !suppressed.has(`${li.id}:${r.id}`));
-        if (!ri) continue;
+    const emitAutoPair = (li: any, ri: any) => {
         usedList.add(li.id); usedReceipt.add(ri.id);
         pairs.push({
             listItemId: li.id, receiptItemId: ri.id, source: 'auto',
@@ -339,7 +362,59 @@ export const computePlanningScore = async (tripId: number): Promise<PlanningScor
             ...unitPriceFields(li, ri, parseFloat(li.quantity) || 1, parseFloat(ri.quantity) || 1, li.price != null ? parseFloat(li.price) : null, spend(ri)),
             listPrice: li.price != null ? parseFloat(li.price) : null, receiptPrice: spend(ri),
         });
-    }
+    };
+
+    /**
+     * Run ONE matching tier over everything still unpaired: score every remaining
+     * (list, receipt) combination, then assign strongest-first.
+     *
+     * The old code did a single greedy pass that took the FIRST receipt line
+     * satisfying sameKind() — which mixed the tiers together, so a weak
+     * same-CATEGORY hit that happened to sit earlier in the receipt beat the
+     * exact same-NAME hit further down. Real case: planned "…slyviniai pomidorai"
+     * and "…ilgavaisiai agurkai" both sit in l3=3, the receipt listed agurkai
+     * first, so the tomatoes claimed the cucumbers and the cucumbers were left
+     * with the tomatoes — a clean swap that then rendered a meaningless +156 %.
+     * Scoring per tier means a name match can never lose to a category match.
+     */
+    const runPairTier = (score: (li: any, ri: any) => number | null) => {
+        const cands: { li: any; ri: any; s: number }[] = [];
+        for (const li of listItems) {
+            if (usedList.has(li.id)) continue;
+            for (const ri of receiptItems) {
+                if (usedReceipt.has(ri.id)) continue;
+                if (suppressed.has(`${li.id}:${ri.id}`)) continue;
+                const s = score(li, ri);
+                if (s != null) cands.push({ li, ri, s });
+            }
+        }
+        cands.sort((a, b) => b.s - a.s);
+        for (const c of cands) {
+            if (usedList.has(c.li.id) || usedReceipt.has(c.ri.id)) continue;
+            emitAutoPair(c.li, c.ri);
+        }
+    };
+
+    const tokensOf = (li: any, ri: any) => {
+        const lt = li._tokens ?? (li._tokens = nameTokens(li.productName ?? li.spName ?? li.customName));
+        const rt = ri._tokens ?? (ri._tokens = nameTokens(ri.resolvedName ?? ri.spName ?? ri.name));
+        let shared = 0;
+        for (const w of rt) if (lt.has(w)) shared++;
+        return shared;
+    };
+
+    // TIER 1 — the same product. Unambiguous, so it claims its lines first.
+    runPairTier((li, ri) =>
+        (li.productId != null && ri.productId != null && Number(li.productId) === Number(ri.productId)) ? 1 : null);
+    // TIER 2 — shared name words ("…pomidorai" ↔ "Kekiniai pomidorai"). More
+    // shared words = a better match, so the strongest wins the line.
+    runPairTier((li, ri) => { const n = tokensOf(li, ri); return n > 0 ? n : null; });
+    // TIER 3 — last resort: the same L3 category. Only whatever is STILL
+    // unpaired, so it can no longer outrank a name match.
+    runPairTier((li, ri) => {
+        const lc = li.l3, rc = ri.l3;
+        return (lc != null && rc != null && lc !== UNASSIGNED_CATEGORY && Number(lc) === Number(rc)) ? 1 : null;
+    });
 
     // coverage / discipline are ANY-MATCH (NOT the greedy 1:1 pairs above, which
     // exist only for the manual-link UI): a list item counts as covered if ANY
