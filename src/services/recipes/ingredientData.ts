@@ -3581,6 +3581,94 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
         en: ['kahlua', 'kahlúa', 'coffee liqueur'],
         pantry: false,
     },
+    {
+        key: 'rum_white',
+        // The shelf spells "white" in the brand tail, never in Lithuanian:
+        // 'Romas CAPTAIN MORGAN WHITE', 'Romas EL GALIPOTE WHITE', 'Romas
+        // SHIPMASTER SILVER WHITE' (cat 356 'Romas', 86 live bottles,
+        // verified 2026-07-27) — no live product says 'baltasis romas', so
+        // the canonical name keeps the English token the same way 'Likeris
+        // Triple Sec' does. No `weighable`: a bottle, so the pack arithmetic
+        // in shoppingAmount lands on one bottle whatever the pour.
+        ltName: 'Romas White',
+        enName: 'white rum',
+        lt: ['baltasis romas', 'baltojo romo', 'baltas romas', 'balto romo'],
+        en: ['white rum', 'light rum'],
+        gramsPerMl: 0.94, // 37.5–40 % ABV, like vodka
+        pantry: false,
+    },
+    {
+        key: 'gin',
+        // Cat 357 'Džinas': 67 live bottles ('Džinas BEEFEATER', 'Džinas
+        // BOMBAY SAPPHIRE'…), verified 2026-07-27.
+        ltName: 'Džinas',
+        enName: 'gin',
+        lt: ['džinas', 'džino'],
+        en: ['gin', 'dry gin', 'london dry gin'],
+        gramsPerMl: 0.94, // ~40 % ABV
+        pantry: false,
+    },
+    {
+        key: 'tequila',
+        // Cat 360 'Tekila': 31 live bottles ('Tekila OLMECA BLANCO', 'Tekila
+        // JOSE CUERVO SILVER'…), verified 2026-07-27.
+        ltName: 'Tekila',
+        enName: 'tequila',
+        lt: ['tekila', 'tekilos'],
+        en: ['tequila', 'silver tequila', 'blanco tequila', 'gold tequila'],
+        gramsPerMl: 0.95,
+        pantry: false,
+    },
+    {
+        key: 'aperol',
+        // 'Kartaus skonio spiritinis gėrimas APEROL, 0,7 l' / '1 l' (cat 355
+        // 'Likeris', verified 2026-07-27). The label never says 'aperolis',
+        // so the query carries the product's own words.
+        ltName: 'Spiritinis gėrimas Aperol',
+        enName: 'aperol',
+        lt: ['aperolis', 'aperolio', 'aperol'],
+        en: ['aperol'],
+        gramsPerMl: 1.04, // sugar-heavy aperitif
+        pantry: false,
+    },
+    {
+        key: 'campari',
+        // 'Spiritinis gėrimas CAMPARI, kartaus skonio' (cat 355, verified
+        // 2026-07-27).
+        ltName: 'Spiritinis gėrimas Campari',
+        enName: 'campari',
+        lt: ['campari', 'kampari'],
+        en: ['campari'],
+        gramsPerMl: 1.05, // sugar-heavy bitter
+        pantry: false,
+    },
+    {
+        key: 'amaretto',
+        // BOTH shelf spellings are live — 'Likeris AMARETO RETRO' (cat 355)
+        // and 'Likeris AMARETTO RETRO, 21 %' (688) — verified 2026-07-27; the
+        // matcher's fuzzy pass bridges the one-letter gap either way.
+        ltName: 'Likeris Amaretto',
+        enName: 'amaretto',
+        lt: ['amaretto', 'amareto', 'amaretto likeris', 'amaretto likerio'],
+        en: ['amaretto', 'amaretto liqueur', 'almond liqueur'],
+        gramsPerMl: 1.05,
+        pantry: false,
+    },
+    {
+        key: 'melon_liqueur',
+        // The only melon liqueur on any shelf is 'Likeris KEGLEVICH
+        // DELICIOUS VODKA & MELONE' (cat 355, verified 2026-07-27) — a
+        // vodka-based sweet melon liqueur, the same role Midori plays in a
+        // cocktail. Judgement call, documented: one honest product, and the
+        // brand-pinned query names exactly that bottle (same device as
+        // 'Likeris Kahlua').
+        ltName: 'Likeris Keglevich Melone',
+        enName: 'melon liqueur',
+        lt: ['meliono likeris', 'meliono likerio', 'melionų likeris', 'melionų likerio'],
+        en: ['melon liqueur', 'midori'],
+        gramsPerMl: 1.02,
+        pantry: false,
+    },
 
     // ── RECOGNISED BUT NOT SOLD HERE ───────────────────────────────────────
     // Named honestly in `skipped` instead of being force-matched to whatever
@@ -3622,6 +3710,60 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
         enName: 'frangelico',
         lt: ['frangelico'],
         en: ['frangelico', 'hazelnut liqueur'],
+        pantry: false,
+        notSold: true,
+    },
+    {
+        key: 'creme_de_cassis',
+        // No cassis liqueur on any live shelf (searched 'cassis' and the
+        // blackcurrant-liqueur name shapes, 2026-07-27). The closest name hit
+        // is blackcurrant VODKA — the very product the dropped-word guard was
+        // built around — and it is not the syrupy liqueur a kir means.
+        ltName: 'Juodųjų serbentų likeris',
+        enName: 'creme de cassis',
+        lt: ['juodųjų serbentų likeris', 'juodųjų serbentų likerio'],
+        en: ['creme de cassis', 'crème de cassis', 'cassis', 'blackcurrant liqueur'],
+        gramsPerMl: 1.06, // sugar-heavy liqueur
+        pantry: false,
+        notSold: true,
+    },
+    {
+        key: 'sweet_sour_mix',
+        // A cocktail-bar mixer no LT shop stocks (verified 2026-07-27 — the
+        // only 'sour mix' name hit is VIDAL SOUR MIX, a bag of gummy candy).
+        // Recognised so the candy can never answer a margarita.
+        ltName: 'Kokteilių rūgštusis mišinys',
+        enName: 'sweet and sour mix',
+        lt: ['saldžiarūgštis kokteilių mišinys', 'saldžiarūgščio kokteilių mišinio'],
+        en: ['sweet and sour mix', 'sweet-and-sour mix', 'sour mix', 'sweet and sour cocktail mix'],
+        gramsPerMl: 1.05, // sugar syrup base
+        pantry: false,
+        notSold: true,
+    },
+    {
+        key: 'coconut_extract',
+        // Only VANILLA extract exists on the baking shelf (searched
+        // 'ekstrakt', 2026-07-27); MALIBU and EL GALIPOTE COCONUT are
+        // liqueurs, not a baking extract, and must not answer for one.
+        ltName: 'Kokosų ekstraktas',
+        enName: 'coconut extract',
+        lt: ['kokosų ekstraktas', 'kokosų ekstrakto'],
+        en: ['coconut extract', 'coconut essence'],
+        gramsPerMl: 0.88, // alcohol-based, like vanilla extract
+        pantry: true,
+        notSold: true,
+    },
+    {
+        key: 'elderflower_cordial',
+        // No šeivamedžių sirupas anywhere (searched 'šeivamedž', 2026-07-27 —
+        // only teas and a FANTA flavour carry the word). 'Likeris ST.GERMAIN'
+        // IS elderflower, but a 20 % liqueur silently standing in for a
+        // soft-drink syrup is a substitution a human should make.
+        ltName: 'Šeivamedžių žiedų sirupas',
+        enName: 'elderflower cordial',
+        lt: ['šeivamedžių sirupas', 'šeivamedžių sirupo', 'šeivamedžių žiedų sirupas', 'šeivamedžių žiedų sirupo'],
+        en: ['elderflower cordial', 'elderflower syrup'],
+        gramsPerMl: 1.33, // sugar syrup
         pantry: false,
         notSold: true,
     },

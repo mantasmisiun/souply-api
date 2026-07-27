@@ -1,5 +1,6 @@
 import pool from '../src/config/db.js';
 import { parseIngredientLine } from '../src/services/recipes/ingredientParser.js';
+import { findIngredient } from '../src/services/recipes/measure.js';
 import { matchIngredient, shoppingAmount } from '../src/services/recipes/recipeMatcher.js';
 import type { Lang } from '../src/services/recipes/types.js';
 
@@ -208,6 +209,16 @@ beforeAll(async () => {
     ids.frozenBlueberries = await addProduct('Šaldytos mėlynės BERIBU', {
         amount: 400, unit: 'g', categoryId: FROZEN_BERRY_CAT });
     ids.chocBlueberries = await addProduct('Mėlynės šokolade LAIMA', { amount: 90, unit: 'g' });
+    // Cherry-scented barbecue SMOKING CHIPS: they LEAD with the fruit's own
+    // noun, sit in 688 where no category id can catch them, and are properly
+    // listed — so they silently answered "Vyšnios" at 0.78 while the frozen
+    // shelf held real cherries. Only the NOT_FOOD phrase guard ('medžio
+    // drožlės') separates them from food; bare 'drožl' must not, because
+    // coconut flakes and almond shavings carry the same word.
+    ids.cherryWoodChips = await addProduct('Vyšnios Medžio drožlės PROFLAME EXPERT', {
+        amount: 1, unit: 'kg', categoryId: 688 });
+    ids.frozenCherries = await addProduct('Šaldytos vyšnios WELL DONE be kauliukų', {
+        amount: 400, unit: 'g', categoryId: FROZEN_BERRY_CAT });
     // A generic category word's favourite wrong answers.
     ids.currySpice = await addProduct('Prieskoniai CURRY KOTANYI', { amount: 50, unit: 'g' });
     ids.meatSkewers = await addProduct('Mėsos iešmeliai su marinatu', { amount: 500, unit: 'g' });
@@ -535,6 +546,42 @@ describe('shoppingAmount', () => {
         expect(shoppingAmount({ qty: 5, unit: 'pcs', approx: false }, pick(), null))
             .toEqual({ quantity: 1, unit: 'vnt' });
     });
+
+    /**
+     * COUNT → PACK, consistently across one family. "3 kiaušiniai" cleared
+     * the 100 g contents line at 165 g and bought three ten-egg cartons while
+     * "2 kiaušinių trynių" (36 g) bought one — split by nothing but total
+     * mass. A piece lighter than PIECE_SOLD_ALONE_G is pack CONTENT whatever
+     * the count sums to; a piece heavy enough to be its own retail unit (a
+     * baguette, a loaf) keeps the count as the purchase count.
+     */
+    it('never multiplies packages by a count of their contents', () => {
+        const egg = { key: 'egg', ltName: 'K', enName: 'e', lt: [], en: [], pantry: false, gramsPerPiece: 55 };
+        // Eggs come back with no packAmount at all ('vnt' sizes are never
+        // normalised), so the piece weight alone must make this ONE carton.
+        expect(shoppingAmount({ qty: 3, unit: 'pcs', approx: false }, pick(), egg))
+            .toEqual({ quantity: 1, unit: 'vnt' });
+        const yolk = { ...egg, key: 'egg_yolk', gramsPerPiece: 18 };
+        expect(shoppingAmount({ qty: 2, unit: 'pcs', approx: false }, pick(), yolk))
+            .toEqual({ quantity: 1, unit: 'vnt' });
+    });
+
+    it('still counts pieces that are their own retail unit', () => {
+        // A 250 g baguette IS the package: three baguettes are three purchases.
+        const baguette = { key: 'baguette', ltName: 'B', enName: 'b', lt: [], en: [], pantry: false, gramsPerPiece: 250 };
+        expect(shoppingAmount({ qty: 3, unit: 'pcs', approx: false }, pick(), baguette))
+            .toEqual({ quantity: 3, unit: 'vnt' });
+    });
+
+    /** A known package size DIVIDES the counted mass — it must not fall back
+     *  to the raw count once the amount overflows a single package (twelve
+     *  60 g sausages against a 400 g pack are two packs, not twelve). */
+    it('divides a counted overflow by the package size', () => {
+        const sausage = { key: 'sausages', ltName: 'D', enName: 'd', lt: [], en: [], pantry: false, gramsPerPiece: 60 };
+        expect(shoppingAmount({ qty: 12, unit: 'pcs', approx: false },
+            pick({ packAmount: 400, packUnit: 'g' }), sausage))
+            .toEqual({ quantity: 2, unit: 'vnt' });
+    });
 });
 
 /**
@@ -630,10 +677,21 @@ describe('the amount actually put in the basket', () => {
         expect(r).toMatchObject({ shopQuantity: 1, shopUnit: 'vnt' });
     });
 
-    it('still counts things that are genuinely sold one at a time', async () => {
-        const r = await match('3 kiaušiniai', 'lt');
-        expect(r.shopUnit).toBe('vnt');
-        expect(r.shopQuantity).toBe(3);
+    /**
+     * A counted egg is pack CONTENT, and the count must never multiply
+     * cartons: "3 kiaušiniai" used to clear the 100 g contents line at 165 g
+     * and buy THREE ten-egg cartons, while "2 kiaušinių trynių" (36 g) stayed
+     * under it and correctly bought one — the same lexicon family, opposite
+     * answers. Egg products are sold by 'vnt', which the pipeline never
+     * normalises into packAmount, so the piece weight itself has to carry the
+     * pack-content signal (see PIECE_SOLD_ALONE_G).
+     */
+    it('buys one carton for a count of eggs, never a carton per egg', async () => {
+        for (const line of ['3 kiaušiniai', '2 kiaušinių trynių']) {
+            const r = await match(line, 'lt');
+            expect(r.product?.productId).toBe(ids.eggs);
+            expect(r).toMatchObject({ shopQuantity: 1, shopUnit: 'vnt' });
+        }
     });
 });
 
@@ -780,6 +838,21 @@ describe('fresh produce beats the processed shelf that outscores it', () => {
         const m = await match('100 g mėlynių');
         expect(m.product?.productId).toBe(ids.frozenBlueberries);
         expect(m.product?.productId).not.toBe(ids.chocBlueberries);
+    });
+
+    /**
+     * NOT the produce axis but the same aisle-neighbour trap one shelf
+     * further out: the chips are not food AT ALL, and they win the lead
+     * tie-break because Lithuanian product naming puts the wood's flavour
+     * first. Asserted by NAME because the dev catalog carries the same chip
+     * and cherry listings as the fixtures — any real cherry row is a right
+     * answer, any 'drožlės' row is a wrong one.
+     */
+    it('buys real cherries, never cherry-scented smoking chips', async () => {
+        const m = await match('200 g vyšnių');
+        const offered = [m.product, ...m.alternatives].filter(Boolean) as { name: string }[];
+        expect(offered.some(p => /drožl/i.test(p.name))).toBe(false);
+        expect(m.product?.name).toMatch(/šaldytos vyšnios/i);
     });
 });
 
@@ -1017,15 +1090,24 @@ describe('the English null-query fallback', () => {
         expect(m.product?.productId).toBe(ids.rhubarb);
     });
 
-    /** The measured trap, reproduced: the glue's translation stem-matches
-     *  "white rum" through "centRUM", so retrieval WILL return it and only
-     *  the NOT_FOOD name guard stands between it and the basket. */
+    /**
+     * The measured trap, kept: the glue's translation stem-matches "white
+     * rum" through "centRUM", and the NOT_FOOD name guard is what keeps it
+     * out of the offer. The phrase itself no longer travels the EN fallback —
+     * 'white rum' is a lexicon entry now (rum_white, query "Romas White"; the
+     * drinks aisle was the least-covered category and every spirit produced
+     * no query at all) — so the pick is asserted by NAME: the dev catalog
+     * carries the same bottle under the same name, and either row is the
+     * right answer.
+     */
     it('never offers PVA glue for white rum', async () => {
         const m = await match('50 ml white rum', 'en');
-        const offered = [m.product, ...m.alternatives].filter(Boolean) as { productId: number }[];
+        const offered = [m.product, ...m.alternatives].filter(Boolean) as { productId: number; name: string }[];
         expect(offered.some(p => p.productId === ids.pvaGlue)).toBe(false);
-        expect(m.product?.productId).toBe(ids.whiteRum);
-        expect(m.confident).toBe(false);
+        expect(m.product?.name).toMatch(/^Romas\b/i);
+        expect(m.product?.name).toMatch(/white|blanca/i);
+        // A 50 ml pour buys ONE bottle, not five.
+        expect(m).toMatchObject({ shopQuantity: 1, shopUnit: 'vnt' });
     });
 
     /** FORM words survive into the query — "ground ginger" must keep buying
@@ -1033,5 +1115,53 @@ describe('the English null-query fallback', () => {
     it('keeps form words: ground ginger still buys the jar', async () => {
         const m = await match('1 tsp ground ginger', 'en');
         expect(m.product?.productId).toBe(ids.groundGinger);
+    });
+});
+
+/**
+ * THE DRINKS AISLE, which was the least-covered category: every spirit below
+ * produced NO query at all (`lexiconKey: null`) while the catalog stocked it —
+ * the 'Likeris' category alone holds ~70 bottles. Coverage is asserted at the
+ * lexicon layer (no DB): each phrase must resolve to its vetted entry, and
+ * each entry's shopping name was verified against live listings (2026-07-27)
+ * before it earned a row. No `weighable` on any of them — alcohol is bought by
+ * the bottle, and the one-bottle arithmetic is pinned on the white-rum case
+ * above.
+ */
+describe('the drinks lexicon reaches the shelf', () => {
+    it('resolves every stocked spirit to its entry', () => {
+        const owned: Array<[string, string]> = [
+            ['triple sec', 'triple_sec'],
+            ['dry vermouth', 'vermouth'],
+            ['white rum', 'rum_white'],
+            ['gin', 'gin'],
+            ['tequila', 'tequila'],
+            ['whiskey', 'whiskey'],
+            ['bourbon', 'whiskey'],          // the Viskis shelf stocks bourbon
+            ['prosecco', 'sparkling_wine'],
+            ['aperol', 'aperol'],
+            ['campari', 'campari'],
+            ['amaretto', 'amaretto'],
+            ['melon liqueur', 'melon_liqueur'],
+            ['kahlua', 'coffee_liqueur'],
+            ['coffee liqueur', 'coffee_liqueur'],
+        ];
+        for (const [phrase, key] of owned) {
+            expect(findIngredient(phrase, 'en')?.info.key).toBe(key);
+        }
+    });
+
+    /**
+     * Verified ABSENT from the live catalog, so `notSold` — recognised and
+     * left honestly unmatched rather than force-matched to whatever shares a
+     * word: 'sour mix' names a bag of GUMMY CANDY, 'coconut' a liqueur that
+     * is not a baking extract, and cassis's closest name hit is blackcurrant
+     * vodka.
+     */
+    it('recognises the unstocked mixers and never shops for them', () => {
+        for (const phrase of ['sweet-and-sour mix', 'coconut extract', 'creme de cassis', 'elderflower cordial']) {
+            const hit = findIngredient(phrase, 'en');
+            expect(hit?.info.notSold).toBe(true);
+        }
     });
 });

@@ -809,8 +809,13 @@ const parseSingle = (part: string, rawLine: string, lang: Lang): ParsedIngredien
     text = refitTrailingPinch(text, lang);
 
     // Parentheses are notes — except when the ONLY content is a size, in which
-    // case it is the package the count refers to ("1 (400 g) can tomatoes").
+    // case it is the package the count refers to ("1 (400 g) can tomatoes") —
+    // or, on a Lithuanian line, a bare list of product-DEFINING words, which
+    // must reach the NAME (see bracketQualifiers: "kiauliena(kumpis, rūkytas)"
+    // noted away bought raw mince for smoked ham strips).
     let packSize: { qty: number; unit: Unit } | null = null;
+    const qualPre: string[] = [];
+    const qualPost: string[] = [];
     // RecipeTin Eats double-wraps: "((or other cheese of choice))". One pass of a
     // non-nesting regex peels the inner pair and leaves a lone ")" stranded in
     // the product name, so peel until nothing changes, then sweep up any
@@ -821,7 +826,16 @@ const parseSingle = (part: string, rawLine: string, lang: Lang): ParsedIngredien
             const sized = parsePackSize(inner);
             if (sized && !packSize) { packSize = sized; return ' '; }
             const t = inner.trim();
-            if (t) notes.push(t);
+            if (t) {
+                // The bracket ALSO stays in the note when its words are
+                // promoted — "juostelės" in "(kumpis, rūkytas, juostelės)" is
+                // not recognised and would otherwise vanish entirely.
+                if (lang === 'lt') {
+                    const qual = bracketQualifiers(t);
+                    if (qual) { qualPre.push(...qual.pre); qualPost.push(...qual.post); }
+                }
+                notes.push(t);
+            }
             return ' ';
         });
         if (text === before) break;
@@ -988,6 +1002,26 @@ const parseSingle = (part: string, rawLine: string, lang: Lang): ParsedIngredien
         }
     }
 
+    /**
+     * FIX (measured): the bracket qualifiers collected above reach the NAME —
+     * "14 vienetų kiauliena(kumpis, rūkytas, juostelės)" parsed to bare
+     * "kiauliena" and bought RAW 30% MINCE for smoked ham strips; "vištiena
+     * (krūtinėlė)" a whole broiler instead of breast fillet. Folded LAST, once
+     * the purpose/instruction tails are gone, so a stripped tail can never
+     * split the qualifier from its noun. `nameFull` carries them too: the
+     * lexicon and the recipe-phrase search read it, and the qualifier IS the
+     * identity. Deduped by folded word so a name that already says "rūkyta"
+     * does not say it twice.
+     */
+    if (name && (qualPre.length > 0 || qualPost.length > 0)) {
+        const has = (base: string, w: string) =>
+            fold(base).toLowerCase().split(/\s+/).includes(fold(w).toLowerCase());
+        const pre = qualPre.filter(w => !has(name, w));
+        const post = qualPost.filter(w => !has(name, w));
+        name = [...pre, name, ...post].join(' ');
+        nameFull = [...pre, nameFull || name, ...post].join(' ');
+    }
+
     const allNotes = [...notes, note].filter(Boolean).join('; ') || null;
 
     return {
@@ -1054,6 +1088,62 @@ const parsePackSize = (inner: string): { qty: number; unit: Unit } | null => {
     const dim = unitDimension(unit);
     if (dim === 'count' || isVagueUnit(unit)) return null;
     return { qty, unit };
+};
+
+/**
+ * receptai.lt-style lines put the ACTUAL product inside the brackets:
+ * "kiauliena(kumpis, rūkytas, juostelės)" is smoked ham strips, not pork with
+ * a footnote — noted away, the query was bare "kiauliena" and bought RAW 30%
+ * MINCE for it; "vištiena (krūtinėlė)" bought a whole broiler instead of
+ * breast fillet, "vynas(baltas)" landed on white wine only by luck. When the
+ * bracket is a bare list of product-defining words, they must reach the name.
+ *
+ * Decided by what the bracket CONTAINS, never by position, because the same
+ * brackets also hold amounts, prep, alternatives and serving asides — each
+ * pinned by an existing test. The gates, in order:
+ *   · letters, commas and spaces only — a digit is an amount, a conversion or
+ *     an age ("(apie 400 g)", "(nuo 8 mėn.)"); quotes and colons are brand
+ *     asides ('(pvz.: "Philadelphia")');
+ *   · every comma-separated segment must be ONE bare word — "tamsios ar
+ *     šviesios" (an alternative), "smulkiai supjaustyta" (prep) and "virtos
+ *     su lupena" (prep, pinned on the bulvės line) are all multi-word, and a
+ *     multi-word segment is exactly where certainty ends;
+ *   · a surviving word still has to be RECOGNISED: an identity participle
+ *     (the "Dešra, virta" list), a colour/type adjective, a named cut, or a
+ *     lexicon food ("(morkų, bulvių)" — a spec-list, not a sauce). "kubeliai"
+ *     matches none, so "ledukai(kubeliai)" stays ignored ice, and "didelių"
+ *     stays a size note.
+ * Unrecognised words stay in the note only — a lost qualifier costs a worse
+ * match, a wrongly promoted one costs a wrong product.
+ *
+ * Adjectives go BEFORE the base noun ("baltas vynas"), cut/food nouns AFTER
+ * ("vištiena krūtinėlė") — the order the catalog prints.
+ */
+interface BracketQualifiers { pre: string[]; post: string[] }
+
+/** Colour/type adjectives that select the product ("baltas" wine, "rudasis"
+ *  sugar). Explicit adjective endings, not a bare stem: "balt[\p{L}]*" would
+ *  also promote "baltymo" — the egg WHITE of a meringue note. */
+const LT_QUAL_COLOUR = /^(?:balt|juod|raudon|žali|zali|rud|tams|švies|svies)(?:as|a|i|o|u|us|os|ų|ai|ią|ios|oji|asis)$/iu;
+
+/** Named cuts and parts — the bracket that turns a species into a product
+ *  ("kiauliena(kumpis…)", "vištiena (krūtinėlė)"). Closed list: the lexicon
+ *  knows few of these as single words ("krūtinėlė" alone is not an entry).
+ *  "ment-" is ending-restricted so "mentelė" (a spatula) can never qualify. */
+const LT_QUAL_PART = /^(?:kumpi|krūtinėl|krutinel|šlaunel|slaunel|kulšel|kulsel|blauzdel|sparnel|filė|file|nugarin|šonin|sonin|sprandin)[\p{L}]*$|^ment(?:ė|e|ės|es|ę)$/iu;
+
+const bracketQualifiers = (inner: string): BracketQualifiers | null => {
+    if (!/^[\p{L}\s,]+$/u.test(inner)) return null;
+    const segs = inner.split(',').map(s => s.trim()).filter(Boolean);
+    if (segs.length === 0 || segs.some(s => /\s/.test(s))) return null;
+    const pre: string[] = [];
+    const post: string[] = [];
+    for (const w of segs) {
+        if (LT_IDENTITY_TAIL.test(w) || LT_QUAL_COLOUR.test(w)) pre.push(w);
+        else if (LT_QUAL_PART.test(w) || findIngredient(w) != null) post.push(w);
+    }
+    if (pre.length === 0 && post.length === 0) return null;
+    return { pre, post };
 };
 
 /**

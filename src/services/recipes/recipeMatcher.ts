@@ -204,7 +204,14 @@ const PET_FOOD = /(ėdal|edal|šunų|sunu|šunims|sunims|kačių|kaciu|katėms|k
 // "Balti klijai PVA CENTRUM" answered "white rum" and "WC valiklis ECO RHUBARB
 // OP" answered "rhubarb", and no category or listing signal separates either
 // from food. The words themselves do: nothing edible is named any of them.
-const NOT_FOOD = /\b(sijotuvas|sijotuv|indelis|indeliai|dubenėlis|dubenėliai|keptuvė|puodas|puodai|formelė|formelės|kepimo forma|peiliukas|peiliai|trintuvė|tarkuotuvas|pjaustyklė|maišeliai|servetėlės|žvakė|žvakės|plovimo|valymo|šveitimo|klijai|valiklis|valikliai|ploviklis|plovikliai)\b/i;
+//
+// 'medžio drožlės' (wood shavings) is a PHRASE, not a word, and has to stay
+// one: "Vyšnios Medžio drožlės PROFLAME EXPERT" is a bag of barbecue SMOKING
+// CHIPS that led with the fruit's own noun and silently answered "Vyšnios" at
+// 0.78 — but bare 'drožl' also names real food ("Kokosų drožlės ALVO",
+// "Migdolų drožlės", chocolate shavings), so only wood makes it non-food. The
+// two live chip products sit in 688, where no category id can catch them.
+const NOT_FOOD = /\b(sijotuvas|sijotuv|indelis|indeliai|dubenėlis|dubenėliai|keptuvė|puodas|puodai|formelė|formelės|kepimo forma|peiliukas|peiliai|trintuvė|tarkuotuvas|pjaustyklė|maišeliai|servetėlės|žvakė|žvakės|plovimo|valymo|šveitimo|klijai|valiklis|valikliai|ploviklis|plovikliai|medžio drožlės|medžio drožlių|medzio drozles|medzio drozliu)\b/i;
 
 /**
  * Category words a recipe uses when it does NOT care which product you buy —
@@ -1758,6 +1765,17 @@ const findProductsFor = async (
 const MAX_KG = 5;
 const MAX_PIECES = 12;
 const MAX_PACKS = 6;
+/**
+ * The lightest thing a shop sells as its own retail unit, in grams.
+ *
+ * Splits the piece-counted lexicon rows into two honest halves (checked row by
+ * row against the table): below it sit eggs (55 g), tortillas (40 g), buns
+ * (60 g), sausages (60 g), dates (8 g) — pack contents, where the count must
+ * never multiply packages. Above it sit the baguette (250 g), the loaf
+ * (400 g), a lettuce (300 g), an artichoke (120 g) — pieces that ARE the
+ * package, where the count is the purchase count.
+ */
+const PIECE_SOLD_ALONE_G = 100;
 
 /**
  * Grams for a VOLUME of something the shop weighs.
@@ -1837,9 +1855,32 @@ export const shoppingAmount = (
         // catalog frequently records no size at all for fresh herbs, so this has
         // to hold without knowing the package.
         if (wanted < 100) return { quantity: 1, unit: 'vnt' };
-        if (packOne && packOne.dim === 'mass' && packOne.value > 0 && wanted <= packOne.value) {
-            return { quantity: 1, unit: 'vnt' };
+        // A known package size turns the counted mass into a pack count — and
+        // it DIVIDES, it does not multiply: 12 sausages against a 400 g pack
+        // are two packs, not twelve. (The first cut only checked "fits in
+        // one", so any counted amount that overflowed a single package fell
+        // through to the raw count and bought that many PACKAGES.)
+        if (packOne && packOne.dim === 'mass' && packOne.value > 0) {
+            return {
+                quantity: Math.min(MAX_PACKS, Math.max(1, Math.ceil(round2(wanted / packOne.value)))),
+                unit: 'vnt',
+            };
         }
+        /**
+         * No package size on record (eggs and everything else sold by 'vnt'
+         * come back with minAmount NULL — the pipeline only normalises g/ml),
+         * so the piece weight itself has to say whether the count is a count
+         * of PRODUCTS or of pack CONTENTS. Nothing as light as an egg is its
+         * own retail unit: "3 kiaušiniai" cleared the 100 g line at 165 g and
+         * bought THREE ten-egg cartons, while "2 kiaušinių trynių" (36 g)
+         * stayed under it and correctly bought one — the same lexicon family,
+         * opposite answers, split by nothing but total mass. A piece under
+         * the threshold counts contents (one carton, one bag of tortillas,
+         * one box of dates); a piece over it — a 250 g baguette, a 400 g
+         * loaf, a 300 g lettuce — IS the unit on the shelf, and the count
+         * stands.
+         */
+        if (info.gramsPerPiece < PIECE_SOLD_ALONE_G) return { quantity: 1, unit: 'vnt' };
         return { quantity: Math.min(MAX_PIECES, Math.max(1, Math.ceil(measure.qty))), unit: 'vnt' };
     }
 

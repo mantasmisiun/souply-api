@@ -897,6 +897,54 @@ describe('modifier-only fragments are never their own ingredient', () => {
 });
 
 /**
+ * MEASURED FIX — receptai.lt-style lines put the ACTUAL product inside the
+ * brackets, and noting them away threw the identity out: "14 vienetų
+ * kiauliena(kumpis, rūkytas, juostelės)" parsed to bare "kiauliena" and bought
+ * RAW 30% MINCE for smoked ham strips; "vištiena (krūtinėlė)" a whole broiler
+ * instead of breast fillet. The decision is by what the bracket CONTAINS: only
+ * a bare comma-list of single RECOGNISED words (identity participle, colour,
+ * named cut, lexicon food) is promoted — everything else stays a note, because
+ * a lost qualifier costs a worse match and a wrong one costs a wrong product.
+ */
+describe('parenthetical qualifiers that ARE the product', () => {
+    it('promotes a cut + preservation bracket into the name', () => {
+        const p = one('14 vienetų kiauliena(kumpis, rūkytas, juostelės)');
+        expect(p.name).toMatch(/kumpi/iu);
+        expect(p.name).toMatch(/rūkyt/iu);
+        expect(p.quantity).toBe(14);
+        expect(p.unit).toBe('pcs');
+        // The unrecognised word is NOT promoted, but survives in the note.
+        expect(p.name).not.toMatch(/juostel/iu);
+        expect(p.note).toContain('juostelės');
+    });
+
+    it('promotes a named part and a colour', () => {
+        expect(one('vištiena (krūtinėlė)').name).toMatch(/krūtinėl/iu);
+        expect(one('vynas(baltas)').name).toBe('baltas vynas');
+    });
+
+    /** "(morkų, bulvių)" is a spec-list of WHICH vegetables — noted away, the
+     *  bare "daržovių" bought a jar of vegetable SAUCE. */
+    it('promotes a lexicon-food spec-list', () => {
+        const p = one('daržovių (morkų, bulvių)');
+        expect(p.name).toMatch(/morkų/u);
+        expect(p.name).toMatch(/bulvių/u);
+    });
+
+    /** The gates: a multi-word segment is where certainty ends (alternatives,
+     *  prep phrases), and an unrecognised single word stays a note — that is
+     *  what keeps "ledukai(kubeliai)" ignored ice, pinned above. */
+    it.each([
+        ['1 svogūnas (smulkiai supjaustytas)', 'svogūnas'],          // prep phrase
+        ['1 jalapeño (arba čili pipiras)', 'jalapeño'],              // alternative
+        ['440 gramųkonservuotų pupelių(tamsios ar šviesios)', 'konservuotų pupelių'], // "ar" list
+        ['vištiena (nuplauta)', 'vištiena'],                         // washed — prep, not identity
+    ])('%s keeps the bracket as a note', (line, name) => {
+        expect(one(line).name).toBe(name);
+    });
+});
+
+/**
  * "2 teaspoons EACH: black pepper, garlic powder, onion powder" — one measure
  * spread over several ingredients. Three spices used to arrive as a single
  * ingredient literally named "each", and the other two were lost.
