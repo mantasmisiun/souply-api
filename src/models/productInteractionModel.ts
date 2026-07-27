@@ -4,7 +4,24 @@ export type InteractionType = 'basket_add' | 'list_add' | 'list_check' | 'receip
 
 const DECAY_DAYS = 90;
 
-const WEIGHTED_SCORE_EXPR = `
+/**
+ * What each signal is worth. Buying something is the strongest statement a
+ * shopper makes about a product; ticking it off a list means they went and got
+ * it; adding to a basket is intent; adding to a list is a reminder.
+ *
+ * Exported so no feature has to restate them — the numbers must mean the same
+ * thing everywhere or two features will disagree about what a user likes.
+ */
+export const INTERACTION_WEIGHTS: Record<InteractionType, number> = {
+    receipt_buy: 5,
+    list_check: 3,
+    basket_add: 2,
+    list_add: 1,
+};
+
+/** Exported for the affinity service's nightly re-decay, which recomputes the
+ *  same quantity from the same source of truth. */
+export const WEIGHTED_SCORE_EXPR = `
     SUM(
         CASE pi.type
             WHEN 'receipt_buy' THEN 5

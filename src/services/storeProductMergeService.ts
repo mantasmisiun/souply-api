@@ -53,6 +53,42 @@ export const promoteMergeByProductIds = async (
         [winner.id, loser.id]
     );
 
+    /**
+     * Carry the loser's PERSONALISATION over to the winner.
+     *
+     * Everything downstream reads the winner: a merged-away product is filtered
+     * out of every search, so history left on the loser is history the shopper
+     * silently loses. Measured on dev before this existed: 18 `UserProductScore`
+     * rows and 25 `ProductInteraction` rows stranded on merged ids, and in ALL 18
+     * the winner had no row — those shoppers' preferences simply vanished.
+     *
+     * Interactions move first (they are the source of truth), then the scores are
+     * summed onto the winner's row, because a shopper who bought both sides of a
+     * merge liked that product twice over. `recalcUserProductScore` would also
+     * rebuild it from the moved interactions, but only for pairs it is called
+     * with; the SUM keeps the table correct immediately, and the nightly
+     * re-decay reconciles the rest.
+     */
+    await db.query(
+        `UPDATE ProductInteraction SET productId = ? WHERE productId = ?`,
+        [winner.id, loser.id],
+    );
+    await db.query(
+        // The loser's rows are read through a DERIVED TABLE: selecting from the
+        // same table being inserted into makes every column reference in the
+        // ON DUPLICATE clause ambiguous to MariaDB.
+        `INSERT INTO UserProductScore (userId, productId, score, interactionCount, updatedAt)
+         SELECT src.userId, ?, src.score, src.interactionCount, NOW()
+           FROM (SELECT userId, score, interactionCount
+                   FROM UserProductScore WHERE productId = ?) AS src
+         ON DUPLICATE KEY UPDATE
+             score = UserProductScore.score + VALUES(score),
+             interactionCount = UserProductScore.interactionCount + VALUES(interactionCount),
+             updatedAt = NOW()`,
+        [winner.id, loser.id],
+    );
+    await db.query(`DELETE FROM UserProductScore WHERE productId = ?`, [loser.id]);
+
     // TRIGGER B (global divergence, join direction): the community just joined these
     // products — every user still holding a personal 'different' on an SP pair across
     // them now diverges from the global model. Flag their vote for re-verification
