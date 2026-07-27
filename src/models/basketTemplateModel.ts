@@ -50,6 +50,13 @@ export interface TemplateItemInput {
     quantity: number;
     unit?: string | null;
     sortOrder?: number;
+    /**
+     * A cupboard staple (salt, pepper, oil, spices) rather than real shopping.
+     * The recipe importer decides this; the recipe screen groups on it, and the
+     * keep-or-drop choice happens when a BASKET is made — not when the recipe is
+     * created, because owning salt this week says nothing about the recipe.
+     */
+    isPantry?: boolean;
 }
 
 /** The concrete intent we freeze onto a template item at save time — the
@@ -125,14 +132,20 @@ export const createTemplate = async (
         /** { kind: 'preset', iconKey } | { kind: 'emoji', emoji }. Stored as
          *  JSON; null falls back to the deterministic sample cover. */
         coverImage?: unknown;
+        /** The page an imported recipe was read from — the app stores the
+         *  shopping list, never the method, so this link IS the method. */
+        sourceUrl?: string | null;
+        /** Hostname without "www.", for the byline under the title. */
+        sourceSite?: string | null;
     } = {},
     conn?: Connection,
 ): Promise<number> => {
     const db = (conn ?? pool) as any;
     const [result]: any = await db.query(
         `INSERT INTO BasketTemplate
-            (userId, name, isDefault, autoUpdate, sourceTemplateId, coverColor, coverImage)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            (userId, name, isDefault, autoUpdate, sourceTemplateId, coverColor, coverImage,
+             sourceUrl, sourceSite)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
             userId,
             name,
@@ -141,6 +154,8 @@ export const createTemplate = async (
             opts.sourceTemplateId ?? null,
             opts.coverColor ?? null,
             opts.coverImage != null ? JSON.stringify(opts.coverImage) : null,
+            opts.sourceUrl ?? null,
+            opts.sourceSite ?? null,
         ],
     );
     return result.insertId;
@@ -339,12 +354,13 @@ export const insertTemplateItemsBatch = async (
             a?.snapAmount ?? null,
             a?.snapUnit ?? null,
             a?.snapImageUrl ?? null,
+            it.isPantry ? 1 : 0,
         ];
     });
     const [res]: any = await db.query(
         `INSERT INTO BasketTemplateItem
             (templateId, productId, quantity, unit, sortOrder,
-             anchorSpId, snapName, snapAmount, snapUnit, snapImageUrl)
+             anchorSpId, snapName, snapAmount, snapUnit, snapImageUrl, isPantry)
          VALUES ?`,
         [values],
     );

@@ -95,7 +95,10 @@ export const fetchTemplate = async (req: Request, res: Response, next: NextFunct
 
 export const addTemplate = async (req: Request, res: Response, next: NextFunction) => {
     try {
-        const { userId, name, autoUpdate, items, visibility, coverColor, coverImage } = req.body ?? {};
+        const {
+            userId, name, autoUpdate, items, visibility, coverColor, coverImage,
+            sourceUrl, sourceSite,
+        } = req.body ?? {};
         if (!userId || typeof userId !== 'string') {
             res.status(400).json({ error: 'userId is required' });
             return;
@@ -129,6 +132,10 @@ export const addTemplate = async (req: Request, res: Response, next: NextFunctio
                 quantity: Number(it.quantity),
                 unit: it.unit ?? null,
                 sortOrder: Number.isFinite(Number(it.sortOrder)) ? Number(it.sortOrder) : i,
+                // Set by the recipe importer. Purely a grouping/decision hint —
+                // it never changes what the item IS, so an absent or junk value
+                // simply means "ordinary shopping".
+                isPantry: it.isPantry === true || it.isPantry === 1,
             }))
             : [];
 
@@ -142,6 +149,12 @@ export const addTemplate = async (req: Request, res: Response, next: NextFunctio
                     autoUpdate: Boolean(autoUpdate),
                     coverColor: normalizeCoverColor(coverColor),
                     coverImage: normalizeCoverImage(coverImage),
+                    // Provenance for an imported recipe. Stored as data only —
+                    // it is rendered as a link and never fetched by us, but it
+                    // is still user input, so only plain http(s) is kept.
+                    sourceUrl: typeof sourceUrl === 'string' && /^https?:\/\//i.test(sourceUrl)
+                        ? sourceUrl.slice(0, 512) : null,
+                    sourceSite: typeof sourceSite === 'string' ? sourceSite.slice(0, 120) : null,
                 },
                 conn as any,
             );
@@ -641,7 +654,17 @@ export const ackAutoUpdate = async (req: Request, res: Response, next: NextFunct
 export const instantiateTemplate = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const templateId = Number(req.params.id);
-        const { userId, force } = req.body ?? {};
+        const {
+            userId, force,
+            /**
+             * Product ids of PANTRY items the shopper chose to leave out of this
+             * basket. The recipe keeps them either way — this is a decision about
+             * one shopping trip ("I already have salt this week"), not about the
+             * recipe, which is why it is asked here and not at recipe creation.
+             * Absent means keep everything, so every existing caller is unchanged.
+             */
+            skipPantryProductIds,
+        } = req.body ?? {};
         if (!Number.isFinite(templateId)) {
             res.status(400).json({ error: 'Invalid template ID' });
             return;
@@ -713,7 +736,18 @@ export const instantiateTemplate = async (req: Request, res: Response, next: Nex
             // Step 2: createFresh — new basket + copy items
             const newBasketId = await createBasket(userId, templateId, conn as any);
             await ensureTripForBasket(newBasketId, userId, conn as any);
-            const items = await getTemplateItems(templateId);
+            const allItems = await getTemplateItems(templateId);
+            // Only PANTRY items may be dropped this way: a request naming an
+            // ordinary item is ignored rather than obeyed, so a stale or hostile
+            // client cannot quietly empty someone's basket.
+            const skip = new Set<number>(
+                Array.isArray(skipPantryProductIds)
+                    ? skipPantryProductIds.map((n: any) => Number(n)).filter(Number.isFinite)
+                    : [],
+            );
+            const items = skip.size === 0
+                ? allItems
+                : allItems.filter((it: any) => !(Number(it.isPantry) === 1 && skip.has(Number(it.productId))));
             if (items.length > 0) {
                 const values = items.map((it: any) => [
                     newBasketId,
