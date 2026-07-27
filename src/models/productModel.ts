@@ -74,13 +74,32 @@ const productWithImagesSelect = (locale: Locale): string => {
 `;
 };
 
-export const searchProduct = async (query: string, locale: Locale = 'lt') => {
+export const searchProduct = async (
+    query: string,
+    locale: Locale = 'lt',
+    opts: {
+        /**
+         * Also return products filed under 'Nepriskirta' (category 688).
+         *
+         * OFF by default, because a shopper browsing search results should not
+         * wade through 18 000 uncategorised rows. But 39 % of the catalog lives
+         * there, INCLUDING most of the fresh produce a recipe asks for —
+         * "Valgomieji batatai" (sweet potatoes), the entire fresh tomato shelf,
+         * "Žaliosios cukinijos", "Lietuviški burokėliai". With the gate on, a
+         * recipe importer searching for a courgette found only a SEED PACKET,
+         * because the real vegetable was invisible to it.
+         */
+        includeUncategorised?: boolean;
+    } = {},
+) => {
     // Match signals come from the ONE shared source (utils/productSearchMatch) so
     // /products/search and the Discounts filter never drift apart. Here we use
     // them for RANKING: name (rank 0) → stemmed name (rank 1) → SP name /
     // translations / aliases (ranks 2–4), each its own query, merged by rank.
     const sc = productSearchClauses(query, { nameCol: 'p.name', idCol: 'p.id' });
-    const CAT_GATE = `JOIN Category cat ON cat.id = p.categoryId AND cat.name NOT LIKE 'Nepriskirt%'`;
+    const CAT_GATE = opts.includeUncategorised
+        ? `LEFT JOIN Category cat ON cat.id = p.categoryId`
+        : `JOIN Category cat ON cat.id = p.categoryId AND cat.name NOT LIKE 'Nepriskirt%'`;
 
     // ── Arm 1 (rank 0): full-token name match — today's behavior, highest rank.
     const [exact]: any = await pool.query(
@@ -281,7 +300,13 @@ const browseSelect = (locale: Locale): string => {
         CASE WHEN SUM(CASE WHEN sp.unit IN ('l','ml') THEN 1 ELSE 0 END) >
                     SUM(CASE WHEN sp.unit IN ('kg','g') THEN 1 ELSE 0 END)
                THEN 'ml' ELSE 'g' END as unit,
-        MAX(sp.isWeighable) as hasWeighable
+        MAX(sp.isWeighable) as hasWeighable,
+        -- Does the catalog know how this thing is SOLD at all? Distinct from
+        -- minAmount, which is normalised to g/ml and is therefore NULL for
+        -- everything sold by the piece. A real grocery listing has a unit or an
+        -- amount somewhere; a book imported into 'Nepriskirta' has neither, and
+        -- recipe search uses this to tell the two apart.
+        MAX(CASE WHEN sp.unit IS NOT NULL OR sp.amount IS NOT NULL THEN 1 ELSE 0 END) as hasListing
      FROM Product p
      LEFT JOIN StoreProduct sp ON sp.productId = p.id
 `;
@@ -324,28 +349,29 @@ async function fetchPersonallyRestoredProducts(
 }
 
 /**
- * Browse one L3 category.
+ * Browse ordering for a signed-in shopper: the crowd's ranking, RAISED by what
+ * this shopper has shown interest in.
  *
- * Mode only changes which Products are returned:
- *   'base' — cluster heads only (Product.baseProductId IS NULL). Variants
- *            collapse behind their head; tapping the head opens the detail
- *            screen which shows every variant side-by-side.
- *   'sku'  — every non-merged Product (heads + variants), one row each.
+ * It used to be a convex blend — `c·personal + (1−c)·global` — which looked
+ * reasonable and could not work. `globalScore` is the sum of every user's
+ * personal score over the same weights and the same decay, so
+ * `personal <= global` is an invariant (measured: violated in 0 of 307 real
+ * pairs once both sides are computed fresh). A convex combination of the two
+ * therefore never exceeds `global`: the formula could only ever push a
+ * shopper's own products DOWN, and hardest at exactly 10 interactions, where it
+ * was meant to be most personal. It escaped notice only because stored scores
+ * were stale and inflated; the nightly re-decay that now fixes that staleness
+ * would have turned this into a systematic penalty.
  *
- * Amount ranges reflect the Product's own StoreProducts in both modes
- * (not cluster-wide — keeping the query index-friendly). The detail view
- * in base mode surfaces the full cluster's variants.
- *
- * When userId is provided, globally merged products that the user has
- * personally voted 'different' on are restored to the list.
+ * A boost is monotone and safe: with no history the expression IS `globalScore`,
+ * so a stranger's ordering is byte-for-byte what it was, and every interaction
+ * can only raise a product.
  */
 const BLENDED_ORDER_BY = `
-    ORDER BY CASE
-        WHEN MAX(ups.interactionCount) > 0
-        THEN (LEAST(MAX(ups.interactionCount), 10) / 10.0) * MAX(ups.score)
-             + (1 - LEAST(MAX(ups.interactionCount), 10) / 10.0) * p.globalScore
-        ELSE p.globalScore
-    END DESC
+    ORDER BY p.globalScore
+             + (LEAST(COALESCE(MAX(ups.interactionCount), 0), 10) / 10.0)
+               * COALESCE(MAX(ups.score), 0)
+             DESC
 `;
 
 const parseChainLogos = (cl: any): { chainId: number; logoUrl: string | null }[] => {
