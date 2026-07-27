@@ -488,6 +488,72 @@ const NEVER_BOUGHT = new RegExp(
  */
 const GARNISH_INSTRUCTION = /^\p{L}+\s+(?:papuosimui|puosimui|dekoravimui)$/iu;
 
+/**
+ * A trailing PURPOSE clause — what the ingredient is FOR, never what it is:
+ * "šokolado papuošimui" (chocolate for decorating), "aliejaus kepti" (oil for
+ * frying), "sviesto bandelėm aptepti" (butter to brush the buns with). Left in
+ * place, the tail reaches the catalog query, where `stemQuery` ANDs every word
+ * and the purpose word zeroes the search — the mango row bought DRIED mangoes
+ * because "konservuotų mangų Sirupo neišpilkite" found nothing and the bare
+ * lexicon name did.
+ *
+ * The vocabulary is COLON_HEADING's Lithuanian half (the same purpose nouns,
+ * met as a colon head there and as a bare dative tail here) plus the purpose
+ * infinitives with their optional dative object ("bandelėm aptepti").
+ * Deliberately ABSENT: "pabarstyti" — measured, stripping it turned a flagged
+ * seed-mix row into a silently wrong one, the single regression of the sweep
+ * that sized this rule.
+ *
+ * Only a line WITH an amount is stripped (see the gate in parseSingle): a bare
+ * "daigų papuošimui" has nothing to buy and stays GARNISH_INSTRUCTION's
+ * business, while "100 g šokolado papuošimui" is a real purchase whose tail is
+ * noise. That is the same quantity gate markUnshoppable already applies, run
+ * from the other side.
+ */
+const LT_PURPOSE_TAIL = new RegExp(
+    '\\s+(?:'
+    + 'kepimui|papuošimui|papuosimui|puošimui|puosimui|dekoravimui|patiekimui'
+    + '|padažui|padazui|įdarui|idarui|tešlai|teslai|užpilui|uzpilui|garnyrui'
+    + '|(?:\\p{L}+(?:ui|ams|oms|ems|ėms|iems|ims|ums|am|om|em|ėm|iem)\\s+)?'
+    + '(?:aptepti|apvolioti|patepti|ištepti|istepti|kepti)'
+    + ')\\s*$', 'iu');
+
+/**
+ * "cukraus miltelių 5 kartus daugiau(, nei baltymo)" — a PROPORTION remark
+ * ("5× more than the egg white"), not part of any name. Stripped without the
+ * amount gate the purpose tails need: the line legitimately carries no amount
+ * of its own — the remark IS its amount — and "N kartus daugiau" can never be
+ * mistaken for an ingredient, so the garnish-instruction distinction the gate
+ * protects is not in play.
+ */
+const LT_PROPORTION_TAIL = /\s+\d+\s+kart\p{L}*\s+(?:daugiau|mažiau|maziau)\s*$/iu;
+
+/**
+ * A trailing INSTRUCTION sentence, glued on when the site appends one after
+ * the amount: "Mažos skardinės konservuotų mangų (400 g) Sirupo neišpilkite."
+ * — "don't discard the syrup". The imperative "-kite" is the marker (no
+ * Lithuanian food noun ends that way), and the optional word before it is the
+ * verb's object, part of the same sentence. Case-SENSITIVE on purpose: the
+ * regex has no `i` flag so `\p{Lu}` keeps meaning a capital — the mid-name
+ * capital is the start of the glued sentence.
+ */
+const LT_INSTRUCTION_TAIL = /\s+(?:\p{Lu}\p{L}*\s+)?(?:[Nn]e)?\p{L}{2,}kite\s*$/u;
+
+/** Peel purpose/instruction tails off the end of a Lithuanian name. Null when
+ *  nothing was stripped or stripping would empty the name. */
+const stripPurposeTail = (text: string): { name: string; tail: string } | null => {
+    let s = text;
+    const removed: string[] = [];
+    for (let pass = 0; pass < 2; pass++) {
+        const m = s.match(LT_PURPOSE_TAIL) ?? s.match(LT_INSTRUCTION_TAIL);
+        if (!m || m.index == null || m.index === 0) break;
+        removed.unshift(m[0].trim());
+        s = s.slice(0, m.index).replace(/[\s,.;]+$/, '').trim();
+    }
+    if (removed.length === 0 || !s) return null;
+    return { name: s, tail: removed.join(' ') };
+};
+
 const markUnshoppable = (p: ParsedIngredient): ParsedIngredient => {
     if (p.ignored) return p;
     const name = fold(p.name).trim();
@@ -892,6 +958,33 @@ const parseSingle = (part: string, rawLine: string, lang: Lang): ParsedIngredien
             unit = tail.unit;
             name = tail.rest;
             nameFull = takeTrailingUnit(nameFull)?.rest ?? nameFull;
+        }
+    }
+
+    /**
+     * FIX (measured): strip the trailing purpose clause from the NAME so it
+     * never reaches the catalog query. Gated on an amount being present — the
+     * exact line markUnshoppable draws from the other side: with an amount the
+     * site is telling us to BUY the garnish, without one the whole line is an
+     * instruction and GARNISH_INSTRUCTION ignores it. Stripped from `nameFull`
+     * too: both the lexicon lookup and the recipe-phrase search arm read it,
+     * and `droppedWord` would otherwise flag the tail as a lost identity word.
+     */
+    if (lang === 'lt' && (quantity != null || unit != null)) {
+        const stripped = stripPurposeTail(name);
+        if (stripped) {
+            notes.push(stripped.tail);
+            name = stripped.name;
+            nameFull = stripPurposeTail(nameFull)?.name ?? nameFull;
+        }
+    }
+    // The proportion remark needs no amount gate — see LT_PROPORTION_TAIL.
+    if (lang === 'lt') {
+        const m = name.match(LT_PROPORTION_TAIL);
+        if (m && m.index != null && m.index > 0) {
+            notes.push(m[0].trim());
+            name = name.slice(0, m.index).replace(/[\s,.;]+$/, '').trim();
+            nameFull = nameFull.replace(LT_PROPORTION_TAIL, '').replace(/[\s,.;]+$/, '').trim() || nameFull;
         }
     }
 

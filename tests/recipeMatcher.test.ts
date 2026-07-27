@@ -30,6 +30,15 @@ const DRIED_SPICE_CAT = 245;
 const FRESH_TOMATO_CAT = 3;
 const FROZEN_BERRY_CAT = 309;
 const DRIED_BERRY_CAT = 667;
+/** The REAL meat shelves the bacon split hangs on: 'šoninė' on 99 'Kiauliena'
+ *  is the raw belly cut, on 127 'Šoninė ir lašiniai' it is bacon — the word
+ *  cannot tell them apart, only the cure word and the shelf can. */
+const FRESH_PORK_CAT = 99;
+const CURED_BACON_CAT = 127;
+/** The REAL spreadable-cheese shelf ('Tepamieji sūriai ir varškė') — where
+ *  both Philadelphia and the savoury RAMBYNO spread live, so the NAME shape
+ *  (sūris vs the diminutive sūrelis) is what the query has to get right. */
+const SPREAD_CHEESE_CAT = 52;
 const q = async (sql: string, params: any[] = []) => (await pool.query(sql, params) as any)[0];
 
 /** A catalog product: a Product, a StoreProduct with a size, and a scraped
@@ -54,6 +63,16 @@ const addProduct = async (
 
 const ids: Record<string, number> = {};
 
+/** An English translation for a product's SP — what `searchProduct`'s
+ *  translation arm searches and the EN-fallback arm scores against. */
+const addTranslation = async (productId: number, text: string): Promise<void> => {
+    await q(
+        `INSERT INTO StoreProductTranslation (storeProductId, lang, text, normalized)
+         SELECT id, 'en', ?, ? FROM StoreProduct WHERE productId = ?`,
+        [text, text.toLowerCase(), productId],
+    );
+};
+
 const match = async (line: string, lang: Lang = 'lt') => {
     const parsed = parseIngredientLine(line, lang)[0];
     return matchIngredient(parsed, lang);
@@ -74,6 +93,12 @@ beforeAll(async () => {
              ON DUPLICATE KEY UPDATE name = VALUES(name)`, [FROZEN_BERRY_CAT]);
     await q(`INSERT INTO Category (id, name) VALUES (?, 'Džiovintos uogos')
              ON DUPLICATE KEY UPDATE name = VALUES(name)`, [DRIED_BERRY_CAT]);
+    await q(`INSERT INTO Category (id, name) VALUES (?, 'Kiauliena')
+             ON DUPLICATE KEY UPDATE name = VALUES(name)`, [FRESH_PORK_CAT]);
+    await q(`INSERT INTO Category (id, name) VALUES (?, 'Šoninė ir lašiniai')
+             ON DUPLICATE KEY UPDATE name = VALUES(name)`, [CURED_BACON_CAT]);
+    await q(`INSERT INTO Category (id, name) VALUES (?, 'Tepamieji sūriai ir varškė')
+             ON DUPLICATE KEY UPDATE name = VALUES(name)`, [SPREAD_CHEESE_CAT]);
     await q(`INSERT INTO StoreChain (id, name) VALUES (?, 'RecipeMatchChain')
              ON DUPLICATE KEY UPDATE name = VALUES(name)`, [CHAIN]);
     await q(`INSERT INTO Store (id, chainId, name, address) VALUES (?,?,'RM Store','X 1')
@@ -195,12 +220,57 @@ beforeAll(async () => {
     ids.broiler = await addProduct('Viščiukas broileris RIMI', { amount: 1, unit: 'kg', weighable: true });
     ids.chickenThighs = await addProduct('Viščiukų broilerių šlaunelės RIMI', { amount: 700, unit: 'g' });
     ids.cannedPeas = await addProduct('Žirneliai KĖDAINIŲ KONSERVAI', { amount: 690, unit: 'g' });
-}, 60_000);   // ~40 products × (Product + StoreProduct + Price) — well past Jest's 5 s default
+
+    // --- THE SILENT GATE (the 18-recipe holdout's five silent errors).
+    // An ingredient the lexicon does NOT know: dough is made, not bought, and
+    // the pastry snack that carries the word cleared the accept bar at 0.75.
+    ids.doughSnack = await addProduct('Sūrieji tešlos šaukšteliai LAIMA', { amount: 160, unit: 'g' });
+    // A bare species word's favourite answer: whichever cut ranks first.
+    ids.porkMince = await addProduct('Atšaldyta smulkinta kiauliena, 30 %',
+        { amount: 500, unit: 'g', categoryId: FRESH_PORK_CAT });
+    // Raw belly vs bacon: same word, different shelves, only one is cured.
+    ids.rawBelly = await addProduct('Lietuviška kiaulienos šoninė be kaulo, atšaldyta',
+        { amount: 500, unit: 'g', categoryId: FRESH_PORK_CAT, weighable: true });
+    ids.curedBacon = await addProduct('Šaltai rūkytos šoninės kubeliai, a. r.',
+        { amount: 200, unit: 'g', categoryId: CURED_BACON_CAT });
+    // Philadelphia-type spreadable vs the savoury melted spread whose name is
+    // the DIMINUTIVE of the same words.
+    ids.philadelphia = await addProduct('Tepamasis sūris PHILADELPHIA ORIGINAL, 21 % rieb.',
+        { amount: 175, unit: 'g', categoryId: SPREAD_CHEESE_CAT });
+    ids.rambyno = await addProduct('RAMBYNO tepamasis sūrelis',
+        { amount: 175, unit: 'g', categoryId: SPREAD_CHEESE_CAT });
+    // "pasta sauce" is sauce; the noodles carry the recognised word.
+    ids.tagliatelle = await addProduct('Makaronai TAGLIATELLE', { amount: 500, unit: 'g' });
+    ids.tomatoSauce = await addProduct('Pomidorų padažas TRADICINIS KKF', { amount: 500, unit: 'g' });
+    // A preparation nobody asked for, as the ONLY thing on offer.
+    ids.driedMango = await addProduct('Džiovinti mangai SEEBERGER', { amount: 100, unit: 'g' });
+
+    // --- THE EN NULL-QUERY GAP (measured fixes B+C): ingredients the lexicon
+    // does not know, reachable only through StoreProductTranslation.
+    // The catalog's only real rhubarb: uncategorised, size never recorded —
+    // but its translation IS the query, word for word.
+    ids.rhubarb = await addProduct('Rabarbarai', { categoryId: 688 });
+    await addTranslation(ids.rhubarb, 'Rhubarb');
+    // ...and the drink that merely mentions the word, properly listed.
+    ids.rhubarbWine = await addProduct('Gaz. vaisių vynas WOLU RHUBARB, 6 %', { amount: 750, unit: 'ml' });
+    await addTranslation(ids.rhubarbWine, 'Carbonated fruit wine WOLU RHUBARB, 6 %');
+    // A product whose LT name never says the English word at all.
+    ids.gnocchi = await addProduct('Bulvių virtinukai RANA', { amount: 400, unit: 'g' });
+    await addTranslation(ids.gnocchi, 'Potato gnocchi RANA');
+    // The measured junk: PVA glue, listed, in 'Nepriskirta' — its translation
+    // stem-matches "white rum" ("centRUM"), so only the NAME can reject it.
+    ids.pvaGlue = await addProduct('Balti klijai PVA CENTRUM', { amount: 250, unit: 'ml', categoryId: 688 });
+    await addTranslation(ids.pvaGlue, 'White PVA glue CENTRUM');
+    ids.whiteRum = await addProduct('Romas EL GALIPOTE WHITE', { amount: 700, unit: 'ml' });
+    await addTranslation(ids.whiteRum, 'White rum EL GALIPOTE');
+}, 60_000);   // ~50 products × (Product + StoreProduct + Price) — well past Jest's 5 s default
 
 afterAll(async () => {
     const productIds = Object.values(ids);
     if (productIds.length > 0) {
         await q(`DELETE p FROM Price p JOIN StoreProduct sp ON sp.id = p.storeProductId
+                 WHERE sp.productId IN (?)`, [productIds]);
+        await q(`DELETE t FROM StoreProductTranslation t JOIN StoreProduct sp ON sp.id = t.storeProductId
                  WHERE sp.productId IN (?)`, [productIds]);
         await q(`DELETE FROM StoreProduct WHERE productId IN (?)`, [productIds]);
         await q(`DELETE FROM Product WHERE id IN (?)`, [productIds]);
@@ -210,7 +280,8 @@ afterAll(async () => {
     await q(`DELETE FROM Category WHERE id = ?`, [CAT]);
     await q(`DELETE FROM Category WHERE id = ?`, [SEED_CAT]);
     await q(`DELETE FROM Category WHERE id IN (?)`,
-        [[FRESH_HERB_CAT, DRIED_SPICE_CAT, FRESH_TOMATO_CAT, FROZEN_BERRY_CAT, DRIED_BERRY_CAT]]);
+        [[FRESH_HERB_CAT, DRIED_SPICE_CAT, FRESH_TOMATO_CAT, FROZEN_BERRY_CAT, DRIED_BERRY_CAT,
+            FRESH_PORK_CAT, CURED_BACON_CAT, SPREAD_CHEESE_CAT]]);
     await (pool as any).end();
 }, 60_000);
 
@@ -801,5 +872,166 @@ describe('the dropped-word guard flags substitutions, not inflection', () => {
         const m = await match('100 g džiovintų spanguolių');
         expect(m.product?.productId).toBe(ids.driedCranberries);
         expect(m.confident).toBe(true);
+    });
+});
+
+/**
+ * THE SILENT GATE — clearing acceptance is not permission to fill the basket
+ * unannounced. `confident` used to be `reason == null`, so the score played
+ * no part in the silent decision, and every silent error the 18-recipe
+ * holdout found sat at 0.75–0.78. Below SILENT_ACCEPT, silence now has to be
+ * vouched for: a lexicon-vetted query fully present in the name, and a winner
+ * carrying none of the ranking's doubt signals.
+ */
+describe('the silent gate: accepted is not the same as unasked', () => {
+    /**
+     * "1 šaukšto tešlos" — dough is MADE, not bought, so the lexicon has no
+     * entry and the query is just the recipe's own genitive. The 0.75 the
+     * pastry snack scored measures spelling, not dough-ness; without a vetted
+     * name behind it, a soft score is a question.
+     */
+    it('never silently accepts a soft score for an ingredient the lexicon does not know', async () => {
+        const m = await match('1 šaukšto tešlos');
+        expect(m.confident).toBe(false);
+        if (m.product) expect(m.reviewReason).toBe('soft_score');
+    });
+
+    /**
+     * A bare SPECIES word names an aisle, not a cut: "kiauliena" silently
+     * bought raw mince because mince happened to rank first. The species
+     * words now behave exactly like 'mėsa' — offered, never silent — while a
+     * qualified phrase ("troškintos jautienos", asserted above) still narrows
+     * the aisle to a product and stays silent.
+     */
+    it('asks before answering a bare species word with whichever cut ranks first', async () => {
+        for (const line of ['200 g kiaulienos', '200 g jautienos', '300 g vištienos']) {
+            const m = await match(line);
+            expect(m.confident).toBe(false);
+            if (m.product) expect(m.reviewReason).toBe('generic_ingredient');
+        }
+    });
+
+    /** ...and the flag does not rob the ranking: bare beef still finds the
+     *  fresh mince, not the tin — it just gets offered instead of assumed. */
+    it('still offers the fresh cut for a bare species word', async () => {
+        const m = await match('200 g jautienos');
+        expect(m.product?.productId).toBe(ids.beefFresh);
+    });
+
+    /**
+     * EN "bacon" means CURED — but 'šoninė' is also the raw belly cut, and
+     * the bare query ranked the raw belly first (the cured shelf lost points
+     * for a preparation the query did not carry). The bacon entry now asks
+     * for the cure by name, which flips both signals at once.
+     */
+    it('buys cured bacon for an English bacon, never the raw belly', async () => {
+        for (const line of ['300 g bacon lardons', '4 rashers of smoked bacon']) {
+            const m = await match(line, 'en');
+            expect(m.product?.productId).toBe(ids.curedBacon);
+        }
+    });
+
+    /** The Lithuanian word keeps both meanings: a recipe that says 'šoninės'
+     *  may genuinely mean the fresh cut, and still gets it. */
+    it('still sells the raw belly to a Lithuanian recipe that says šoninė', async () => {
+        const m = await match('500 g šoninės');
+        expect(m.product?.productId).toBe(ids.rawBelly);
+    });
+
+    /**
+     * "cream cheese" is the Philadelphia shelf, and the shelf's own head is
+     * 'Tepamasis sūris'. The old canonical name was the DIMINUTIVE — the
+     * savoury melted-spread shape — and it bought RAMBYNO for a cheesecake.
+     */
+    it('buys spreadable cheese for cream cheese, not the savoury spread', async () => {
+        const m = await match('24 oz cream cheese', 'en');
+        expect(m.product?.productId).toBe(ids.philadelphia);
+        expect(m.product?.productId).not.toBe(ids.rambyno);
+    });
+
+    /** "pasta sauce" is SAUCE. With only the 'pasta' window recognised, the
+     *  head noun was the word that got dropped, and a jar of sauce became a
+     *  bag of noodles. */
+    it('buys sauce for pasta sauce, and noodles for spaghetti', async () => {
+        expect((await match('26 oz pasta sauce', 'en')).product?.productId).toBe(ids.tomatoSauce);
+        expect((await match('500 g spaghetti', 'en')).product?.productId).toBe(ids.tagliatelle);
+    });
+
+    /**
+     * A winner that carries a preparation nobody asked for won only because
+     * nothing better existed — the demotion moved every candidate together.
+     * That is exactly when to ask, whatever the score says.
+     */
+    it('asks when the only thing on offer is a preparation nobody wanted', async () => {
+        const m = await match('2 mangai');
+        expect(m.product?.productId).toBe(ids.driedMango);
+        expect(m.confident).toBe(false);
+        expect(m.reviewReason).toBe('soft_score');
+    });
+
+    /**
+     * The counter-case that bounds the gate: a lexicon-vetted staple whose
+     * score is depressed only by BRANDING stays silent at 0.78 — flagging the
+     * sub-0.85 band wholesale would flag 371 rows of the 180-recipe sweep,
+     * almost all correct, and re-train the shopper to tap through warnings.
+     */
+    it('keeps a brand-depressed lexicon staple silent', async () => {
+        const m = await match('100 gramų sviesto');
+        expect(m.product?.productId).toBe(ids.butter);
+        expect(m.confident).toBe(true);
+    });
+});
+
+/**
+ * THE ENGLISH NULL-QUERY GAP (measured fixes B + C). An unknown English phrase
+ * used to produce `query: null` and never search at all — 43 rows of the
+ * corpus got nothing while the translation table could answer them. The
+ * fallback searches the recipe's own phrase, prep-stripped, ranks against the
+ * translations, and is NEVER silent; the non-food guards are what keep the
+ * measured junk (PVA glue for "white rum") out.
+ */
+describe('the English null-query fallback', () => {
+    it('searches the phrase when the lexicon has no entry, and never silently', async () => {
+        const m = await match('150 g gnocchi', 'en');
+        expect(m.query).toBe('gnocchi');
+        expect(m.product?.productId).toBe(ids.gnocchi);
+        expect(m.confident).toBe(false);
+        expect(m.reviewReason).toBe('soft_score');
+    });
+
+    /** One stray prep word used to zero the whole AND-composed search; form
+     *  words are stripped from the QUERY only — the display name keeps them. */
+    it('strips preparation words from the query', async () => {
+        const m = await match('200 g finely chopped rhubarb', 'en');
+        expect(m.query).toBe('rhubarb');
+        expect(m.product?.productId).toBe(ids.rhubarb);
+        expect(m.confident).toBe(false);
+    });
+
+    /** The unlisted demotion loses every tie — except when the catalog's own
+     *  translation says the product IS the query, word for word. Without the
+     *  lift, the rhubarb-flavoured WINE outranked the only real rhubarb. */
+    it('lets an exact translation out-vouch a missing listing', async () => {
+        const m = await match('2 rhubarb stalks, trimmed', 'en');
+        expect(m.query).toBe('rhubarb');
+        expect(m.product?.productId).toBe(ids.rhubarb);
+    });
+
+    /** The measured trap, reproduced: the glue's translation stem-matches
+     *  "white rum" through "centRUM", so retrieval WILL return it and only
+     *  the NOT_FOOD name guard stands between it and the basket. */
+    it('never offers PVA glue for white rum', async () => {
+        const m = await match('50 ml white rum', 'en');
+        const offered = [m.product, ...m.alternatives].filter(Boolean) as { productId: number }[];
+        expect(offered.some(p => p.productId === ids.pvaGlue)).toBe(false);
+        expect(m.product?.productId).toBe(ids.whiteRum);
+        expect(m.confident).toBe(false);
+    });
+
+    /** FORM words survive into the query — "ground ginger" must keep buying
+     *  the spice jar, not the fresh root the bare noun would find. */
+    it('keeps form words: ground ginger still buys the jar', async () => {
+        const m = await match('1 tsp ground ginger', 'en');
+        expect(m.product?.productId).toBe(ids.groundGinger);
     });
 });

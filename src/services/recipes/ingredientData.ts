@@ -222,12 +222,19 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
     },
     {
         key: 'cream_cheese',
-        ltName: 'Tepamas sūrelis',
+        // 'Tepamasis sūris' is the Philadelphia shelf's own head ("Tepamasis
+        // sūris PHILADELPHIA ORIGINAL", ids 832/837 + 10 more variants,
+        // verified on cat 52). The old name 'Tepamas sūrelis' was the
+        // DIMINUTIVE, which is the savoury-spread shape — it bought "RAMBYNO
+        // tepamasis sūrelis" (a melted-cheese spread) at 0.89 for a
+        // cheesecake's cream cheese.
+        ltName: 'Tepamasis sūris',
         enName: 'cream cheese',
         // 'grietinėlės sūris' is the literal LT calque for cream cheese and
         // 'Filadelfijos sūris' is the brand used generically — without them a
         // recipe's cream cheese bought a carton of grietinėlė instead.
         lt: ['tepamas sūrelis', 'tepamo sūrelio', 'kreminis sūris', 'kreminio sūrio', 'tepamas sūris', 'tepamo sūrio',
+            'tepamasis sūris', 'tepamojo sūrio',
             'grietinėlės sūris', 'grietinėlės sūrio', 'filadelfijos sūris', 'filadelfijos sūrio'],
         en: ['cream cheese'],
         gramsPerMl: 1.0,
@@ -422,7 +429,8 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
         ltName: 'Kiauliena',
         enName: 'pork',
         lt: ['kiauliena', 'kiaulienos', 'šviežia kiauliena', 'šviežios kiaulienos'],
-        en: ['pork', 'pork shoulder', 'pork belly'],
+        // 'pork belly' lives on the pork_belly entry — it names a cut.
+        en: ['pork', 'pork shoulder'],
         pantry: false,
         weighable: true,
     },
@@ -526,11 +534,38 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
     },
     {
         key: 'bacon',
-        ltName: 'Šoninė',
+        // EN "bacon" means CURED, always — but the Lithuanian word 'šoninė' is
+        // BOTH the raw belly cut and the word for bacon, and a bare "Šoninė"
+        // query ranked "Lietuviška kiaulienos šoninė" (RAW belly, cat 99) over
+        // the 30+ cured SKUs on 127 'Šoninė ir lašiniai' — so "bacon lardons"
+        // silently bought raw pork belly at 0.75. Naming the preparation in
+        // ltName is what fixes the ranking: 'rūkyt' makes the query PREPARED,
+        // so the cured shelf stops being demoted AND the raw cut fails
+        // acceptance (no 'rūkyt' in its name). The alias reaches the
+        // cold-smoked spelling the shelf actually prints ("Šaltai rūkytos
+        // šoninės kubeliai", PANCETTA AFFUMICATA — ids 2287/2288, verified).
+        ltName: 'Rūkyta šoninė',
+        aliases: ['Šaltai rūkyta šoninė'],
         enName: 'bacon',
-        lt: ['šoninė', 'šoninės', 'rūkyta šoninė', 'rūkytos šoninės', 'karštai rūkyta šoninė', 'karštai rūkytos šoninės'],
-        en: ['bacon', 'smoked bacon', 'bacon rashers'],
+        lt: ['rūkyta šoninė', 'rūkytos šoninės', 'karštai rūkyta šoninė', 'karštai rūkytos šoninės',
+            'šaltai rūkyta šoninė', 'šaltai rūkytos šoninės'],
+        en: ['bacon', 'smoked bacon', 'bacon rashers', 'lardons', 'bacon lardons', 'streaky bacon'],
         pantry: false,
+    },
+    {
+        key: 'pork_belly',
+        // The OTHER meaning of the bare word: a Lithuanian recipe saying
+        // 'šoninės' may genuinely mean the fresh cut (šašlykai, oven belly),
+        // so the bare forms keep the plain query rather than inheriting the
+        // cured one — and the silent gate asks anyway when a species-ambiguous
+        // pick wins on a soft score. 'pork belly' moved here from the generic
+        // pork entry: it names this cut, not the shoulder.
+        ltName: 'Šoninė',
+        enName: 'pork belly',
+        lt: ['šoninė', 'šoninės', 'kiaulienos šoninė', 'kiaulienos šoninės'],
+        en: ['pork belly'],
+        pantry: false,
+        weighable: true,
     },
     {
         key: 'fish',
@@ -1583,7 +1618,11 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
         ltName: 'Pomidorų padažas',
         enName: 'tomato sauce',
         lt: ['pomidorų padažas', 'pomidorų padažo'],
-        en: ['tomato sauce', 'passata', 'tomato passata'],
+        // 'pasta sauce' names THIS, not pasta: with only the 'pasta' window
+        // recognised, the head noun (sauce) was the word that got dropped and
+        // "26 oz pasta sauce" silently bought "Makaronai TAGLIATELLE" —
+        // NOODLES for a jar of sauce.
+        en: ['tomato sauce', 'passata', 'tomato passata', 'pasta sauce', 'marinara sauce'],
         gramsPerMl: 1.05,
         pantry: false,
     },

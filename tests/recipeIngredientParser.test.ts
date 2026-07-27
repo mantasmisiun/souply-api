@@ -671,6 +671,68 @@ describe('non-ingredients are not purchases', () => {
 });
 
 /**
+ * MEASURED FIX: a trailing purpose clause says what the ingredient is FOR,
+ * never what it is — and left in the name it reaches the catalog query, where
+ * `stemQuery` ANDs every word and the purpose word zeroes the search. Only a
+ * line WITH an amount is stripped: with one, the site is telling us to BUY the
+ * garnish; without one the whole line is an instruction and stays ignored
+ * (the distinction the previous describe pins).
+ */
+describe('trailing purpose clauses are stripped from the name', () => {
+    it.each([
+        ['50 g džiovintų mangų papuošimui', 'džiovintų mangų', 'papuošimui'],
+        ['100 g šokolado papuošimui', 'šokolado', 'papuošimui'],
+        ['200 g miltų tešlai', 'miltų', 'tešlai'],
+        // The purpose INFINITIVE, with and without its dative object.
+        ['2 šaukštai aliejaus kepti', 'aliejaus', 'kepti'],
+        ['Šaukšto sviesto bandelėm aptepti', 'sviesto', 'bandelėm aptepti'],
+        ['Šaukšto medaus bandelėm aptepti', 'medaus', 'bandelėm aptepti'],
+    ])('%s → %s (tail → note)', (line, name, tail) => {
+        const p = one(line);
+        expect(p.name).toBe(name);
+        expect(p.nameFull).toBe(name);
+        expect(p.note).toContain(tail);
+        expect(p.ignored).toBe(false);
+    });
+
+    /** A trailing INSTRUCTION sentence glued after the amount — the imperative
+     *  "-kite" is the marker, and the capitalised word before it is the verb's
+     *  object. This is the row whose query the tail used to zero: dried
+     *  mangoes were bought for a can of mangoes in syrup. */
+    it('strips a glued imperative sentence', () => {
+        const p = one('Mažos skardinės konservuotų mangų (400 g) Sirupo neišpilkite.');
+        expect(p.name).toBe('konservuotų mangų');
+        expect(p.nameFull).toBe('konservuotų mangų');
+        expect(p.note).toContain('Sirupo neišpilkite');
+    });
+
+    /** "5 kartus daugiau(, nei baltymo)" is a proportion remark — the line's
+     *  amount, in words — so it strips WITHOUT the amount gate. */
+    it('strips a proportion remark even with no amount', () => {
+        const p = one('cukraus miltelių 5 kartus daugiau, nei baltymo');
+        expect(p.name).toBe('cukraus miltelių');
+    });
+
+    /**
+     * MEASURED REGRESSION, deliberately left unstripped: removing
+     * "pabarstyti" turned a flagged seed-mix row into a silently wrong one
+     * (cheese-flavoured sunflower seeds), because the remaining phrase read
+     * as covered. The word is NOT in the strip list; the row stays flagged.
+     */
+    it('leaves "pabarstyti" alone', () => {
+        const p = one('2 šaukštai saulėgrąžų ir moliūgų sėklų mišinio pabarstyti');
+        expect(p.name).toMatch(/pabarstyti$/);
+    });
+
+    /** Identity participles are not purpose words: "virti" on eggs and
+     *  "virtų" on potatoes select the product and must survive. */
+    it('never strips an identity participle', () => {
+        expect(one('1 kg virtų bulvių').name).toBe('virtų bulvių');
+        expect(one('Kiaušiniai virti, 4 vnt').name).toBe('Kiaušiniai virti');
+    });
+});
+
+/**
  * VALIDATION ROUND over 60 LT recipes — 15min.lt and greitireceptai.lt write
  * the amount INSIDE the ingredient text, after the name: "Bulvės 2,5 kg".
  * The decimal comma was read as the prep-note comma (name "Bulvės 2", note

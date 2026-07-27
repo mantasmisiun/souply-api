@@ -52,6 +52,37 @@ const AUTO_ACCEPT = RECOGNITION.match.autoApplyThreshold;   // 0.85
  * still goes to review, which is the case worth the shopper's attention.
  */
 const SOFT_ACCEPT = 0.75;
+/**
+ * The bar for adding a product WITHOUT ASKING — separate from the accept bar,
+ * because clearing acceptance used to be the whole silent decision
+ * (`confident = reason == null`) and the score played no part in it. Every
+ * silent error the 18-recipe holdout found sat at 0.75–0.78: "bacon lardons"
+ * bought RAW pork belly at 0.75, "1 šaukšto tešlos" bought a pastry SNACK at
+ * 0.75, a bare "kiauliena" bought raw mince at 0.78. Two reviewers, judging
+ * different data independently, both concluded the silent gate needs a score
+ * threshold.
+ *
+ * Below this bar a match is still ACCEPTED — offered, pre-selected, one tap —
+ * but the app asks (`soft_score`) instead of filling the basket unannounced.
+ * Two things vouch for silence below the bar, both required together:
+ *
+ *   1. the ingredient is in the KNOWLEDGE BASE — the query is a vetted
+ *      shopping name, not the recipe's raw words. The sub-0.85 silent band is
+ *      371 rows of the 180-recipe sweep and almost all of it is correct
+ *      lexicon matches whose score is depressed by branding ("Druska" →
+ *      "Rožinė druska malūnėlyje" 0.78, "Cukrus" → "Cukrus EXTRA LINE" 0.78 —
+ *      the SOFT_ACCEPT rationale above); flagging those re-trains the shopper
+ *      to tap through warnings. What the band's ERRORS shared instead was an
+ *      unvetted query: "tešlos" (dough — made, not bought) is not in the
+ *      table, so its query was just the recipe's own genitive, and the 0.75
+ *      it scored measured nothing about whether the snack IS dough.
+ *   2. the winner carries no structural doubt (`demerits` — see rankPicks):
+ *      a candidate that won while advertising a preparation, accompaniment or
+ *      shelf nobody asked for won only because nothing better existed, and
+ *      that is precisely when to ask ("Mangai" → "Džiovinti mangai" won at
+ *      0.78 with the whole fresh shelf empty).
+ */
+const SILENT_ACCEPT = 0.85;
 const MIN_ACCEPT = 0.62;
 const CANDIDATE_CAP = 40;
 /**
@@ -168,7 +199,12 @@ const PREPARED_MARKER = new RegExp(
  */
 const PET_FOOD = /(ėdal|edal|šunų|sunu|šunims|sunims|kačių|kaciu|katėms|katems)/i;
 
-const NOT_FOOD = /\b(sijotuvas|sijotuv|indelis|indeliai|dubenėlis|dubenėliai|keptuvė|puodas|puodai|formelė|formelės|kepimo forma|peiliukas|peiliai|trintuvė|tarkuotuvas|pjaustyklė|maišeliai|servetėlės|žvakė|žvakės|plovimo|valymo|šveitimo)\b/i;
+// 'klijai' (glue), 'valiklis' (cleaner) and 'ploviklis' (detergent) joined the
+// list when the EN-fallback arm met them in 'Nepriskirta' WITH listings —
+// "Balti klijai PVA CENTRUM" answered "white rum" and "WC valiklis ECO RHUBARB
+// OP" answered "rhubarb", and no category or listing signal separates either
+// from food. The words themselves do: nothing edible is named any of them.
+const NOT_FOOD = /\b(sijotuvas|sijotuv|indelis|indeliai|dubenėlis|dubenėliai|keptuvė|puodas|puodai|formelė|formelės|kepimo forma|peiliukas|peiliai|trintuvė|tarkuotuvas|pjaustyklė|maišeliai|servetėlės|žvakė|žvakės|plovimo|valymo|šveitimo|klijai|valiklis|valikliai|ploviklis|plovikliai)\b/i;
 
 /**
  * Category words a recipe uses when it does NOT care which product you buy —
@@ -191,6 +227,15 @@ const GENERIC_CATEGORY_WORDS: ReadonlySet<string> = new Set([
     'žalumynai', 'žalumynų', 'mėsa', 'mėsos', 'žuvis', 'žuvies', 'žuvys',
     'sėklos', 'sėklų', 'riešutai', 'riešutų', 'daržovės', 'daržovių',
     'grūdai', 'grūdų',
+    // SPECIES words behave exactly like 'mėsa': a bare "kiauliena" silently
+    // bought "Atšaldyta smulkinta kiauliena, 30 %" — raw MINCE for a recipe
+    // that never said mince — because the species names an AISLE, not a cut,
+    // and whichever cut ranks first is still a guess. The qualifier rule
+    // bounds this the same way as for 'mėsos': "troškintos jautienos" and
+    // "vištienos šlaunelės" narrow the aisle to a product and stay silent.
+    // ('žuvis' was already here; 'vištiena' rides on the chicken entry's
+    // broiler default for RANKING, but the pick is still one bird of many.)
+    'kiauliena', 'kiaulienos', 'jautiena', 'jautienos', 'vištiena', 'vištienos',
     'fruit', 'fruits', 'berry', 'berries', 'spice', 'spices',
     'seasoning', 'seasonings', 'greens', 'meat', 'fish', 'seed', 'seeds',
     'nut', 'nuts', 'vegetable', 'vegetables', 'veggies', 'grain', 'grains',
@@ -272,7 +317,24 @@ export interface ProductPick {
     /** Uncategorised AND with no recorded size — see `unlistedInUncategorised`.
      *  Loses every tie, and can never be a silent match. */
     unlisted: boolean;
+    /**
+     * How many of the ranking's identity-doubt signals hit this candidate —
+     * an unwanted preparation, an accompaniment ("su X"), the wrong shelf, or
+     * a suspected seed packet. Stamped by `rankPicks`, because only the
+     * ranking has the pool context (`freshProduceOnOffer`) the shelf signal
+     * needs. A winner with any of these won because nothing better existed,
+     * and the silent gate reads that as a reason to ask.
+     */
+    demerits: number;
     name: string;
+    /**
+     * The product's English translation strings (`StoreProductTranslation`,
+     * lang='en'), present only on picks from the EN-fallback arm. They are
+     * what the arm matched and scored against, and what `acceptable` judges
+     * full query presence on — an English query can never appear inside a
+     * Lithuanian product name.
+     */
+    enNames?: string[];
     imageUrl: string | null;
     isWeighable: boolean;
     /** Package size of the representative product, when the catalog knows it —
@@ -313,7 +375,7 @@ export interface MatchedIngredient {
     /** Why not, when `confident` is false — for the sweep, and for telling the
      *  shopper what we were unsure about. */
     reviewReason: 'low_score' | 'dropped_word' | 'generic_fallback' | 'generic_ingredient'
-        | 'unit_conflict' | 'unlisted_product' | null;
+        | 'unit_conflict' | 'unlisted_product' | 'soft_score' | null;
     /** How much to actually buy, in the product's own unit. */
     shopQuantity: number;
     shopUnit: 'kg' | 'vnt';
@@ -375,7 +437,14 @@ export const matchIngredient = async (
             unitConflict = true;
         }
     }
-    const query = info?.ltName ?? (lang === 'lt' ? ing.name : null);
+    /**
+     * FIX C: an unknown ENGLISH phrase now searches too, through the guarded
+     * translation arm, instead of short-circuiting to nothing. Everything the
+     * fallback finds is review-only — see `viaEnPhrase` in the reason chain.
+     */
+    const enPhrase = info == null && lang === 'en' && !ing.ignored ? enPhraseQuery(ing) : null;
+    const query = info?.ltName ?? (lang === 'lt' ? ing.name : enPhrase);
+    const viaEnPhrase = enPhrase != null && query === enPhrase;
     /**
      * A GENERIC HEAD NOUN IS A QUESTION, NEVER AN ANSWER.
      *
@@ -440,7 +509,7 @@ export const matchIngredient = async (
         recipeArm(ing.nameFull, query, lang),
         recipeArm(ing.name, query, lang),
     ]);
-    let picks = await findProducts(queries, ing, info, locale, cache, userId, affinityCache);
+    let picks = await findProducts(queries, ing, info, locale, cache, userId, affinityCache, viaEnPhrase);
 
     /**
      * Nothing at all — or nothing that IS the thing? Try the head noun on its own.
@@ -484,8 +553,11 @@ export const matchIngredient = async (
      * still routes the match to review.
      */
     let acceptQuery = query;
-    if (picks.length === 0 || nonePassed
-        || (picks.length === 1 && !carriesQueryAsHead(query, picks[0].name))) {
+    // The head-noun fallback is a LITHUANIAN-name device ("Kepimo soda" →
+    // "soda"); on an English fallback phrase it would only widen into junk
+    // ("white rum" → "rum" → anything), so the EN path never takes it.
+    if (!viaEnPhrase && (picks.length === 0 || nonePassed
+        || (picks.length === 1 && !carriesQueryAsHead(query, picks[0].name)))) {
         const head = headNoun(query);
         // Never generalise onto a form noun — that is not a wider search, it is
         // a different product with the same packaging word.
@@ -516,8 +588,12 @@ export const matchIngredient = async (
      * property of a candidate, so it is asked of each in turn; the order still
      * decides WHICH acceptable one wins.
      */
+    // On the EN fallback path the query and the product name are in different
+    // LANGUAGES by construction, so full presence is also asked of the
+    // product's English translations — the very strings the arm matched on.
     const acceptable = (p: ProductPick) =>
-        p.confidence >= SOFT_ACCEPT && queryFullyPresent(acceptQuery, p.name);
+        p.confidence >= SOFT_ACCEPT && (queryFullyPresent(acceptQuery, p.name)
+            || (p.enNames ?? []).some(n => queryFullyPresent(acceptQuery, n)));
     const chosenIndex = picks.findIndex(acceptable);
     const best = chosenIndex >= 0 ? picks[chosenIndex] : picks[0];
     const rest = picks.filter((_, i) => i !== (chosenIndex >= 0 ? chosenIndex : 0));
@@ -553,6 +629,24 @@ export const matchIngredient = async (
         // Uncategorised with no size the catalog knows of. It won because
         // nothing better existed, and that is precisely when to ask.
         : best.unlisted ? 'unlisted_product'
+        /**
+         * The EN fallback is NEVER silent, whatever it scores. The query is
+         * the recipe's own unvetted words matched against machine
+         * translations — measured at ~8 right to 1 wrong, which earns a
+         * pre-selected suggestion, not an unannounced basket line. (This is
+         * SILENT_ACCEPT's rationale #1 with no vetted shopping name at all.)
+         */
+        : viaEnPhrase ? 'soft_score'
+        /**
+         * THE SILENT GATE — the accept bar alone is not permission to fill
+         * the basket unannounced. Below SILENT_ACCEPT, silence has to be
+         * vouched for: a knowledge-base ingredient (the query is a vetted
+         * shopping name, so full presence means something — `acceptable`
+         * already required it) AND a winner free of the ranking's doubt
+         * signals. See SILENT_ACCEPT for the holdout evidence.
+         */
+        : best.demerits > 0 ? 'soft_score'
+        : best.confidence < SILENT_ACCEPT && info == null ? 'soft_score'
         : null;
     return {
         ...base,
@@ -853,6 +947,50 @@ const EN_IDENTITY_QUALIFIERS = new Set([
 ]);
 
 /**
+ * FIX B (measured): English PREPARATION words stripped from the catalog query.
+ *
+ * `stemQuery` ANDs every stem, so one stray prep word zeroes the whole search:
+ * "finely chopped rhubarb" returned NOTHING while 28 rhubarb translations sat
+ * in the catalog, because no translation says "finely". These are words for
+ * what the COOK does in the kitchen, never words printed on a product — the
+ * same distinction EN_IDENTITY_QUALIFIERS already draws from the other side.
+ *
+ * FORM words are deliberately ABSENT: "ground" selects the spice jar over the
+ * root, "smoked" selects smoked paprika, "dried" selects the dried herb —
+ * every one of those changes what is bought and must survive into the query.
+ * When in doubt a word stays OUT of this list.
+ */
+const EN_QUERY_PREP = new RegExp(
+    '^(?:finely|coarsely|roughly|thinly|thickly|freshly|very'
+    + '|chopped|crushed|minced|grated|sliced|diced|shredded|peeled|trimmed'
+    + '|softened|melted|divided|packed|drained|rinsed|beaten'
+    + '|halved|quartered|cubed|juiced|picked)$', 'i');
+
+/** "plus more for serving", "for garnish" — an EN purpose tail the parser did
+ *  not eat. Query-side only, the display name is untouched. */
+const EN_QUERY_PURPOSE_TAIL = new RegExp(
+    '\\s(?:plus\\s+more\\b.*|for\\s+(?:serving|garnish|sprinkling|dusting|dipping|drizzling)|to\\s+serve)\\s*$', 'i');
+
+/**
+ * FIX C (measured): the query for an English ingredient the lexicon does not
+ * know. `query = null` meant NO search of any kind ran — 43 rows produced
+ * nothing while `searchProduct`'s translation arm could answer them (tamari,
+ * pesto, gnocchi, tequila…). The fallback searches the recipe's own English
+ * phrase, prep-stripped per EN_QUERY_PREP. Guards, because the raw phrase arm
+ * unguarded returned PVA GLUE for "white rum": the NOT_FOOD / PET_FOOD /
+ * NON_FOOD_CATEGORY filters in findProductsFor, the `unlisted` demotion, and
+ * `viaEnPhrase` forcing every result to review — never into a basket
+ * unannounced.
+ */
+const enPhraseQuery = (ing: ParsedIngredient): string | null => {
+    const phrase = firstAlternative(ing.name || '').replace(EN_QUERY_PURPOSE_TAIL, ' ');
+    const words = phrase.split(/\s+/)
+        .map(w => w.replace(/[^\p{L}\p{N}'%-]/gu, ''))
+        .filter(w => w.length > 0 && !EN_QUERY_PREP.test(w));
+    return words.length > 0 ? words.join(' ') : null;
+};
+
+/**
  * Recipes offer choices — "pieno arba vandens", "medaus arba cukraus", "klevų
  * sirupo ar skysto medaus". Only the FIRST option has to be accounted for: the
  * others are permission, not a requirement, and counting them as words we
@@ -900,13 +1038,16 @@ const findProducts = async (
     cache: QueryCache,
     userId: string | null = null,
     affinityCache?: AffinityCache,
+    enArm = false,
 ): Promise<ProductPick[]> => {
     const best = new Map<number, ProductPick>();
     for (const q of queries) {
-        const key = `${q.toLowerCase()}|${locale}`;
+        // The EN arm scores against translations, so its picks are not
+        // interchangeable with an LT search for the same string.
+        const key = `${q.toLowerCase()}|${locale}${enArm ? '|en' : ''}`;
         let picks = cache.get(key);
         if (!picks) {
-            picks = await findProductsFor(q, ing, info, locale);
+            picks = await findProductsFor(q, ing, info, locale, enArm);
             cache.set(key, picks);
         }
         for (const pick of picks) {
@@ -1012,18 +1153,23 @@ const rankPicks = (
         if (!queryPrepared) return 1;
         /**
          * Same preparation when one folded form is a PREFIX of the other,
-         * compared over at most 5 letters. A fixed slice(0, 6) equality broke
+         * compared over at most 4 letters. A fixed slice(0, 6) equality broke
          * both directions the abbreviations need: "Dž." folds to "dz" and
          * could never equal "dziovi", so a recipe asking for "džiovintų
          * spanguolių" saw the very product it wanted demoted as a stranger —
          * and "rūkyta" vs "rūkytos" differed at the 6th letter, so even two
-         * case endings of ONE word read as different preparations. Five is
-         * still enough to keep every marker pair apart ("marin"/"malt",
-         * "raugi"/"rukyt", "sudyt"/"surym" all diverge by then).
+         * case endings of ONE word read as different preparations. Five had
+         * the same bug one stem shorter: "Maltas imbieras" vs "Malti
+         * imbierai" diverge at the 5th letter because 'malt' is a 4-letter
+         * stem and the 5th is already the case ending — the very product the
+         * recipe asked for was demoted, and the silent gate turned that
+         * invisible demotion into a review flag on a 0.87 match. Four is
+         * still enough to keep every marker pair apart ("mari"/"malt",
+         * "raug"/"ruky", "sudy"/"sury", "kept"/"keps" all diverge by then).
          */
         const a = fold(found);
         const b = fold(wanted!);
-        const n = Math.min(a.length, b.length, 5);
+        const n = Math.min(a.length, b.length, 4);
         return n > 0 && a.slice(0, n) === b.slice(0, n) ? 0 : 1;
     };
     /**
@@ -1067,7 +1213,18 @@ const rankPicks = (
     const accompanied = (p: ProductPick) => (!querySu && JOINED.test(` ${p.name} `) ? 1 : 0);
 
     /** 1 = on the wrong shelf for the form the recipe asked for. */
-    const wantsFresh = FRESH_WORD.test(phrase) || (info != null && FRESH_KEYS.has(info.key));
+    /**
+     * "Freshly GROUND" is about the grinding, not the produce: FRESH_WORD
+     * matches the prefix of 'freshly', which read every "freshly ground black
+     * pepper" as a request for the FRESH shelf and hung a wrong-shelf demerit
+     * on the dried-spice jar it correctly buys — harmless while the signal
+     * only ordered candidates (they all moved together), a review flag on six
+     * correct pantry rows once the silent gate started reading demerits.
+     * Dropping the 'freshly' leaves the verb, so the phrase reads exactly
+     * like "ground black pepper" already does.
+     */
+    const freshPhrase = phrase.replace(/freshly\s+(?=ground|cracked|grated|milled)/gi, '');
+    const wantsFresh = FRESH_WORD.test(freshPhrase) || (info != null && FRESH_KEYS.has(info.key));
     const wantsDried = !wantsFresh && (DRIED_WORD.test(query) || DRIED_WORD.test(phrase));
     /**
      * Only demote the processed aisle when the fresh one actually has something
@@ -1129,7 +1286,19 @@ const rankPicks = (
         - PENALTY.seed * Number(p.suspectSeed)
         - PENALTY.multipack * Number(MULTIPACK.test(p.name));
 
-    return [...picks].sort((a, b) => {
+    /**
+     * Stamp the identity-doubt signals onto each pick for the SILENT gate.
+     * Here and not in `matchIngredient`, because `wrongShelf` only means
+     * anything against the pool it was judged in (`freshProduceOnOffer`), and
+     * that context dies with this call. Multipack and unlisted are left out:
+     * a box of sugar sachets is still sugar (wrong shape, right product), and
+     * unlisted already blocks silence through its own review reason.
+     */
+    const withDoubt = picks.map(p => ({
+        ...p,
+        demerits: prepared(p) + accompanied(p) + wrongShelf(p) + Number(p.suspectSeed),
+    }));
+    return withDoubt.sort((a, b) => {
         const adj = adjusted(a) - adjusted(b);
         if (Math.abs(adj) > band) return -adj;
         // Within a band of each other on the adjusted score, the same order of
@@ -1420,11 +1589,41 @@ const MULTIPACK = /\d+\s*[x×]\s*\d/i;
 
 const normalise = (s: string): string => s.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
 
+/**
+ * English translations of a set of products, for the EN-fallback arm — both
+ * extra match targets (`MatchCandidate.aliases`, which the shared matcher
+ * scores alongside the catalog name) and the strings `acceptable` judges query
+ * presence on. Read failure degrades to "no translations", never to an error:
+ * the arm then scores against LT names alone and simply finds less.
+ */
+const loadEnNames = async (productIds: number[]): Promise<Map<number, string[]>> => {
+    const map = new Map<number, string[]>();
+    if (productIds.length === 0) return map;
+    try {
+        const [rows]: any = await pool.query(
+            `SELECT sp.productId AS pid, spt.normalized AS name
+             FROM StoreProductTranslation spt
+             JOIN StoreProduct sp ON sp.id = spt.storeProductId
+             WHERE spt.lang = 'en' AND sp.productId IN (?)`,
+            [productIds],
+        );
+        for (const r of rows as any[]) {
+            const arr = map.get(Number(r.pid)) ?? [];
+            // A handful is plenty for scoring; an SP with dozens of variants
+            // must not turn one candidate into dozens of comparisons.
+            if (arr.length < 8) arr.push(String(r.name));
+            map.set(Number(r.pid), arr);
+        }
+    } catch { /* fall through with what we have */ }
+    return map;
+};
+
 const findProductsFor = async (
     query: string,
     ing: ParsedIngredient,
     info: IngredientInfo | null,
     locale: Locale,
+    enArm = false,
 ): Promise<ProductPick[]> => {
     // Recipes need the uncategorised shelf: most fresh produce lives there.
     const rows = await searchProduct(query, locale, { includeUncategorised: true });
@@ -1451,6 +1650,23 @@ const findProductsFor = async (
         imageUrl: firstImage(r.imageUrls),
         isCatalog: true,
     }));
+
+    /**
+     * The EN arm ranks against the TRANSLATION string, not just the LT name.
+     * `findBestProductMatches` already takes the best score over the catalog
+     * name AND any `aliases`, so the translations ride the existing mechanism
+     * — "rhubarb" scores ~1.0 against the translation "rhubarb" where it
+     * scored nothing against "Rabarbarai", which is the whole measured gap
+     * between 8 and ~13–16 recovered rows.
+     */
+    let enNames = new Map<number, string[]>();
+    if (enArm && candidates.length > 0) {
+        enNames = await loadEnNames(candidates.map(c => c.productId));
+        for (const c of candidates) {
+            const t = enNames.get(c.productId);
+            if (t && t.length > 0) c.aliases = t;
+        }
+    }
 
     /**
      * NO amount signal. The matcher reads amount+unit as the PACKAGE the product
@@ -1486,12 +1702,29 @@ const findProductsFor = async (
     const unlistedById = new Map<number, boolean>(
         rows.map((r: any) => [Number(r.id), unlistedInUncategorised(r)]),
     );
+    /**
+     * A translation that IS the query, word for word, out-vouches the missing
+     * listing. "Rabarbarai" (688, no recorded size) is the catalog's only real
+     * rhubarb, and its translation is exactly "rhubarb" — yet the unlisted
+     * tie-break handed the pick to a rhubarb-flavoured WINE that merely
+     * mentions the word. The catalog itself saying "this product is <query>"
+     * is identity evidence of the same kind a listing gives, so only for the
+     * EN arm, and only on EXACT equality (junk never survives that: the glue
+     * translates to "white pva glue centrum", not to "white rum"), the row
+     * ranks as listed. Silence is unaffected — the EN arm is never silent.
+     */
+    const qNorm = normalise(query);
+    const exactTranslation = (id: number): boolean =>
+        enArm && (enNames.get(id) ?? []).some(n => normalise(n) === qNorm);
     return matches.map(m => ({
-        // Affinity is stamped later, once the caller knows who is shopping.
+        // Affinity is stamped later, once the caller knows who is shopping;
+        // demerits are stamped by rankPicks, which owns the pool context.
+        demerits: 0,
         affinity: 0,
         globalScore: globalById.get(m.productId) ?? 0,
         productId: m.productId,
         name: m.name,
+        ...(enArm ? { enNames: enNames.get(m.productId) ?? [] } : {}),
         imageUrl: m.imageUrl,
         isWeighable: m.isWeighable,
         packAmount: m.amount,
@@ -1499,7 +1732,7 @@ const findProductsFor = async (
         confidence: m.confidence,
         suspectSeed: suspectSeedPacket(byId.get(m.productId), seedNames),
         categoryId: byId.get(m.productId)?.categoryId ?? 0,
-        unlisted: unlistedById.get(m.productId) ?? false,
+        unlisted: (unlistedById.get(m.productId) ?? false) && !exactTranslation(m.productId),
     }));
 };
 
