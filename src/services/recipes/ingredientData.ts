@@ -676,13 +676,29 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
         en: ['canned tuna', 'tuna', 'tinned tuna'],
         pantry: false,
     },
+    /**
+     * STOCK IS BOUGHT AS CUBES, and the recipe's millilitres are water.
+     *
+     * The broth entries carried gramsPerMl 1.0, which is the density of the
+     * MADE-UP liquid — so "250 ml vištienos sultinio" became 250 g of
+     * purchase mass, an amount of a product nobody buys: the dev catalog's
+     * stock shelf (249 'Sultiniai ir sultinių kubeliai') is ~20 cube/powder
+     * products per species against a handful of ready-made liquids, because
+     * in Lithuania you buy "sultinio kubeliai" and dissolve them. Against a
+     * cube pack, 250 g of mass would divide into FOUR 80 g packs of cubes —
+     * enough for ten litres of stock. So the entries carry no density: the
+     * measure stays the recipe's own millilitres, the mass-vs-volume
+     * dimension check in `shoppingAmount` refuses the bogus division, and
+     * one pack — the honest unit for any dissolved amount a recipe uses —
+     * is what lands in the basket. The matcher's cube-first ranking
+     * (`wrongShelf` in rankPicks) is the other half of the same decision.
+     */
     {
         key: 'broth',
         ltName: 'Sultinys',
         enName: 'broth',
         lt: ['sultinys', 'sultinio', 'naminis sultinys', 'naminio sultinio'],
         en: ['broth', 'stock'],
-        gramsPerMl: 1.0,
         pantry: false,
     },
     {
@@ -690,8 +706,7 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
         ltName: 'Vištienos sultinys',
         enName: 'chicken broth',
         lt: ['vištienos sultinys', 'vištienos sultinio'],
-        en: ['chicken broth', 'chicken stock'],
-        gramsPerMl: 1.0,
+        en: ['chicken broth', 'chicken stock', 'chicken stock cube', 'chicken stock cubes'],
         pantry: false,
     },
     {
@@ -699,8 +714,7 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
         ltName: 'Jautienos sultinys',
         enName: 'beef broth',
         lt: ['jautienos sultinys', 'jautienos sultinio'],
-        en: ['beef broth', 'beef stock'],
-        gramsPerMl: 1.0,
+        en: ['beef broth', 'beef stock', 'beef stock cube', 'beef stock cubes'],
         pantry: false,
     },
     {
@@ -708,8 +722,19 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
         ltName: 'Daržovių sultinys',
         enName: 'vegetable broth',
         lt: ['daržovių sultinys', 'daržovių sultinio'],
-        en: ['vegetable broth', 'vegetable stock'],
-        gramsPerMl: 1.0,
+        en: ['vegetable broth', 'vegetable stock', 'vegetable stock cube', 'vegetable stock cubes'],
+        pantry: false,
+    },
+    {
+        key: 'broth_mushroom',
+        // Same family, same purchase: without its own entry, "grybų sultinio"
+        // fell to the 1-word 'grybų' window and bought fresh CHAMPIGNONS for
+        // a stock line. The catalog stocks the cube ("Grybų sultinys GALLINA
+        // BLANCA", 80 g, shelf 249) and no ready-made mushroom liquid at all.
+        ltName: 'Grybų sultinys',
+        enName: 'mushroom broth',
+        lt: ['grybų sultinys', 'grybų sultinio', 'baravykų sultinys', 'baravykų sultinio'],
+        en: ['mushroom broth', 'mushroom stock', 'mushroom stock cube', 'mushroom stock cubes'],
         pantry: false,
     },
     {
@@ -736,7 +761,8 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
         enName: 'fish stock',
         lt: ['žuvies sultinys', 'žuvies sultinio'],
         en: ['fish broth', 'fish stock', 'fish stock cube', 'fish stock cubes'],
-        gramsPerMl: 1.0,
+        // No density, like the rest of the broth family: the millilitres are
+        // made-up liquid, never a purchase mass (see the note above 'broth').
         pantry: false,
     },
 
@@ -1684,7 +1710,20 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
         // the dish.
         ltName: 'Malta saldžioji paprika',
         enName: 'paprika',
+        // The 3-word powder forms are load-bearing, not verbosity: the window
+        // scan is longest-first but LEFTMOST at equal length, so in
+        // "saldžiosios paprikos miltelių" the 2-word 'saldžiosios paprikos'
+        // (bell_pepper's form, at i=0) beat 'paprikos miltelių' (at i=1) — and
+        // a goulash's teaspoon of ground paprika bought 100 g of FRESH sweet
+        // peppers, the same product as the recipe's other, counted paprika
+        // line. A 3-word form wins the length race before position can lose
+        // it. The hot twin (aitriosios) already spells its 3-word forms out;
+        // 'raudonosios' covers the same collapse via bell_pepper's
+        // 'raudonosios paprikos' ("Malta raudonoji saldžioji paprika SALDVA"
+        // is the shelf product such a line means).
         lt: ['malta paprika', 'maltos paprikos', 'paprikos milteliai', 'paprikos miltelių',
+            'saldžiosios paprikos milteliai', 'saldžiosios paprikos miltelių',
+            'raudonosios paprikos milteliai', 'raudonosios paprikos miltelių',
             'malta saldžioji paprika', 'maltos saldžiosios paprikos'],
         en: ['paprika', 'sweet paprika', 'ground paprika'],
         gramsPerMl: 0.45,

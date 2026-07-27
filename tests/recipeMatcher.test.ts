@@ -274,6 +274,16 @@ beforeAll(async () => {
     await addTranslation(ids.pvaGlue, 'White PVA glue CENTRUM');
     ids.whiteRum = await addProduct('Romas EL GALIPOTE WHITE', { amount: 700, unit: 'ml' });
     await addTranslation(ids.whiteRum, 'White rum EL GALIPOTE');
+
+    // --- STOCK: the ready-made liquid and the cube box are named IDENTICALLY
+    // on the real shelf ("Vištienos sultinys", 750 ml carton, vs "Vištienos
+    // sultinys MAGGI", 160 g of cubes); only the recorded pack (ml vs g) tells
+    // them apart. The bare-named liquid is the exact-name 1.00 scorer the
+    // branded cube has to beat; fish stock is the species the real catalog
+    // does not stock in ANY form, so its liquid stands alone and must survive.
+    ids.liquidMushStock = await addProduct('Grybų sultinys', { amount: 750, unit: 'ml' });
+    ids.mushStockCubes = await addProduct('Grybų sultinys GALLINA BLANCA', { amount: 80, unit: 'g' });
+    ids.fishStockLiquid = await addProduct('Žuvies sultinys', { amount: 500, unit: 'ml' });
 }, 60_000);   // ~50 products × (Product + StoreProduct + Price) — well past Jest's 5 s default
 
 afterAll(async () => {
@@ -656,6 +666,45 @@ describe('the right shelf for the form the recipe asked for', () => {
 });
 
 /**
+ * STOCK IS BOUGHT AS CUBES. "250 ml vištienos sultinio" silently bought a
+ * 750 ml carton of ready-made liquid — an exact-name 1.00 that beat every cube
+ * product wearing a brand — when the Lithuanian purchase is "sultinio
+ * kubeliai" made up with water (the dev stock shelf runs ~20 cube products per
+ * species against a handful of liquids). The names cannot separate the forms
+ * (most cubes are ALSO named bare "X sultinys <BRAND>"); the recorded pack
+ * dimension can, and does. The broth entries also carry no gramsPerMl any
+ * more: the millilitres a recipe measures are water, and converting them to
+ * purchase mass divided 250 "grams" into multiple cube packs.
+ */
+describe('stock is bought as cubes, not ready-made liquid', () => {
+    it('buys a dry cube pack for a stock line, never the liquid carton', async () => {
+        const m = await match('250 ml grybų sultinio');
+        expect(m.key).toBe('broth_mushroom');
+        expect(m.product?.productId).toBe(ids.mushStockCubes);
+        expect(m.product?.productId).not.toBe(ids.liquidMushStock);
+        // One pack, whatever volume the recipe dissolves it into — the
+        // mass-vs-volume dimension check refuses to divide water by cubes.
+        expect(m.shopQuantity).toBe(1);
+        expect(m.shopUnit).toBe('vnt');
+    });
+
+    it('still sells the liquid when it is all the catalog stocks', async () => {
+        // Fish stock: no cube on offer, so the demotion never fires and the
+        // rule stays "prefer cubes", never "refuse liquid".
+        const m = await match('200 ml žuvies sultinio');
+        expect(m.product?.productId).toBe(ids.fishStockLiquid);
+        expect(m.shopQuantity).toBe(1);
+        expect(m.shopUnit).toBe('vnt');
+        expect(m.confident).toBe(true);
+    });
+
+    it('keeps the liquid for a recipe that asks for it by name', async () => {
+        const m = await match('250 ml skysto grybų sultinio');
+        expect(m.product?.productId).toBe(ids.liquidMushStock);
+    });
+});
+
+/**
  * HOW MUCH TO BUY. Each of these shipped a wrong number: a shortfall is the
  * worst of them, because the shopper only finds out at home.
  */
@@ -874,6 +923,25 @@ describe('a counted piece vetoes a ground-spice reading', () => {
     it('keeps "1 tsp paprika" on the spice jar', async () => {
         const m = await match('1 tsp paprika', 'en');
         expect(m.product?.productId).toBe(ids.groundPaprika);
+    });
+
+    /**
+     * The goulash regression: one recipe with BOTH lines. The window scan is
+     * longest-first but leftmost at equal length, so in "saldžiosios paprikos
+     * miltelių" the 2-word 'saldžiosios paprikos' (bell_pepper's own form)
+     * beat 'paprikos miltelių' — and the teaspoon of spice bought 100 g of
+     * the same fresh peppers as the recipe's counted line. The lexicon's
+     * 3-word powder forms win the length race before position can lose it.
+     */
+    it('separates a recipe\'s counted pepper from its paprika powder', async () => {
+        const vegetable = await match('1 vienetas paprikos');
+        expect(vegetable.key).toBe('bell_pepper');
+        expect(vegetable.product?.productId).toBe(ids.sweetPepper);
+
+        const spice = await match('1 šaukštelis saldžiosios paprikos miltelių');
+        expect(spice.key).toBe('paprika_ground');
+        expect(spice.product?.productId).toBe(ids.groundPaprika);
+        expect(spice.product?.productId).not.toBe(vegetable.product?.productId);
     });
 });
 

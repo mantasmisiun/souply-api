@@ -1247,6 +1247,27 @@ const rankPicks = (
      */
     const freshMeatOnOffer = picks.some(p => FRESH_MEAT_FISH.has(p.categoryId));
     const freshProduceOnOffer = picks.some(p => FRESH_PRODUCE_CATEGORY(p.categoryId));
+    /**
+     * STOCK IS A CUBE, NOT A CARTON — the same axis a third time, split by
+     * PACK DIMENSION because nothing else can split it.
+     *
+     * "250 ml vištienos sultinio" silently bought "Vištienos sultinys" — a
+     * 750 ml ready-made LIQUID that scores a perfect 1.00 by being named
+     * exactly like the ingredient. But the stock shelf (249 'Sultiniai ir
+     * sultinių kubeliai') is ~20 cube/powder products per species against a
+     * handful of liquids: in Lithuania stock is bought as "sultinio kubeliai"
+     * and made up with water, and most cube products are ALSO named bare
+     * "Vištienos sultinys <BRAND>" — so neither the name nor the category
+     * separates the two forms. The recorded pack does: grams is a dry cube or
+     * powder, millilitres is ready-made liquid. When a dry-packed candidate is
+     * in the pool, the liquid is the wrong form of the same shelf — demoted,
+     * never excluded, exactly like the fresh/dried axes above. A catalog that
+     * only stocked liquid keeps returning it, and a recipe that ASKS for the
+     * liquid ("skysto sultinio") is left alone.
+     */
+    const wantsCube = info != null && (info.key === 'broth' || info.key.startsWith('broth_'))
+        && !/skyst/i.test(query) && !/skyst/i.test(phrase);
+    const dryBrothOnOffer = wantsCube && picks.some(p => packInBaseUnit(p)?.dim === 'mass');
     const wrongShelf = (p: ProductPick) => {
         if (wantsFresh && DRIED_SPICE_SHELF.has(p.categoryId)) return 1;
         if (wantsDried && p.categoryId === FRESH_HERB_CATEGORY) return 1;
@@ -1261,6 +1282,10 @@ const rankPicks = (
         // asking for and handed the win to an uncategorised pot of fresh basil.
         if (!queryPrepared && !wantsDried && freshProduceOnOffer
             && PROCESSED_PRODUCE_CATEGORY(p.categoryId)) return 1;
+        // A volume pack on a stock query is the ready-made liquid (see
+        // dryBrothOnOffer above). A pack the catalog never recorded is left
+        // alone — absence of evidence is not a form.
+        if (dryBrothOnOffer && packInBaseUnit(p)?.dim === 'volume') return 1;
         return 0;
     };
 
