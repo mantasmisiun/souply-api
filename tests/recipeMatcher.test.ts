@@ -40,6 +40,11 @@ const CURED_BACON_CAT = 127;
  *  both Philadelphia and the savoury RAMBYNO spread live, so the NAME shape
  *  (sūris vs the diminutive sūrelis) is what the query has to get right. */
 const SPREAD_CHEESE_CAT = 52;
+/** The REAL sausage shelves of the substitute axis: 106 'Šviežios dešrelės'
+ *  is the fresh meat sausage, 107 'Augaliniai mėsos pakaitalai' the
+ *  plant-based imitation that silently answered "4 dešrelės" — verified. */
+const FRESH_SAUSAGE_CAT = 106;
+const MEAT_SUBSTITUTE_CAT = 107;
 const q = async (sql: string, params: any[] = []) => (await pool.query(sql, params) as any)[0];
 
 /** A catalog product: a Product, a StoreProduct with a size, and a scraped
@@ -100,6 +105,10 @@ beforeAll(async () => {
              ON DUPLICATE KEY UPDATE name = VALUES(name)`, [CURED_BACON_CAT]);
     await q(`INSERT INTO Category (id, name) VALUES (?, 'Tepamieji sūriai ir varškė')
              ON DUPLICATE KEY UPDATE name = VALUES(name)`, [SPREAD_CHEESE_CAT]);
+    await q(`INSERT INTO Category (id, name) VALUES (?, 'Šviežios dešrelės')
+             ON DUPLICATE KEY UPDATE name = VALUES(name)`, [FRESH_SAUSAGE_CAT]);
+    await q(`INSERT INTO Category (id, name) VALUES (?, 'Augaliniai mėsos pakaitalai')
+             ON DUPLICATE KEY UPDATE name = VALUES(name)`, [MEAT_SUBSTITUTE_CAT]);
     await q(`INSERT INTO StoreChain (id, name) VALUES (?, 'RecipeMatchChain')
              ON DUPLICATE KEY UPDATE name = VALUES(name)`, [CHAIN]);
     await q(`INSERT INTO Store (id, chainId, name, address) VALUES (?,?,'RM Store','X 1')
@@ -284,7 +293,73 @@ beforeAll(async () => {
     ids.liquidMushStock = await addProduct('Grybų sultinys', { amount: 750, unit: 'ml' });
     ids.mushStockCubes = await addProduct('Grybų sultinys GALLINA BLANCA', { amount: 80, unit: 'g' });
     ids.fishStockLiquid = await addProduct('Žuvies sultinys', { amount: 500, unit: 'ml' });
-}, 60_000);   // ~50 products × (Product + StoreProduct + Price) — well past Jest's 5 s default
+
+    // --- THE FALLBACK SELECTION DEFECT (2026-07 judge round): the widened
+    // pool is recalled AND scored with the bare head noun, so a product that
+    // IS nothing but the head wore an exact score for a question nobody asked.
+    // The real shapes: fresh jalapeños bought for allspice berries while
+    // "Kvapieji pipirai SAUDA" sat in the alternatives; dairy butter bought
+    // for crunchy peanut butter while a dozen kremas jars sat one translation
+    // away; a fresh potted IKI DERLIUS thyme bought for "dried thyme".
+    ids.allspiceJar = await addProduct('Kvapieji pipirai TESTSAUDA', {
+        amount: 15, unit: 'g', categoryId: DRIED_SPICE_CAT });
+    ids.jalapeno = await addProduct('Pipirai TESTJALAPENO, 1 kl.', { amount: 1, unit: 'kg', weighable: true });
+    ids.peanutButter = await addProduct('Žemės riešutų kremas TESTNUT', { amount: 340, unit: 'g' });
+    await addTranslation(ids.peanutButter, 'Crunchy peanut butter TESTNUT');
+    // NO synthetic plain "Sviestas …" here on purpose: a bare-noun-led dairy
+    // butter would win the lead tie-break for every seeded "sviesto" test
+    // (ROKIŠKIO is deliberately brand-led). ids.butter IS the dairy trap the
+    // beheaded fallback used to buy.
+    // The all-stranger counter-case: no spice jar prints "džiovinti", so the
+    // whole widened pool are strangers and the best of them must still win.
+    ids.oreganoJar = await addProduct('Raudonėliai TESTSPICE', {
+        amount: 10, unit: 'g', categoryId: DRIED_SPICE_CAT });
+    ids.thymePot = await addProduct('Čiobreliai TESTDERLIUS', { categoryId: 688 });
+    ids.thymeJar = await addProduct('Čiobreliai TESTJAR', { amount: 10, unit: 'g', categoryId: DRIED_SPICE_CAT });
+    // The walk-down twin of the same disease: the recipe NAMED the variant
+    // qualifier, and the bare-noun lead band still handed the win to a plain
+    // branded product 0.17 points below it.
+    ids.plainCurd = await addProduct('Varškė TESTPLAIN, 4 % rieb.', { amount: 400, unit: 'g' });
+    ids.semiFatCurd = await addProduct('Pusriebė varškė TESTFAT, 9 %', { amount: 400, unit: 'g' });
+
+    // --- JUDGED ROUND 7 (four defect classes): the plant-based substitute
+    // that silently answered "4 dešrelės" beside its honest meat rival; the
+    // soft cheeses that used to collapse to cheese_hard; the 9% spirit
+    // vinegar the shelf actually stocks beside the apple trap; the coconut
+    // GĖRIMAS beside the condensed tin; and the salad green whose English
+    // name contains a meat word. (The vegan fixture is deliberately NOT
+    // named 'Žirnių …' — the real product is — so it cannot wander into the
+    // seeded pea tests; the mechanism under test is the CATEGORY, not the
+    // word.)
+    ids.veganSausages = await addProduct('Veganiškos dešrelės TESTVEG', {
+        amount: 200, unit: 'g', categoryId: MEAT_SUBSTITUTE_CAT });
+    ids.meatSausages = await addProduct('Šviežios kiaulienos dešrelės TESTMEAT', {
+        amount: 400, unit: 'g', categoryId: FRESH_SAUSAGE_CAT });
+    ids.ricotta = await addProduct('Rikota TESTRIC, 45 % rieb. s. m.', { amount: 250, unit: 'g' });
+    ids.mascarpone = await addProduct('Maskarponė TESTMASC, 80 % rieb.', { amount: 250, unit: 'g' });
+    ids.spiritVinegar = await addProduct('Spirito actas TESTSPIRIT, 9 %', { amount: 500, unit: 'ml' });
+    ids.appleVinegar = await addProduct('Obuolių actas TESTAPPLE, 6 %', { amount: 500, unit: 'ml' });
+    ids.coconutDrink = await addProduct('Kokosų gėrimas TESTCOCO, rieb. 18 %', { amount: 400, unit: 'ml' });
+    ids.condensedCoconut = await addProduct('Sutirštintas kokosų pienas TESTCOND', { amount: 320, unit: 'ml' });
+    ids.macheGreens = await addProduct('Salotinės sultenės TESTGREEN', { amount: 100, unit: 'g' });
+
+    // --- JUDGED ROUND 8 (six defect classes): the ground NUTMEG that answered
+    // "maltų riešutų" beside honest nuts (the homonym rule); the jam-sugar
+    // purpose variant that beat every plain brown bag four rounds running; the
+    // cheddar BLOCK that answered "cheddar cheese soup"; the salad mix that
+    // was lexicon-keyed to shallot; and the branded Sprite/Coca-Cola pair the
+    // typographic quotes used to hide from the search.
+    ids.nutmegJar = await addProduct('Malti muskato riešutai TESTSAUDA', {
+        amount: 28, unit: 'g', categoryId: DRIED_SPICE_CAT });
+    ids.walnuts = await addProduct('Gliaudyti graikiniai riešutai TESTLINE', { amount: 150, unit: 'g' });
+    ids.jamSugar = await addProduct('Rudasis cukrus uogienėms TESTALVO', { amount: 500, unit: 'g' });
+    ids.brownSugar = await addProduct('Smulkus rudasis cukrus TESTBAG', { amount: 500, unit: 'g' });
+    ids.saladMix = await addProduct('Salotų mišinys TESTLEAF', { amount: 100, unit: 'g' });
+    ids.cheddarBlock = await addProduct('Čederio sūris TESTBILLA', { amount: 200, unit: 'g' });
+    await addTranslation(ids.cheddarBlock, 'Cheddar cheese TESTBILLA');
+    ids.sprite = await addProduct('Gaivusis gėrimas SPRITE TESTDRINK', { amount: 1500, unit: 'ml' });
+    ids.cola = await addProduct('Gaivusis gėrimas COCA-COLA TESTDRINK', { amount: 1500, unit: 'ml' });
+}, 60_000);   // ~80 products × (Product + StoreProduct + Price) — well past Jest's 5 s default
 
 afterAll(async () => {
     const productIds = Object.values(ids);
@@ -302,7 +377,8 @@ afterAll(async () => {
     await q(`DELETE FROM Category WHERE id = ?`, [SEED_CAT]);
     await q(`DELETE FROM Category WHERE id IN (?)`,
         [[FRESH_HERB_CAT, DRIED_SPICE_CAT, FRESH_TOMATO_CAT, FROZEN_BERRY_CAT, DRIED_BERRY_CAT,
-            FRESH_PORK_CAT, CURED_BACON_CAT, SPREAD_CHEESE_CAT]]);
+            FRESH_PORK_CAT, CURED_BACON_CAT, SPREAD_CHEESE_CAT,
+            FRESH_SAUSAGE_CAT, MEAT_SUBSTITUTE_CAT]]);
     await (pool as any).end();
 }, 60_000);
 
@@ -1187,6 +1263,86 @@ describe('the English null-query fallback', () => {
 });
 
 /**
+ * THE FALLBACK SELECTION DEFECT: the head-noun fallback recalls AND scores
+ * its pool with the bare head, so a product that IS nothing but the head
+ * carries an exact-token score for a question nobody asked — 0.97 of
+ * pipirai-ness bought fresh jalapeños for allspice berries while the right
+ * jar sat in the alternatives at 0.78. A fallback or walk-down must never
+ * replace a candidate that still carries what the recipe asked for: inside a
+ * widened pool, a candidate that lost the original query's identity words is
+ * a STRANGER — penalised past the dishonest score gap, tie-broken below any
+ * carrier, and stamped with a demerit the review screen can explain.
+ */
+describe('the fallback must not outvote the identity it dropped', () => {
+    /** "Kvapnieji pipirai" recalls nothing (the shelf spells it "Kvapieji"),
+     *  the fallback widens to "pipirai" — and the widened pool must still
+     *  put the allspice jar above the fresh chilli that merely IS pipirai. */
+    it('buys the allspice jar, not jalapeños, for allspice berries', async () => {
+        const m = await match('1 šaukštelis kvapniųjų pipirų žirnelių');
+        expect(m.product?.name).toMatch(/kvapieji pipirai/i);
+        const offered = [m.product, ...m.alternatives].filter(Boolean) as { productId: number; demerits: number }[];
+        // The jalapeño may stay VISIBLE, but only wearing its stranger demerit.
+        for (const p of offered) {
+            if (p.productId === ids.jalapeno) expect(p.demerits).toBeGreaterThan(0);
+        }
+    });
+
+    /**
+     * The lexicon says "Žemės riešutų sviestas", every Lithuanian shop prints
+     * "kremas / pasta" — zero recall, and the beheaded fallback query
+     * "sviestas" bought DAIRY butter. An English recipe now retries its own
+     * phrase through the translation arm first, and the pick is review-only
+     * (machine translations vouch for it, not a vetted shopping name).
+     */
+    it('buys peanut butter, not dairy butter, for crunchy peanut butter', async () => {
+        const m = await match('2 tbsp crunchy peanut butter', 'en');
+        expect(m.product?.name).toMatch(/riešut/i);
+        expect(m.product?.productId).not.toBe(ids.butter);
+        expect(m.confident).toBe(false);
+        expect(m.reviewReason).toBe('soft_score');
+    });
+
+    /**
+     * "Dried thyme" falls back to the bare "čiobreliai", where the fresh
+     * potted line (filed in 688 — no category says "potted") outscored the
+     * dried-shelf jar. When the recipe asked for dried and the dried-spice
+     * shelf HAS an offer, an uncategorised twin whose name does not claim
+     * dried-ness itself is the doubtful one — same shape as the stock-cube
+     * rule: the demotion exists only while the certain form is available.
+     */
+    it('buys the dried-shelf jar, not an uncategorised pot, for dried thyme', async () => {
+        const m = await match('1 tsp dried thyme', 'en');
+        expect(m.product?.name).toMatch(/čiobrel/i);
+        expect(m.product?.categoryId).toBe(DRIED_SPICE_CAT);
+        expect(m.product?.productId).not.toBe(ids.thymePot);
+    });
+
+    /**
+     * The walk-down twin: the recipe NAMED the variant qualifier ("pusriebės
+     * varškės"), and the bare-noun lead band still handed the win to a plain
+     * branded curd 0.17 below it — the lead rule only knew the canonical
+     * "Varškė". A leading qualifier the recipe itself asked for is not a
+     * variant trap, so the semi-fat curd now keeps its honest 0.95.
+     */
+    it('lets the recipe\'s own qualifier win the bare-noun lead band', async () => {
+        const m = await match('200 g pusriebės varškės');
+        expect(m.product?.name).toMatch(/pusrieb/i);
+        expect(m.product?.confidence ?? 0).toBeGreaterThanOrEqual(0.9);
+    });
+
+    /** The counter-case that bounds the stranger rule: when the WHOLE widened
+     *  pool is strangers ("Džiovinti raudonėliai" — no spice jar prints
+     *  "džiovinti"), they all move together and the best of them still wins,
+     *  flagged for the qualifier the fallback dropped. */
+    it('still lets an all-stranger fallback pool answer dried oregano', async () => {
+        const m = await match('1 šaukštelis džiovintų raudonėlių');
+        expect(m.product?.productId).toBe(ids.oreganoJar);
+        expect(m.confident).toBe(false);
+        expect(m.reviewReason).toBe('generic_fallback');
+    });
+});
+
+/**
  * THE DRINKS AISLE, which was the least-covered category: every spirit below
  * produced NO query at all (`lexiconKey: null`) while the catalog stocked it —
  * the 'Likeris' category alone holds ~70 bottles. Coverage is asserted at the
@@ -1231,5 +1387,158 @@ describe('the drinks lexicon reaches the shelf', () => {
             const hit = findIngredient(phrase, 'en');
             expect(hit?.info.notSold).toBe(true);
         }
+    });
+});
+
+/**
+ * JUDGED ROUND 7 — four defect classes from real recipe imports, each a
+ * silent wrong purchase first:
+ *   A. "lamb's lettuce" queried 'Aviena' (the 'lamb' window claimed a compound);
+ *   B. baking parchment was matched and reached the basket;
+ *   C. ricotta/mascarpone carried lexiconKey cheese_hard and bought Rokiškio;
+ *   D. 'Žirnių dešrelės' (cat 107, plant-based) silently answered "4 dešrelės"
+ *      and "breakfast sausage" at 0.97 — twice, in separate judged slices;
+ *   E. 'Actas 9%' bought apple 6% instead of spirit 9%; 'coconut milk' bought
+ *      the sweetened condensed tin instead of the Kokosų gėrimas shelf.
+ */
+describe('judged round 7: compounds, equipment, soft cheeses, substitutes, shelves', () => {
+    it("buys a salad green for lamb's lettuce, never meat", async () => {
+        const m = await match("100 g lamb's lettuce", 'en');
+        expect(m.query).toBe('Sultenės');
+        expect(m.product?.productId).toBe(ids.macheGreens);
+    });
+
+    it('never shops for baking parchment', async () => {
+        const m = await match('1 lapas kepimo popieriaus');
+        expect(m.ingredient.ignored).toBe(true);
+        expect(m.product).toBeNull();
+    });
+
+    it('buys ricotta for ricotta cheese, not aged hard cheese', async () => {
+        const m = await match('250 g ricotta cheese', 'en');
+        expect(m.key).toBe('ricotta');
+        expect(m.product?.productId).toBe(ids.ricotta);
+    });
+
+    it('buys mascarpone for mascarpone cheese', async () => {
+        const m = await match('250 g mascarpone cheese', 'en');
+        expect(m.key).toBe('mascarpone');
+        expect(m.product?.productId).toBe(ids.mascarpone);
+    });
+
+    /** The substitute axis: a meat recipe with a real meat candidate on offer
+     *  must not receive the imitation — demoted AND never silent. */
+    it('buys a meat sausage, not the plant-based substitute, for plain dešrelės', async () => {
+        const m = await match('4 dešrelės');
+        expect(m.product?.productId).toBe(ids.meatSausages);
+    });
+
+    it('buys a meat sausage for breakfast sausage', async () => {
+        const m = await match('1 lb breakfast sausage', 'en');
+        expect(m.product?.productId).toBe(ids.meatSausages);
+    });
+
+    /** A demotion, never an exclusion: asked for by name, the substitute is
+     *  still findable. */
+    it('still offers the plant-based product when the recipe asks for it', async () => {
+        const m = await match('200 g vegan sausages', 'en');
+        const all = [m.product, ...m.alternatives].filter(Boolean).map(p => p!.productId);
+        expect(all).toContain(ids.veganSausages);
+    });
+
+    it('buys 9% spirit vinegar, not apple cider, for bare acto', async () => {
+        const m = await match('300 ml acto 9%');
+        expect(m.query).toBe('Spirito actas');
+        expect(m.product?.productId).toBe(ids.spiritVinegar);
+        expect(m.product?.productId).not.toBe(ids.appleVinegar);
+    });
+
+    it('buys the kokosų gėrimas shelf product for coconut milk, never the condensed tin', async () => {
+        const m = await match('400 ml coconut milk', 'en');
+        expect(m.query).toBe('Kokosų gėrimas');
+        expect(m.product?.productId).toBe(ids.coconutDrink);
+        expect(m.product?.productId).not.toBe(ids.condensedCoconut);
+    });
+});
+
+/**
+ * JUDGED ROUND 8 — six defect classes from judged real imports, all silent
+ * unless stated. The fixtures above are the exact real shapes: "Malti muskato
+ * riešutai SAUDA" (28 g jars — "200 g maltų riešutų" bought SIX of them),
+ * "Rudasis cukrus uogienėms ALVO" (preserving sugar, four rounds running),
+ * "Čederio sūris BILLA" (a 200 g block bought for a SOUP), the salad mix that
+ * was lexicon-keyed to shallot, and the SPRITE the „quotes“ hid from search.
+ */
+describe('judged round 8: dish heads, homonyms, purpose variants, named brands', () => {
+    /** A. "cream of X" / "X soup" is a DISH — when no such soup is stocked,
+     *  nothing is the right answer, never the modifier: cream for "cream of
+     *  chicken", a cheese block for "cheddar cheese soup". */
+    it('refuses to buy the modifier for a dish name', async () => {
+        const cream = await match('1 can cream of chicken', 'en');
+        expect(cream.key).toBeNull();
+        expect(cream.product).toBeNull();
+        const soup = await match('1 can cheddar cheese soup', 'en');
+        expect(soup.key).toBeNull();
+        expect(soup.product).toBeNull();
+    });
+
+    /** The dish guard must not eat the plain compound: cheese asked for AS
+     *  cheese still buys the block. */
+    it('still buys the cheddar block when the recipe asks for cheese', async () => {
+        const m = await match('250 g cheddar cheese', 'en');
+        expect(m.product?.productId).toBe(ids.cheddarBlock);
+    });
+
+    /** B. 'muskato riešutas' (nutmeg) literally contains 'riešutas' (nut) —
+     *  the homonym rule reads the candidate through the lexicon and demotes a
+     *  name whose every reading is a different ingredient. */
+    it('buys nuts, not ground nutmeg, for maltų riešutų', async () => {
+        const m = await match('200 g maltų riešutų');
+        expect(m.product?.productId).toBe(ids.walnuts);
+        expect(m.product?.productId).not.toBe(ids.nutmegJar);
+    });
+
+    it('nutmeg still wins when the recipe says muskato', async () => {
+        const m = await match('1 šaukštelis maltų muskato riešutų');
+        expect(m.product?.productId).toBe(ids.nutmegJar);
+    });
+
+    /** C. "uogienėms" is a purpose the recipe never asked for — the gelling
+     *  jam sugar opens with the exact canonical name and outscored every
+     *  branded plain bag until `purposed` started charging for it. */
+    it('buys plain brown sugar, not the jam-sugar variant', async () => {
+        const m = await match('200 g rudojo cukraus');
+        expect(m.product?.productId).toBe(ids.brownSugar);
+        expect(m.product?.productId).not.toBe(ids.jamSugar);
+    });
+
+    it('the jam sugar is still findable when the recipe asks for it', async () => {
+        const m = await match('1 kg cukraus uogienėms');
+        expect(m.product?.productId).toBe(ids.jamSugar);
+    });
+
+    /** D. "salotų mišinys" was lexicon-keyed to SHALLOT (folded 'šalot-' ≡
+     *  'salot-') and bought Valgomieji svogūnėliai at 1.00, twice. */
+    it('salotų mišinys buys a salad mix, never shallots', async () => {
+        const m = await match('100 g salotų mišinio');
+        expect(m.key).toBe('salad_mix');
+        expect(m.product?.productId).toBe(ids.saladMix);
+    });
+
+    /** F. An explicitly named brand is never swapped for a competitor — the
+     *  „quotes“ used to hide 'Sprite' from the SQL search, and the head-noun
+     *  fallback then widened onto the bare form noun 'gėrimas'. */
+    it('a named brand is never swapped for a competitor', async () => {
+        const m = await match('„Sprite" gėrimas');
+        expect(m.product?.productId).toBe(ids.sprite);
+    });
+
+    /** F. Ice is tap water in another shape — 'ledo gabaliukai' joins ledukai
+     *  and ledo kubeliai in NEVER_BOUGHT instead of falling through to the
+     *  'led-' stem, which means ICE CREAM. */
+    it('ignores ledo gabaliukai instead of buying ice cream', async () => {
+        const m = await match('Ledo gabaliukai');
+        expect(m.ingredient.ignored).toBe(true);
+        expect(m.product).toBeNull();
     });
 });

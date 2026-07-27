@@ -13,6 +13,7 @@ import {
     INGREDIENT_INDEX,
     ingredientByKey,
 } from '../src/services/recipes/ingredientData.js';
+import { findIngredient } from '../src/services/recipes/measure.js';
 import type { IngredientInfo } from '../src/services/recipes/types.js';
 
 const CORPUS_DIR =
@@ -195,6 +196,29 @@ describe('shopping names match the shelf, not the recipe (catalog-verified synon
         expect(INGREDIENT_INDEX.get('crème fraîche')?.key).toBe('sour_cream');
         expect(INGREDIENT_INDEX.get('creme fraiche')?.key).toBe('sour_cream');
     });
+
+    /** JUDGED: 'Actas 9%' bought 'Obuolių actas 6%' — the shelf's plain table
+     *  vinegar IS spirit vinegar ('Spirito actas 9 % BAJORIŠKIŲ' 24375,
+     *  'Spirito actas WELL DONE, 9 proc.' 3544) and nothing is named bare
+     *  'Actas', so the old ltName could only ever fall back into apple. */
+    it('table vinegar shops as spirito actas — the only plain vinegar the shelf prints', () => {
+        expect(ltNameOf('vinegar_table')).toBe('Spirito actas');
+        expect(INGREDIENT_INDEX.get('acto')?.key).toBe('vinegar_table');
+        expect(INGREDIENT_INDEX.get('spirito acto')?.key).toBe('vinegar_table');
+        // The specific vinegars keep their own entries.
+        expect(ltNameOf('vinegar_apple')).toBe('Obuolių actas');
+        expect(INGREDIENT_INDEX.get('obuolių acto')?.key).toBe('vinegar_apple');
+    });
+
+    /** JUDGED: 'coconut milk' bought 'Sutirštintas kokosų pienas' (sweetened
+     *  CONDENSED). The cooking product is shelved as 'Kokosų gėrimas' (SANTA
+     *  MARIA 18 % 3927, EXTRA LINE 3934, AJI 3961 — cat 260), so the shopping
+     *  name is the gėrimas form while recipes keep resolving via 'pienas'. */
+    it('coconut milk shops as kokosų gėrimas — the shelf name, not the condensed tin', () => {
+        expect(ltNameOf('coconut_milk')).toBe('Kokosų gėrimas');
+        expect(INGREDIENT_INDEX.get('kokosų pieno')?.key).toBe('coconut_milk');
+        expect(INGREDIENT_INDEX.get('kokosų gėrimo')?.key).toBe('coconut_milk');
+    });
 });
 
 describe('compound names resolve to their OWN entry, not the head token', () => {
@@ -268,6 +292,48 @@ describe('compound names resolve to their OWN entry, not the head token', () => 
         expect(INGREDIENT_INDEX.get('baltymų')).toBeUndefined();
         expect(keyOf('kiaušinių baltymai')).toBe('egg_white');
         expect(keyOf('baltymų milteliai')).toBe('protein_powder');
+    });
+
+    /** JUDGED: a meat word EMBEDDED in a compound must not claim it.
+     *  "lamb's lettuce" is mâche — the 'lamb' window built the query 'Aviena'
+     *  and a salad bought MEAT; "beef tomato" is a tomato, same shape. */
+    it("lamb's lettuce is a salad green (sultenės), never lamb", () => {
+        expect(keyOf("lamb's lettuce")).toBe('lambs_lettuce');
+        expect(keyOf('lambs lettuce')).toBe('lambs_lettuce');
+        expect(keyOf('corn salad')).toBe('lambs_lettuce');
+        expect(keyOf('mâche')).toBe('lambs_lettuce');
+        expect(ingredientByKey('lambs_lettuce')?.ltName).toBe('Sultenės');
+        expect(keyOf('sultenių')).toBe('lambs_lettuce');
+        // the meat keeps its own bare word
+        expect(keyOf('lamb')).toBe('lamb');
+    });
+
+    it('beef tomatoes are tomatoes, not beef', () => {
+        expect(keyOf('beef tomato')).toBe('tomato');
+        expect(keyOf('beefsteak tomatoes')).toBe('tomato');
+        expect(keyOf('beef')).toBe('beef');
+    });
+
+    /** JUDGED: 'ricotta cheese' and 'mascarpone cheese' both carried
+     *  lexiconKey cheese_hard and silently bought aged Rokiškio while cat 55
+     *  'Maskarponės ir rikotos sūriai' sat unreached. Every soft cheese the
+     *  catalog stocks owns its compound; the bare word stays cheese_hard. */
+    it('soft cheeses own their compounds instead of collapsing to cheese_hard', () => {
+        expect(keyOf('ricotta cheese')).toBe('ricotta');
+        expect(keyOf('mascarpone cheese')).toBe('mascarpone');
+        expect(ingredientByKey('ricotta')?.ltName).toBe('Rikota');
+        expect(ingredientByKey('mascarpone')?.ltName).toBe('Maskarponė');
+        // the rest of the soft shelf, checked in the same sweep
+        expect(keyOf('brie cheese')).toBe('brie');
+        expect(keyOf('camembert cheese')).toBe('camembert');
+        expect(keyOf('blue cheese')).toBe('cheese_blue');
+        expect(keyOf('goat cheese')).toBe('cheese_goat');
+        // the ones that were already right stay right
+        expect(keyOf('feta cheese')).toBe('feta');
+        expect(keyOf('halloumi cheese')).toBe('halloumi');
+        expect(keyOf('cottage cheese')).toBe('curd');
+        expect(keyOf('cream cheese')).toBe('cream_cheese');
+        expect(keyOf('cheese')).toBe('cheese_hard');
     });
 });
 
@@ -513,5 +579,44 @@ describe('corpus coverage', () => {
         }
         // Achieved at time of writing: 100%.
         expect(ratio).toBeGreaterThanOrEqual(0.75);
+    });
+});
+
+/**
+ * JUDGED ROUND 8 — "salotų mišinys" (a bag of salad leaves, stocked in
+ * quantity) was lexicon-keyed to SHALLOT at confidence 1.00, in two separate
+ * judged rounds. The lookup folds diacritics, so 'šalotų' ≡ 'salotų' and the
+ * stem 'salot' collided the same way — the shallot entry registered first and
+ * stole every salad phrasing. The bare 'šalot-' forms are gone from the
+ * shallot entry (a LT shallot recipe says 'svogūnai šalotai' or 'šalotiniai
+ * svogūnai'), and the mix owns its own two-word entry.
+ */
+describe('judged round 8: salad phrasings never key to shallot', () => {
+    // findIngredient, not the raw index: the collision lives in the FOLDED
+    // and stemmed lookup, which only the window scan exercises.
+    const lexKey = (phrase: string) => findIngredient(phrase)?.info.key;
+
+    it('salotų mišinys is its own entry', () => {
+        expect(lexKey('salotų mišinys')).toBe('salad_mix');
+        expect(lexKey('salotų mišinio')).toBe('salad_mix');
+        expect(ingredientByKey('salad_mix')?.ltName).toBe('Salotų mišinys');
+        expect(lexKey('salad mix')).toBe('salad_mix');
+        expect(lexKey('mixed salad leaves')).toBe('salad_mix');
+    });
+
+    it('bare salad words resolve to lettuce, never shallot', () => {
+        expect(lexKey('salotos')).toBe('lettuce');
+        expect(lexKey('salotų')).toBe('lettuce');
+        expect(lexKey('žaliųjų salotų')).toBe('lettuce');
+        expect(lexKey('salotų lapai')).toBe('lettuce');
+        expect(lexKey('salad greens')).toBe('greens');
+    });
+
+    it('shallots stay reachable through unambiguous forms', () => {
+        expect(lexKey('askaloniniai česnakai')).toBe('shallot');
+        expect(lexKey('svogūnai šalotai')).toBe('shallot');
+        expect(lexKey('šalotiniai svogūnai')).toBe('shallot');
+        expect(lexKey('shallots')).toBe('shallot');
+        expect(lexKey('2 shallots')).toBe('shallot');
     });
 });

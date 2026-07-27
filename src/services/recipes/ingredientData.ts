@@ -221,6 +221,85 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
         pantry: false,
     },
     {
+        key: 'ricotta',
+        // A JUDGED silent error: 'ricotta cheese' had no entry, so the bare
+        // 'cheese' window claimed it (lexiconKey cheese_hard) and bought aged
+        // 'Fermentinis ROKIŠKIO sūris' at 0.97 — silently. The catalog has a
+        // dedicated shelf, cat 55 'Maskarponės ir rikotos sūriai': 'Rikota
+        // GRANAROLO, 45 % rieb. s. m.' (917), 'Sūris Rikota DELI Q' (57479,
+        // filed in 688) — both verified 2026-07-27.
+        ltName: 'Rikota',
+        enName: 'ricotta',
+        lt: ['rikota', 'rikotos', 'rikotos sūris', 'rikotos sūrio'],
+        en: ['ricotta', 'ricotta cheese'],
+        gramsPerMl: 1.0, // moist fresh curd, near water-dense
+        pantry: false,
+    },
+    {
+        key: 'mascarpone',
+        // Same judged defect, same shelf: 'Maskarponė GRANAROLO, 86 % rieb.'
+        // (918) and 'Maskarponės sūris WELL DONE, 80 %' (916), cat 55 —
+        // verified. Without the entry a tiramisu bought hard Rokiškio.
+        ltName: 'Maskarponė',
+        enName: 'mascarpone',
+        lt: ['maskarponė', 'maskarponės', 'maskarponės sūris', 'maskarponės sūrio'],
+        en: ['mascarpone', 'mascarpone cheese'],
+        gramsPerMl: 1.05, // dense cream cheese
+        pantry: false,
+    },
+    // The same collapse checked across the OTHER soft cheeses (2026-07-27):
+    // feta, halloumi, cottage cheese (→ varškė) and cream cheese already have
+    // their own entries; brie, camembert, blue and goat cheese did NOT — each
+    // "<x> cheese" phrase fell through to the bare 'cheese' window and bought
+    // Rokiškio hard cheese. All four are stocked (cats 59/60), so each gets
+    // its own entry with the shelf's own head noun.
+    {
+        key: 'brie',
+        // Cat 59: 'Sūris BRIE ILE DE FRANCE (riekelės)' (1007), 'Pelėsinis
+        // bri sūris PRESIDENT' (1006), 'Bri sūris.' (989) — the shelf spells
+        // both 'BRIE' and 'bri', and isCovered's prefix rule bridges them.
+        ltName: 'Brie sūris',
+        enName: 'brie',
+        lt: ['brie sūris', 'brie sūrio', 'bri sūris', 'bri sūrio'],
+        en: ['brie', 'brie cheese'],
+        pantry: false,
+    },
+    {
+        key: 'camembert',
+        // Cat 59: 'Kamamberas PRESIDENT, 60 %' (988), 'Kamamberas, 58 %'
+        // (997), 'Kamambero sūris WELL DONE PREMIUM' (1008) — verified.
+        ltName: 'Kamamberas',
+        enName: 'camembert',
+        lt: ['kamamberas', 'kamambero', 'kamambero sūris', 'kamambero sūrio'],
+        en: ['camembert', 'camembert cheese'],
+        pantry: false,
+    },
+    {
+        key: 'cheese_blue',
+        // Cat 59: 'Mėlynasis pelėsinis sūris, ne mažiau kaip 50 %' (990),
+        // 'Pelėsinis sūris MEMEL BLUE' (992), 'Pelėsinis sūris GORGONZOLA
+        // PDO' (998). The shelf head is 'Pelėsinis sūris'; 'blue' is NOT in
+        // EN_IDENTITY_QUALIFIERS, so without this entry 'blue cheese' bought
+        // Rokiškio with no flag at all.
+        ltName: 'Pelėsinis sūris',
+        enName: 'blue cheese',
+        lt: ['pelėsinis sūris', 'pelėsinio sūrio', 'mėlynasis pelėsinis sūris', 'mėlynojo pelėsio sūris', 'mėlynojo pelėsio sūrio'],
+        en: ['blue cheese', 'gorgonzola', 'gorgonzola cheese', 'stilton', 'roquefort'],
+        gramsPerMl: 0.55, // crumbled
+        pantry: false,
+    },
+    {
+        key: 'cheese_goat',
+        // Cat 60: 'Ožkų sūris WELL DONE PREMIUM pjaustytas' (1031), 'Ožkų
+        // pieno sūris CHAVROUX' (1028), 'Olandiškas ožkų pieno sūris' (1032).
+        ltName: 'Ožkų sūris',
+        enName: 'goat cheese',
+        lt: ['ožkų sūris', 'ožkų sūrio', 'ožkų pieno sūris', 'ožkų pieno sūrio', 'ožkos sūris', 'ožkos sūrio'],
+        en: ['goat cheese', "goat's cheese", 'goats cheese', 'chevre', 'chèvre'],
+        gramsPerMl: 0.6, // crumbled
+        pantry: false,
+    },
+    {
         key: 'cream_cheese',
         // 'Tepamasis sūris' is the Philadelphia shelf's own head ("Tepamasis
         // sūris PHILADELPHIA ORIGINAL", ids 832/837 + 10 more variants,
@@ -2415,9 +2494,16 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
     },
     {
         key: 'vinegar_table',
-        ltName: 'Actas',
+        // The LT shelf's plain table vinegar IS spirit vinegar, and no product
+        // is named bare 'Actas' (verified, cat 191): the old ltName 'Actas'
+        // found nothing it fully covered, the head-noun fallback widened to
+        // 'actas', and 'Actas 9%' silently bought 'Obuolių actas, 6%' — wrong
+        // type AND strength, flagged by two judges independently. The shelf
+        // says 'Spirito actas 9 % BAJORIŠKIŲ' (24375) and 'Spirito actas
+        // WELL DONE, 9 proc.' (3544), both verified.
+        ltName: 'Spirito actas',
         enName: 'vinegar',
-        lt: ['actas', 'acto', 'stalo actas', 'stalo acto'],
+        lt: ['actas', 'acto', 'stalo actas', 'stalo acto', 'spirito actas', 'spirito acto'],
         en: ['vinegar', 'white vinegar', 'distilled vinegar', 'spirit vinegar'],
         gramsPerMl: 1.01,
         pantry: true,
@@ -2549,9 +2635,19 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
         // garlic and duly found "Česnakai", a different plant. The shelf calls
         // them "Valgomieji svogūnėliai" (71, verified); the old spelling stays
         // as a recognised INPUT form, it just stops being what we search for.
+        //
+        // The bare 'šalot-' forms are GONE, and cannot come back: the lookup
+        // folds diacritics, so 'šalotų' and 'salotų' (SALAD, genitive) are the
+        // same string, and the stem 'salot' collided the same way — this entry
+        // registered first and stole every salad phrasing. Two judged rounds
+        // bought "Valgomieji svogūnėliai" at 1.00 for "salotų mišinys". A LT
+        // recipe that means shallots says so with a second word ('svogūnai
+        // šalotai', 'šalotiniai svogūnai' — the forms below), which folds to
+        // nothing any salad phrase can collide with.
         ltName: 'Valgomieji svogūnėliai',
         enName: 'shallots',
-        lt: ['askaloniniai česnakai', 'askaloninių česnakų', 'šalotai', 'šalotų', 'šalotas'],
+        lt: ['askaloniniai česnakai', 'askaloninių česnakų',
+            'svogūnai šalotai', 'svogūnų šalotų', 'šalotiniai svogūnai', 'šalotinių svogūnų'],
         en: ['shallot', 'shallots', 'eschalot'],
         gramsPerPiece: 30,
         pantry: false,
@@ -2632,7 +2728,11 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
         ltName: 'Pomidorai',
         enName: 'tomatoes',
         lt: ['pomidoras', 'pomidoro', 'pomidorai', 'pomidorų'],
-        en: ['tomato', 'tomatoes'],
+        // 'beef tomato' is a TOMATO — a compound with a meat word embedded,
+        // the same shape as "lamb's lettuce". Without the multi-word forms
+        // the 1-word 'beef' window claimed it and the query became meat.
+        en: ['tomato', 'tomatoes', 'beef tomato', 'beef tomatoes',
+            'beefsteak tomato', 'beefsteak tomatoes'],
         gramsPerPiece: 120, // medium tomato
         pantry: false,
         weighable: true,
@@ -2823,6 +2923,37 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
         lt: ['salotos', 'salotų', 'salotų lapai', 'salotų lapų'],
         en: ['lettuce', 'salad leaves', 'iceberg lettuce'],
         gramsPerPiece: 300, // one head
+        pantry: false,
+    },
+    {
+        key: 'salad_mix',
+        // Its own entry, NOT a lettuce alias: "salotų mišinys" was lexicon-keyed
+        // to SHALLOT in two separate judged rounds (the folded 'salot' stem —
+        // see the shallot entry) and bought "Valgomieji svogūnėliai" at 1.00
+        // for a bag of salad leaves. The shelf phrase is exactly this — "Salotų
+        // mišinys ROYAL WELL DONE" and ten siblings in cat 7 (verified) — and
+        // the two-word form outranks any one-word window before the stem can
+        // misfire again.
+        ltName: 'Salotų mišinys',
+        enName: 'salad mix',
+        lt: ['salotų mišinys', 'salotų mišinio', 'salotų mišiniai', 'salotų mišinių'],
+        en: ['salad mix', 'mixed salad', 'salad blend', 'bagged salad', 'spring mix', 'mixed salad leaves'],
+        pantry: false,
+    },
+    {
+        key: 'lambs_lettuce',
+        // "lamb's lettuce" is mâche / corn salad — a SALAD GREEN. A judged
+        // silent error: the 1-word 'lamb' window claimed the compound and the
+        // query became 'Aviena' — MEAT for a salad. The LT shelf word is
+        // 'sultenės': 'Salotinės sultenės WELL DONE' (78), 'Salotinė sultenė
+        // IKI' (46325), 'Sultenė indeliuose PRIMAVEGA' (21279) — verified;
+        // the multi-word EN forms give the compound its own owner, so the
+        // meat window can never see it.
+        ltName: 'Sultenės',
+        enName: "lamb's lettuce",
+        lt: ['sultenė', 'sultenės', 'sultenių', 'salotinės sultenės', 'salotinių sultenių'],
+        en: ["lamb's lettuce", 'lambs lettuce', 'lamb lettuce', 'corn salad',
+            'mâche', 'mache', 'field salad'],
         pantry: false,
     },
     {
@@ -3453,9 +3584,17 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
     },
     {
         key: 'coconut_milk',
-        ltName: 'Kokosų pienas',
+        // The catalog shelves cooking coconut milk as 'Kokosų GĖRIMAS' — cat
+        // 260 'Azijos virtuvė': SANTA MARIA 18 % (3927), EXTRA LINE (3934),
+        // AJI (3961), all verified. Searching 'Kokosų pienas' only reached
+        // 'Sutirštintas kokosų pienas' — sweetened CONDENSED milk, which a
+        // curry recipe silently bought. The recipe-side 'kokosų pienas' forms
+        // stay: that is what recipes SAY; the gėrimas name is what the shelf
+        // PRINTS, so it is the shopping name.
+        ltName: 'Kokosų gėrimas',
         enName: 'coconut milk',
-        lt: ['kokosų pienas', 'kokosų pieno', 'kokoso pienas', 'kokoso pieno'],
+        lt: ['kokosų pienas', 'kokosų pieno', 'kokoso pienas', 'kokoso pieno',
+            'kokosų gėrimas', 'kokosų gėrimo'],
         en: ['coconut milk', 'coconut cream'],
         gramsPerMl: 0.97,
         pantry: false,

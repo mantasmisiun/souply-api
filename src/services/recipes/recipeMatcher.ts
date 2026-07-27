@@ -8,7 +8,9 @@ import {
 import { levenshtein } from '../../utils/addressMatcher.js';
 import { type MatchCandidate, findBestProductMatches } from '../../utils/productMatcher.js';
 import { INGREDIENTS, INGREDIENT_INDEX, ingredientByKey } from './ingredientData.js';
-import { type IngredientHit, contentWords, findIngredient, fold, formatMeasure, toMetric } from './measure.js';
+import {
+    type IngredientHit, contentWords, findIngredient, findIngredientHits, fold, formatMeasure, toMetric,
+} from './measure.js';
 import type { IngredientInfo, Lang, Measure, ParsedIngredient } from './types.js';
 
 /**
@@ -411,7 +413,23 @@ export const matchIngredient = async (
 ): Promise<MatchedIngredient> => {
     // Look up the FULLER phrase first: "crushed tomatoes" is a different product
     // from "tomatoes", and the prep-stripped display name no longer says so.
-    const hit = findIngredient(ing.nameFull || ing.name, lang) ?? findIngredient(ing.name, lang);
+    let hit = findIngredient(ing.nameFull || ing.name, lang) ?? findIngredient(ing.name, lang);
+    /**
+     * A DISH NAME IS NOT ITS MODIFIER. English soup names put the flavour in
+     * front and the dish word last — and the lexicon window, which knows the
+     * flavour but not the dish, handed the modifier back as the ingredient:
+     * "1 can cream of chicken" bought Grietinėlė 35 % (CREAM), "1 can cheddar
+     * cheese soup" bought "Čederio sūris BILLA", a 200 g BLOCK of cheese for a
+     * soup — both judged, both silent. The head noun is `soup`; when no entry
+     * accounts for it, the honest reading is "an unknown soup", not the
+     * flavour. The hit is discarded, so the guarded EN-phrase arm searches the
+     * WHOLE phrase (review-only by construction) and a catalog with no such
+     * soup returns nothing — an empty row beats a block of cheddar. "cream of
+     * X" is the same dish shape with the word `soup` left implied, so it is
+     * tested by its lead; an entry that owns the full "cream of …" phrase
+     * (should one ever exist) covers it and is left alone.
+     */
+    if (hit != null && lang === 'en' && enDishPhrase(ing.nameFull || ing.name, hit)) hit = null;
     let info: IngredientInfo | null = hit?.info ?? null;
     let measure = toMetric(ing, info);
     /**
@@ -549,10 +567,6 @@ export const matchIngredient = async (
      */
     const nonePassed = picks.length > 0
         && !picks.some(p => p.confidence >= SOFT_ACCEPT && queryFullyPresent(query, p.name));
-    if (process.env.RECIPE_DEBUG) {
-        console.log(`[DBG] phrase="${ing.nameFull || ing.name}" query="${query}" nonePassed=${nonePassed}`);
-        for (const p of picks) console.log(`  [pre ] ${p.confidence.toFixed(2)} cat=${p.categoryId} dem=${p.demerits} qfp=${queryFullyPresent(query, p.name)} ${p.name}`);
-    }
 
     let fellBack = false;
     /**
@@ -564,10 +578,44 @@ export const matchIngredient = async (
      * still routes the match to review.
      */
     let acceptQuery = query;
+    let viaEn = viaEnPhrase;
+    /**
+     * BEFORE widening the Lithuanian query, let an ENGLISH recipe retry
+     * through the translation arm with its own words.
+     *
+     * The lexicon's shopping name and the shelf's label can disagree on the
+     * whole product, not just a qualifier: the table says "Žemės riešutų
+     * sviestas", every Lithuanian shop prints "Žemės riešutų kremas / pasta",
+     * so the canonical search found NOTHING — and the head-noun fallback then
+     * shopped for the bare "sviestas", buying dairy butter for "crunchy
+     * peanut butter" while a dozen peanut-butter jars sat one translation
+     * away ("crunchy peanut butter ULDUKAS" is the literal normalized string).
+     * The recipe's own English phrase against those translations is a far
+     * better question than the beheaded Lithuanian one, so it is asked FIRST,
+     * and only a pick whose translation carries the WHOLE phrase counts —
+     * a partial translation hit is exactly the junk the head-noun path
+     * already knows how to review. Taken only on the same no-answer evidence
+     * that arms the fallback, so every ingredient the canonical name already
+     * finds ("2 tbsp butter") never comes near it. Review-only by
+     * construction: `viaEn` routes the reason chain to `soft_score`, the same
+     * never-silent contract the no-lexicon EN arm has.
+     */
+    if (!viaEn && lang === 'en' && info != null && (picks.length === 0 || nonePassed)) {
+        const en = enPhraseQuery(ing);
+        if (en) {
+            const enPicks = await findProducts([en], ing, info, locale, cache, userId, affinityCache, true);
+            if (enPicks.some(p => p.confidence >= SOFT_ACCEPT
+                && (p.enNames ?? []).some(n => queryFullyPresent(en, n)))) {
+                picks = enPicks;
+                acceptQuery = en;
+                viaEn = true;
+            }
+        }
+    }
     // The head-noun fallback is a LITHUANIAN-name device ("Kepimo soda" →
     // "soda"); on an English fallback phrase it would only widen into junk
     // ("white rum" → "rum" → anything), so the EN path never takes it.
-    if (!viaEnPhrase && (picks.length === 0 || nonePassed
+    if (!viaEn && (picks.length === 0 || nonePassed
         || (picks.length === 1 && !carriesQueryAsHead(query, picks[0].name)))) {
         const head = headNoun(query);
         // Never generalise onto a form noun — that is not a wider search, it is
@@ -580,17 +628,18 @@ export const matchIngredient = async (
                     const prev = merged.get(p.productId);
                     if (!prev || p.confidence > prev.confidence) merged.set(p.productId, p);
                 }
-                picks = rankPicks([...merged.values()], query, ing.nameFull || ing.name, info).slice(0, 4);
+                // `query` rides along as `widenedFrom`: the pool was RECALLED
+                // with the bare head, so ranking must know which candidates
+                // still carry the identity the recipe asked for — see the
+                // stranger rule in rankPicks for what it prevents.
+                picks = rankPicks([...merged.values()], query, ing.nameFull || ing.name, info, query)
+                    .slice(0, 4);
                 fellBack = true;
                 acceptQuery = head;
             }
         }
     }
     if (picks.length === 0) return base;
-    if (process.env.RECIPE_DEBUG) {
-        console.log(`[DBG] fellBack=${fellBack} acceptQuery="${acceptQuery}"`);
-        for (const p of picks) console.log(`  [post] ${p.confidence.toFixed(2)} cat=${p.categoryId} dem=${p.demerits} qfp=${queryFullyPresent(acceptQuery, p.name)} ${p.name}`);
-    }
 
     /**
      * The best pick that actually PASSES the identity bar — not simply the first
@@ -650,8 +699,10 @@ export const matchIngredient = async (
          * translations — measured at ~8 right to 1 wrong, which earns a
          * pre-selected suggestion, not an unannounced basket line. (This is
          * SILENT_ACCEPT's rationale #1 with no vetted shopping name at all.)
+         * `viaEn` also covers the lexicon-known EN retry above: the pick was
+         * matched on a machine translation either way.
          */
-        : viaEnPhrase ? 'soft_score'
+        : viaEn ? 'soft_score'
         /**
          * THE SILENT GATE — the accept bar alone is not permission to fill
          * the basket unannounced. Below SILENT_ACCEPT, silence has to be
@@ -710,7 +761,11 @@ const queryFullyPresent = (query: string, productName: string): boolean => {
  */
 const GENERIC_FORM_NOUN = new RegExp(
     '^(miltelia|milteli|padaž|padaz|sultys|sulči|sulci|mišin|misin|prieskon'
-    + '|dribsni|tyrel|tyrė|kremas|sirup|ekstrakt|pasta|užpil|uzpil|koncentrat)', 'i');
+    + '|dribsni|tyrel|tyrė|kremas|sirup|ekstrakt|pasta|užpil|uzpil|koncentrat'
+    // 'gėrimas' joined when "„Sprite" gėrimas" fell back to the bare 'gėrimas'
+    // and bought "Gaivusis gėrimas COCA-COLA" — a NAMED brand swapped for its
+    // competitor. Any drink is a gėrimas; the word in front is the identity.
+    + '|gėrim|gerim)', 'i');
 
 /**
  * Stamp each candidate with the shopper's affinity for it.
@@ -997,6 +1052,24 @@ const EN_QUERY_PURPOSE_TAIL = new RegExp(
  * `viaEnPhrase` forcing every result to review — never into a basket
  * unannounced.
  */
+/**
+ * English DISH head nouns — words that name something you COOK, never a shelf
+ * product a modifier window can stand in for. Deliberately tiny: 'stock' and
+ * 'broth' are real purchases and belong to the lexicon, so they are absent.
+ */
+const EN_DISH_HEAD: ReadonlySet<string> = new Set(['soup', 'stew', 'chowder', 'casserole', 'bisque']);
+
+/** Is this EN phrase a dish name the hit does not actually account for? See
+ *  the call site in `matchIngredient` for the judged failures behind it. */
+const enDishPhrase = (phrase: string, hit: IngredientHit): boolean => {
+    const words = fold(firstAlternative(phrase)).split(' ').filter(Boolean);
+    if (words.length < 2) return false;
+    // "cream of chicken" — condensed soup with the dish word left implied.
+    if (words[0] === 'cream' && words[1] === 'of' && !hit.form.startsWith('cream of')) return true;
+    const last = words[words.length - 1];
+    return EN_DISH_HEAD.has(last) && !hit.form.split(' ').includes(last);
+};
+
 const enPhraseQuery = (ing: ParsedIngredient): string | null => {
     const phrase = firstAlternative(ing.name || '').replace(EN_QUERY_PURPOSE_TAIL, ' ');
     const words = phrase.split(/\s+/)
@@ -1136,14 +1209,25 @@ const LEAD_BAND = 0.20;
  *               ("Šoninė"). Judging preparation on the query alone demoted the
  *               smoked bacon a recipe explicitly wanted.
  */
-/** Content words in the product name that the query never asked for. */
-const extraWords = (p: ProductPick, query: string): number => {
-    const asked = new Set(contentWords(query));
-    return contentWords(p.name).filter(w => !asked.has(w)).length;
-};
+/**
+ * Content words in the product name that nobody asked for. "Asked" is the
+ * QUERY and the RECIPE'S OWN WORDS together: "200 g pusriebės varškės" asked
+ * for "pusriebė" even though the canonical query is the bare "Varškė", and
+ * counting it as an extra made the semi-fat curd the recipe named look MORE
+ * elaborate than a random branded plain one.
+ */
+const extraWords = (p: ProductPick, asked: ReadonlySet<string>): number =>
+    contentWords(p.name).filter(w => !asked.has(w)).length;
 
+/**
+ * @param widenedFrom set ONLY by the head-noun fallback: the ORIGINAL query
+ *   whose qualifier the fallback dropped to recall anything at all. The pool
+ *   then contains products matched on the bare head, and the ranking needs to
+ *   know which of them still carry the identity that was asked for.
+ */
 const rankPicks = (
     picks: ProductPick[], query: string, phrase = '', info: IngredientInfo | null = null,
+    widenedFrom: string | null = null,
 ): ProductPick[] => {
     const bareNoun = normalise(query).split(' ').length === 1;
     const band = bareNoun ? LEAD_BAND : TIE_BAND;
@@ -1227,6 +1311,127 @@ const rankPicks = (
     const querySu = JOINED.test(` ${query} `) || JOINED.test(` ${phrase} `);
     const accompanied = (p: ProductPick) => (!querySu && JOINED.test(` ${p.name} `) ? 1 : 0);
 
+    /**
+     * THE FALLBACK'S OWN RESULTS MUST NOT OUTVOTE WHAT THE RECIPE ASKED FOR.
+     *
+     * A widened pool is recalled — and scored — with the bare head noun, so a
+     * product that IS nothing but the head wears an exact-token score for a
+     * question nobody asked: "kvapniųjų pipirų žirnelių" fell back from
+     * "Kvapnieji pipirai" to "pipirai" and bought fresh JALAPEÑO peppers at
+     * 0.97 while the allspice jar it wanted ("Kvapieji pipirai SAUDA") sat in
+     * the alternatives at 0.78 — the 0.97 measures pipirai-ness, not
+     * allspice-ness. So inside a widened pool, a candidate that no longer
+     * carries the original query's identity words is a STRANGER: penalised
+     * enough to overrule exactly that dishonest score gap, and stamped with a
+     * demerit so the silent gate and the review screen both see the doubt.
+     * When the whole pool is strangers (the "Kepimo soda" → "Maistinė soda"
+     * case the fallback exists for), they all move together and the best of
+     * them still wins — the rule only ever arbitrates BETWEEN pool members.
+     *
+     * Identity is judged the way coverage is judged elsewhere: shelf
+     * abbreviations expanded ("Dž. spanguolės" IS the džiovintos the recipe
+     * said), shop synonyms honoured ("Viščiukų broilerių šlaunelės" carries
+     * "vištienos" — without this the deli kumpelis, which spells the word
+     * out, would beat the fresh thighs it lost to), and marketing words
+     * skipped ("Šviežias imbieras" must not disown the bare "Imbieras" root).
+     */
+    const carriesIdentity = (p: ProductPick): boolean => {
+        if (widenedFrom == null) return true;
+        const words = contentWords(widenedFrom).filter(w => !isNonIdentity(w));
+        if (words.length === 0) return true;
+        const inName = contentWords(expandShelfAbbrev(p.name).split(CONTAINS_MARKER)[0]);
+        return words.every(w => isCovered(w, inName) || synonymCovered(w, inName));
+    };
+    const stranger = (p: ProductPick) => (carriesIdentity(p) ? 0 : 1);
+
+    /**
+     * A candidate the LEXICON ITSELF reads as a DIFFERENT ingredient.
+     *
+     * Lithuanian compounds a spice out of a food noun: 'muskato riešutas'
+     * (nutmeg) literally contains 'riešutas' (nut), and "200 g maltų riešutų"
+     * — ground NUTS — silently bought "Malti muskato riešutai SAUDA", ground
+     * NUTMEG, shopQuantity 6: six 28 g jars of it for a cake. The name shares
+     * every query word, so no coverage test can object; what CAN object is the
+     * knowledge base, whose longest-window reading of that name is the nutmeg
+     * entry and nothing else.
+     *
+     * A reading vouches for the candidate when it is the queried entry itself,
+     * or an entry whose own shopping name still carries the query's head noun
+     * — "Graikiniai riešutai" (walnuts) IS a riešutai and must keep winning a
+     * nut query, and "Rūkyta kiaulienos šoninė" reads as pork belly yet
+     * 'šoninė' is the very noun the bacon query asked for.
+     *
+     * And when no reading vouches, the head noun itself gets a final say: the
+     * homonym trap is a form that CONSUMES the noun into a compound ("muskato
+     * riešutai" swallows 'riešutai' — inside that window it is not a nut any
+     * more), but a noun standing FREE of every window still names the thing.
+     * "Šviežios kiaulienos dešrelės" resolves to the exact pork form "šviežios
+     * kiaulienos" and to nothing else — yet 'dešrelės' sits outside it,
+     * untouched, and the product is exactly the sausage the query meant.
+     * Only a name whose every trace of the head noun is spoken for by a
+     * different entry is a homonym: penalised, tie-broken against, and stamped
+     * with a demerit so it can never win silently.
+     *
+     * The free-standing test reads the IDENTITY span only — the name up to the
+     * first comma — and skips a noun that merely modifies 'skonis': "Malta
+     * kava GURMAN'S, Jamaikos karališkųjų riešutų skonio" is nut-FLAVOURED
+     * ground COFFEE, and the 'riešutų' in its flavour tail stood free enough
+     * to slip the rule and get BOUGHT for "200 g maltų riešutų" — a worse
+     * answer than the nutmeg this rule was built against. Identity lives
+     * before the comma in a Lithuanian catalog name; everything after it is
+     * pack, fat and flavour description.
+     */
+    const homonym = (p: ProductPick): number => {
+        if (info == null) return 0;
+        const nameHead = expandShelfAbbrev(p.name).split(CONTAINS_MARKER)[0].split(',')[0];
+        const hits = findIngredientHits(nameHead);
+        if (hits.length === 0) return 0;
+        const qWords = contentWords(query);
+        // LT shopping names put the head noun LAST ("Rūkyta šoninė", "Uogienių
+        // cukrus") — the last content word is what the product must still be.
+        const qHead = qWords[qWords.length - 1];
+        if (qHead == null) return 0;
+        const vouches = (e: IngredientInfo): boolean =>
+            e.key === info.key || isCovered(qHead, contentWords(e.ltName));
+        if (hits.some(h => vouches(h.info))) return 0;
+        const consumed = new Set(hits.flatMap(h => h.form.split(' ')));
+        const words = fold(nameHead).split(' ');
+        const headStandsFree = words.some((w, i) => !consumed.has(w)
+            && !words[i + 1]?.startsWith('skon')
+            && isCovered(qHead, contentWords(w)));
+        return headStandsFree ? 0 : 1;
+    };
+
+    /**
+     * A PURPOSE the recipe never asked for — the dative "for X" a shelf hangs
+     * on a base product to make a special-use variant of it. "200 g rudojo
+     * cukraus" kept buying "Rudasis cukrus uogienėms ALVO" — PRESERVING sugar
+     * with a gelling agent, four judged rounds running — because the name
+     * opens with the exact canonical "Rudasis cukrus" and outscores every
+     * branded plain bag; ~20 plain brown sugars sat in the same category.
+     * Dative forms ONLY, so the products named by the purpose noun itself stay
+     * clean: 'uogienė' (jam, nominative) must keep answering jam queries.
+     * Closed, catalog-verified list — each word leads a real special-use line
+     * ("Cukrus uogienėms", "Sūris salotoms", "Miltų mišinys … blynams",
+     * "Sūrio produktas kepimui", "Padažas kepsniams").
+     *
+     * When the recipe DID say the purpose ("1 kg cukraus uogienėms"), the
+     * variant is the very product it means — same ask-reading as `prepared`,
+     * same 4-letter stem comparison across case endings.
+     */
+    const askedPurpose = [PURPOSE_MARKER.exec(query)?.[0], PURPOSE_MARKER.exec(phrase)?.[0]]
+        .filter((w): w is string => w != null);
+    const purposed = (p: ProductPick): number => {
+        const found = PURPOSE_MARKER.exec(p.name)?.[0];
+        if (!found) return 0;
+        const a = fold(found);
+        return askedPurpose.some(w => {
+            const b = fold(w);
+            const n = Math.min(a.length, b.length, 4);
+            return n > 0 && a.slice(0, n) === b.slice(0, n);
+        }) ? 0 : 1;
+    };
+
     /** 1 = on the wrong shelf for the form the recipe asked for. */
     /**
      * "Freshly GROUND" is about the grinding, not the produce: FRESH_WORD
@@ -1256,6 +1461,19 @@ const rankPicks = (
     const freshMeatOnOffer = picks.some(p => FRESH_MEAT_FISH.has(p.categoryId));
     const freshProduceOnOffer = picks.some(p => FRESH_PRODUCE_CATEGORY(p.categoryId));
     /**
+     * The dried-form axis needs a third leg for the UNCATEGORISED shelf. The
+     * cat-9 demotion below catches a properly filed living herb, but "1 tsp
+     * dried thyme" was answered with "Čiobreliai IKI DERLIUS" — a fresh
+     * POTTED plant (that brand line is fresh herbs, its own translation says
+     * "potted") filed in 688, where no category can say so. What the catalog
+     * DOES say is that "Čiobreliai SANTA MARIA" sits on the dried-spice
+     * shelf: when the recipe asked for dried and that shelf has an offer, an
+     * uncategorised twin whose name does not claim dried-ness itself is the
+     * doubtful one. Same shape as dryBrothOnOffer — the demotion only exists
+     * while the certain form is actually available.
+     */
+    const driedShelfOnOffer = picks.some(p => DRIED_SPICE_SHELF.has(p.categoryId));
+    /**
      * STOCK IS A CUBE, NOT A CARTON — the same axis a third time, split by
      * PACK DIMENSION because nothing else can split it.
      *
@@ -1276,9 +1494,26 @@ const rankPicks = (
     const wantsCube = info != null && (info.key === 'broth' || info.key.startsWith('broth_'))
         && !/skyst/i.test(query) && !/skyst/i.test(phrase);
     const dryBrothOnOffer = wantsCube && picks.some(p => packInBaseUnit(p)?.dim === 'mass');
+    /**
+     * The meat-vs-substitute axis (see MEAT_SUBSTITUTE_CATEGORY). "Real meat
+     * on offer" is any pool member on the meat department's own shelves —
+     * fresh or processed alike, because for a sausage query the honest
+     * candidates ARE processed. The vegan ask is judged on the query and the
+     * recipe's own words, so an explicit request keeps its product.
+     */
+    const veganAsked = VEGAN_WORD.test(query) || VEGAN_WORD.test(phrase);
+    const realMeatOnOffer = !veganAsked && picks.some(p =>
+        FRESH_MEAT_FISH.has(p.categoryId) || PROCESSED_CATEGORY(p.categoryId));
     const wrongShelf = (p: ProductPick) => {
+        if (realMeatOnOffer && p.categoryId === MEAT_SUBSTITUTE_CATEGORY) return 1;
         if (wantsFresh && DRIED_SPICE_SHELF.has(p.categoryId)) return 1;
         if (wantsDried && p.categoryId === FRESH_HERB_CATEGORY) return 1;
+        // The uncategorised leg of the same axis (see driedShelfOnOffer). A
+        // 688 row whose own name claims the form ("Malti imbierai …",
+        // "Džiovintos …", "Dž. …") is exempt — it said the word, the shelf
+        // merely failed to file it.
+        if (wantsDried && driedShelfOnOffer && p.categoryId === 688
+            && !DRIED_WORD.test(expandShelfAbbrev(p.name))) return 1;
         // The recipe naming a preparation ("smoked", "rūkytos") is what makes
         // the processed aisle the right one, so leave those alone.
         if (!queryPrepared && freshMeatOnOffer && PROCESSED_CATEGORY(p.categoryId)) return 1;
@@ -1288,7 +1523,13 @@ const rankPicks = (
         // phrase — which DRIED_WORD reads in both languages. Without this
         // gate, "1 tsp dried basil" demoted the dried-spice shelf it was
         // asking for and handed the win to an uncategorised pot of fresh basil.
-        if (!queryPrepared && !wantsDried && freshProduceOnOffer
+        // `!info?.pantry` bounds the axis to actual produce ingredients: a
+        // PANTRY entry is a cupboard good by definition, and reading its pool
+        // through produce eyes demoted the very jar it means — the head-noun
+        // fallback for allspice pulled fresh jalapeños into the pool, and
+        // their presence hung a wrong-shelf demerit on "Kvapieji pipirai
+        // SAUDA", the exactly right spice, for sitting on the spice shelf.
+        if (!queryPrepared && !wantsDried && !info?.pantry && freshProduceOnOffer
             && PROCESSED_PRODUCE_CATEGORY(p.categoryId)) return 1;
         // A volume pack on a stock query is the ready-made liquid (see
         // dryBrothOnOffer above). A pack the catalog never recorded is left
@@ -1298,7 +1539,27 @@ const rankPicks = (
     };
 
     const qLead = lead0(query);
-    const leads = (p: ProductPick) => (lead0(p.name) === qLead ? 0 : 1);
+    /**
+     * A LEADING QUALIFIER THE RECIPE ITSELF ASKED FOR IS NOT A VARIANT TRAP.
+     *
+     * The lead rule exists to keep "Vanilinis cukrus" from stealing a bare
+     * "cukraus" — but judged against the canonical query alone it also read
+     * "Pusriebė varškė IKI" as a stranger variant for "200 g pusriebės
+     * varškės", and the branded plain "Varškė PRESIDENT" at 0.78 walked over
+     * the semi-fat curd the recipe literally named at 0.95. A product may
+     * open with a qualifier when the qualifier is the recipe's own word.
+     *
+     * Only words the phrase adds OVER the query count: the recipe's bare
+     * genitive ("sviesto", "varškės") is covered by the query itself and
+     * earns nothing, so the genitive-modifier trap this rule was built on
+     * ("Sviesto skonio … aliejus", "Druskos dribsniai") stays shut.
+     */
+    const phraseQualifiers = contentWords(firstAlternative(phrase))
+        .filter(w => !isCovered(w, contentWords(query)));
+    const leads = (p: ProductPick) => {
+        const l = lead0(p.name);
+        return l === qLead || isCovered(l, phraseQualifiers) ? 0 : 1;
+    };
     /**
      * THE DEMOTIONS HAVE TO BE PART OF THE SCORE, not a tie-break after it.
      *
@@ -1322,6 +1583,9 @@ const rankPicks = (
         - PENALTY.prepared * prepared(p)
         - PENALTY.accompanied * accompanied(p)
         - PENALTY.wrongShelf * wrongShelf(p)
+        - PENALTY.stranger * stranger(p)
+        - PENALTY.homonym * homonym(p)
+        - PENALTY.purposed * purposed(p)
         - PENALTY.unlisted * Number(p.unlisted)
         - PENALTY.seed * Number(p.suspectSeed)
         - PENALTY.multipack * Number(MULTIPACK.test(p.name));
@@ -1336,8 +1600,12 @@ const rankPicks = (
      */
     const withDoubt = picks.map(p => ({
         ...p,
-        demerits: prepared(p) + accompanied(p) + wrongShelf(p) + Number(p.suspectSeed),
+        demerits: prepared(p) + accompanied(p) + wrongShelf(p) + stranger(p)
+            + homonym(p) + purposed(p) + Number(p.suspectSeed),
     }));
+    const asked: ReadonlySet<string> = new Set([
+        ...contentWords(query), ...contentWords(firstAlternative(phrase)),
+    ]);
     return withDoubt.sort((a, b) => {
         const adj = adjusted(a) - adjusted(b);
         if (Math.abs(adj) > band) return -adj;
@@ -1371,8 +1639,23 @@ const rankPicks = (
          * when the two names already score 0.19 apart, and the comparison then
          * fell through to counting words, where the shorter brand won.
          */
+        // The stranger signal leads the structural chain: whatever else two
+        // fallback candidates disagree on, one of them still IS the thing the
+        // recipe named and the other merely shares its head noun — that is
+        // the tie-break that keeps "Kvapieji pipirai SAUDA" above the
+        // jalapeños once the penalty has pulled their scores level.
+        const strange = stranger(a) - stranger(b);
+        if (strange !== 0) return strange;
+        // The lexicon's own verdict next: of two candidates inside the band,
+        // one of which reads as a different ingredient entirely (the ground
+        // nutmeg that led a ground-nuts pool on the lead tie-break), the one
+        // that still reads as the thing asked for wins.
+        const homo = homonym(a) - homonym(b);
+        if (homo !== 0) return homo;
         const prep = prepared(a) - prepared(b);
         if (prep !== 0) return prep;
+        const purp = purposed(a) - purposed(b);
+        if (purp !== 0) return purp;
         const shelf = wrongShelf(a) - wrongShelf(b);
         if (shelf !== 0) return shelf;
         const joined = accompanied(a) - accompanied(b);
@@ -1401,7 +1684,7 @@ const rankPicks = (
          * ingredient. It ranks BELOW affinity deliberately: if the shopper
          * actually buys the elaborate one, that is not a tie any more.
          */
-        const extra = extraWords(a, query) - extraWords(b, query);
+        const extra = extraWords(a, asked) - extraWords(b, asked);
         if (extra !== 0) return extra;
         return adjusted(b) - adjusted(a);
     });
@@ -1533,6 +1816,30 @@ const PROCESSED_CATEGORY = (id: number): boolean =>
     || (id >= 146 && id <= 150);  // canned food
 
 /**
+ * A PLANT-BASED SUBSTITUTE IS NOT THE MEAT IT IMITATES — cat 107 'Augaliniai
+ * mėsos pakaitalai', which sits INSIDE the meat department's id range yet is
+ * in neither FRESH_MEAT_FISH nor PROCESSED_CATEGORY, so it escaped the whole
+ * axis. 'Žirnių dešrelės' (pea sausages) is a short, plainly named product,
+ * and it silently answered "4 dešrelės" at 0.97 — found by two judges in
+ * separate slices — and "1 lb breakfast sausage" bought the same vegan
+ * product, 3 packs. When the recipe asks for meat and a real meat candidate
+ * is on offer, the substitute shelf loses.
+ *
+ * A demotion, never an exclusion, gated the same two ways as the other
+ * shelf axes:
+ *   · only while a REAL meat candidate is in the pool (a catalog that stocks
+ *     nothing but the substitute still returns it);
+ *   · never when the recipe itself asked for the substitute — "vegan
+ *     sausages", "veganiškos/augalinės/sojų/žirnių dešrelės" keep it. The
+ *     ask is read from the query AND the recipe's own phrase, exactly like
+ *     `queryPrepared`.
+ */
+const MEAT_SUBSTITUTE_CATEGORY = 107;
+const VEGAN_WORD = new RegExp(
+    '(?:^|[^\\p{L}])(?:vegan|veganišk|veganisk|augalin|plant[ -]based|meat[ -]?free'
+    + '|meatless|vegetarian|sojų|soju|soy|tofu|seitan|žirnių|zirniu)', 'iu');
+
+/**
  * THE SAME AXIS AGAIN, FOR PRODUCE AND BERRIES — because it only existed for
  * meat and fish, and the holdout paid for the gap four times over: fresh
  * cherry tomatoes silently became a vinegar-marinated JAR, cranberries became
@@ -1619,13 +1926,53 @@ const PENALTY = {
     prepared: 0.30,
     accompanied: 0.30,
     wrongShelf: 0.25,
+    /**
+     * 0.25 is calibrated to the fallback's own dishonesty: a bare-head product
+     * scores ~0.97 against the head noun while the fully qualified product
+     * scores ~0.78 (the measured brand/qualifier cost), and the penalty must
+     * close exactly that 0.19 gap — after it, 0.72 vs 0.78 lands inside the
+     * tie band, where the stranger tie-break settles it. Not larger, so a
+     * stranger with a genuinely huge lead can still surface when the
+     * "carrier" is junk.
+     */
+    stranger: 0.25,
+    /**
+     * As heavy as `prepared`, and for the same reason: a name every one of
+     * whose lexicon readings is a DIFFERENT ingredient is not a worse spelling
+     * of the answer, it is a different answer — the 0.85 "Malti muskato
+     * riešutai" must land below the 0.78 branded nut mixes, not inside the
+     * 0.20 bare-noun band where its lead on 'malti' would win the tie.
+     */
+    homonym: 0.30,
+    /**
+     * Also the variant-trap scale: the purpose variant opens with the exact
+     * canonical name ("Rudasis cukrus uogienėms" scored 0.94 for "Rudasis
+     * cukrus"), so the penalty must clear the ~0.19 brand cost the plain bags
+     * pay, with room to spare — 0.94 − 0.30 sits safely under a 0.78 plain.
+     */
+    purposed: 0.30,
     unlisted: 0.20,
     seed: 0.25,
     multipack: 0.10,
 } as const;
 
-/** "50 X 3 g", "4x100g" — a case of small units rather than one package. */
-const MULTIPACK = /\d+\s*[x×]\s*\d/i;
+/**
+ * Shelf PURPOSE datives — see `purposed` in rankPicks. Dative case only, each
+ * word verified to lead a live special-use product line; the nominative or
+ * genitive of the same noun names the base product itself and must stay out
+ * ('uogienė' answers jam queries, 'salotų mišinys' answers salad ones).
+ * 'uogienių' rides along because the jam-sugar shelf uses the genitive-plural
+ * as the same purpose label ("Uogienių cukrus WELL DONE") while no jam product
+ * leads with it — jams are "Braškių uogienė", singular.
+ */
+const PURPOSE_MARKER = new RegExp(
+    '(?<![\\p{L}])(?:uogien(?:ėms|ems|ių|iu)|kepimui|salotoms|kepsniams|blynams)(?![\\p{L}])', 'iu');
+
+/** "50 X 3 g", "4x100g", "4gx50" — a case of small units rather than one
+ *  package. The unit letter may sit BETWEEN the numbers: "Rudasis, smulkus
+ *  cukrus IKI, 4gx50" is fifty coffee-stall sachets, and without the optional
+ *  `g|ml` the sachet box slipped past the very rule written about it. */
+const MULTIPACK = /\d+\s*(?:g|ml)?\s*[x×]\s*\d/i;
 
 const normalise = (s: string): string => s.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
 
@@ -1666,7 +2013,14 @@ const findProductsFor = async (
     enArm = false,
 ): Promise<ProductPick[]> => {
     // Recipes need the uncategorised shelf: most fresh produce lives there.
-    const rows = await searchProduct(query, locale, { includeUncategorised: true });
+    // Typographic quotes are stripped for the SQL search only: recipes write
+    // brands as „Sprite“, no catalog name carries the quotes, and the search
+    // found nothing — which armed the head-noun fallback and bought a
+    // COMPETITOR ("Gaivusis gėrimas COCA-COLA" for an explicit Sprite).
+    // Scoring below still sees the raw query; its own normalisation copes.
+    const rows = await searchProduct(
+        query.replace(/["„“”«»]/g, ' ').replace(/\s+/g, ' ').trim(),
+        locale, { includeUncategorised: true });
     if (rows.length === 0) return [];
 
     const candidates: MatchCandidate[] = rows

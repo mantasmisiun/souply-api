@@ -136,8 +136,24 @@ export interface IngredientHit {
  *   would undo a whole class of fixes, so LT keeps the first match.
  */
 export const findIngredient = (name: string, lang: Lang = 'lt'): IngredientHit | null => {
+    const hits = findIngredientHits(name);
+    return hits.length > 0 ? pickHead(hits, hits[0].words, lang) : null;
+};
+
+/**
+ * EVERY hit at the winning window length, not just the head pick.
+ *
+ * The matcher's homonym rule needs the full slate: a product name can carry
+ * several readings at once, and which of them is "the" ingredient depends on
+ * who is asking. "Rūkyta kiaulienos šoninė" reads as pork belly ("kiaulienos
+ * šoninė") AND as the bacon the query meant — judging only the head pick
+ * would call the correct bacon a stranger. One reading that vouches for the
+ * query is enough; only a name NONE of whose readings do (every window of
+ * "Malti muskato riešutai" says nutmeg, never a nut) is a genuine homonym.
+ */
+export const findIngredientHits = (name: string): IngredientHit[] => {
     const folded = fold(name);
-    if (!folded) return null;
+    if (!folded) return [];
     const words = folded.split(' ');
 
     for (let n = Math.min(MAX_FORM_WORDS, words.length); n >= 1; n--) {
@@ -147,7 +163,7 @@ export const findIngredient = (name: string, lang: Lang = 'lt'): IngredientHit |
             const exact = EXACT.get(window);
             if (exact) hits.push({ info: exact, form: window, words: n, exact: true });
         }
-        if (hits.length > 0) return pickHead(hits, n, lang);
+        if (hits.length > 0) return hits;
         for (let i = 0; i + n <= words.length; i++) {
             // `form` stays the SURFACE window, not the stemmed key: the caller
             // compares it against the phrase's own words to find what was left
@@ -156,9 +172,9 @@ export const findIngredient = (name: string, lang: Lang = 'lt'): IngredientHit |
             const hit = STEMMED.get(stemPhrase(window));
             if (hit) hits.push({ info: hit, form: window, words: n, exact: false });
         }
-        if (hits.length > 0) return pickHead(hits, n, lang);
+        if (hits.length > 0) return hits;
     }
-    return null;
+    return [];
 };
 
 /**

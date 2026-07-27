@@ -474,8 +474,52 @@ const TAP_WATER = new RegExp(
  */
 const NEVER_BOUGHT = new RegExp(
     '^(?:teslos\\s+raugini\\p{L}*'
-    + '|leduk\\p{L}*|ledo\\s+kubel\\p{L}*'
+    // "ledo gabaliukai" is the same ice one synonym over — outside this list
+    // it fell through to the lexicon, where the stem 'led' means ICE CREAM,
+    // and a drink recipe was silently sold "Valgomieji ledai OREO" for its
+    // ice cubes. Ignored like 'ledukai', not matched to the 'Ledo kubeliai'
+    // category: ice is tap water in another shape, same as the rest of this
+    // list.
+    + '|leduk\\p{L}*|ledo\\s+kubel\\p{L}*|ledo\\s+gabal\\p{L}*'
     + '|(?:crushed\\s+)?ice(?:\\s+cubes?)?)$', 'iu');
+
+/**
+ * KITCHEN EQUIPMENT the sites list among the ingredients — same machinery as
+ * NEVER_BOUGHT, split out because these are objects, not foods in another
+ * shape. Each was a judged finding ("1 lapas kepimo popieriaus" was MATCHED
+ * and reached the basket) or its obvious sibling on the same line shape:
+ * baking parchment, foil, cling film, skewers, toothpicks, kitchen string.
+ *
+ * Matched against the FOLDED whole name, so the patterns are diacritic-free.
+ * Deliberately anchored and prefix-gated where a bare word could name FOOD:
+ *   · "popierius" needs a kepimo/parchment-ish qualifier — "ryžių popierius"
+ *     (rice paper) IS food and must never match; same for EN "rice paper"
+ *     (only baking/parchment/greaseproof/wax qualify).
+ *   · "iešmeliai" matches bare or with a material word ("mediniai") — but a
+ *     FOOD skewer ("mėsos iešmeliai", "chicken skewers") carries its food
+ *     noun in front and the anchor rejects it.
+ *   · bare "string"/"twine" is safe whole-name; "string beans" never is the
+ *     whole name.
+ */
+const NEVER_BOUGHT_KIT = new RegExp(
+    // parchment / baking paper
+    '^(?:(?:kepimo|sviestin\\p{L}*|pergamentin\\p{L}*)\\s+popier\\p{L}*'
+    + '|kepimo\\s+pergament\\p{L}*|pergament\\p{L}*'
+    + '|(?:baking|parchment|greaseproof|waxed?)\\s+paper|baking\\s+parchment|parchment'
+    // foil
+    + '|(?:aliuminio\\s+|maistine\\s+)?folij\\p{L}*'
+    + '|(?:aluminium\\s+|aluminum\\s+|tin\\s+|kitchen\\s+)?foil'
+    // cling film
+    + '|(?:maistine\\s+)?plevel\\p{L}*'
+    + '|cling\\s*(?:film|wrap)|plastic\\s+wrap'
+    // skewers
+    + '|(?:mediniai\\s+|mediniu\\s+|bambuko\\s+|bambukiniai\\s+|bambukiniu\\s+|metaliniai\\s+)?iesm\\p{L}*'
+    + '|(?:wooden\\s+|bamboo\\s+|metal\\s+)?skewers?'
+    // toothpicks
+    + '|dantu\\s+krapstuk\\p{L}*|krapstuk\\p{L}*|toothpicks?|cocktail\\s+sticks?'
+    // kitchen string
+    + '|(?:kitchen\\s+|butcher\\s?s\\s+)?(?:string|twine)|virvel\\p{L}*|virvut\\p{L}*'
+    + ')$', 'iu');
 
 /**
  * "daigų papuošimui" (beatosvirtuve.lt) — a garnish INSTRUCTION: a dative of
@@ -557,7 +601,9 @@ const stripPurposeTail = (text: string): { name: string; tail: string } | null =
 const markUnshoppable = (p: ParsedIngredient): ParsedIngredient => {
     if (p.ignored) return p;
     const name = fold(p.name).trim();
-    if (TAP_WATER.test(name) || NEVER_BOUGHT.test(name)) return { ...p, ignored: true };
+    if (TAP_WATER.test(name) || NEVER_BOUGHT.test(name) || NEVER_BOUGHT_KIT.test(name)) {
+        return { ...p, ignored: true };
+    }
     if (p.quantity == null && p.unit == null && GARNISH_INSTRUCTION.test(name)) {
         return { ...p, ignored: true };
     }
@@ -583,7 +629,21 @@ const splitMultiIngredient = (line: string, lang: Lang): string[] => {
     if (/[()]/.test(line)) return [line];
     const parts = line.split(/\s*,\s*|\s+(?:ir|and)\s+/i).map(p => p.trim()).filter(Boolean);
     if (parts.length < 2) return [line];
-    const allShort = parts.every(p => p.split(/\s+/).length <= 3 && p.length <= 28);
+    // A part that is ONLY preparation words means the "and" joined two
+    // PARTICIPLES, not two ingredients: "coriander leaves picked and finely
+    // chopped" split at that "and" emitted a phantom ingredient named
+    // "finely" — and the coriander row the sweep had matched went with it.
+    // The whole line is one ingredient wearing its prep, so it stays whole.
+    if (parts.some(isPrepOnly)) return [line];
+    // Short enough to be a bare name — OR long but RECOGNISED. The length gate
+    // alone silently DROPPED an ingredient: "Kosher salt and freshly ground
+    // black pepper" has a four-word second part, so the line stayed whole, the
+    // lexicon then read the whole thing as black pepper, and the salt never
+    // reached the basket. A part the lexicon knows is an ingredient however
+    // long it is; "cut into bite-size pieces" is four words the lexicon does
+    // NOT know, so the prep-note case this gate protects still holds.
+    const allShort = parts.every(p =>
+        (p.split(/\s+/).length <= 3 && p.length <= 28) || findIngredient(stripPunct(p), lang) != null);
     if (!allShort) return [line];
     // A trailing "to taste" belongs to all of them, not to a fourth ingredient
     // — and "to serve"/"for serving" is a remark about the table, not a thing
@@ -606,6 +666,24 @@ const splitMultiIngredient = (line: string, lang: Lang): string[] => {
 
 /** A part that is ONLY a serving remark — never an ingredient of its own. */
 const GARNISH_RE = /^(?:to serve|for serving|for garnish|for dusting|optional)$/i;
+
+/**
+ * Every word of the part is a PREP word — the adverbs and participles of
+ * EN_PREP_LEAD/EN_PREP_TRAIL plus their LT counterparts, as whole words. Such
+ * a part can only be the second half of a "picked and finely chopped" tail,
+ * so its presence proves the split found a conjunction of PARTICIPLES.
+ */
+const PREP_WORD = new RegExp(
+    '^(?:finely|coarsely|roughly|thinly|freshly|very'
+    + '|chopped|diced|minced|sliced|grated|shredded|crushed|packed|cooked|softened|melted'
+    + '|beaten|peeled|drained|rinsed|juiced|halved|quartered|cubed|trimmed|picked|torn|washed'
+    + '|smulkiai|stambiai|plonai|šviežiai|sviežiai'
+    + '|susmulkint\\p{L}*|smulkint\\p{L}*|tarkuot\\p{L}*|pjaustyt\\p{L}*|supjaustyt\\p{L}*'
+    + '|kapot\\p{L}*|grūst\\p{L}*|nulupt\\p{L}*|nuvarvint\\p{L}*|sutarkuot\\p{L}*|nuplaut\\p{L}*'
+    + ')$', 'iu');
+
+const isPrepOnly = (part: string): boolean =>
+    part.split(/\s+/).every(w => PREP_WORD.test(stripPunct(w)));
 
 /**
  * A fragment that is ONLY a modifier — an adjective or participle with no noun
