@@ -1,0 +1,76 @@
+{"ingredient": "Obuoliai", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Fresh apples matched to fresh apples; 0.36 kg covers 2 apples."}
+{"ingredient": "Apelsinai", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Fresh oranges matched to fresh oranges; 0.4 kg covers 2 oranges."}
+{"ingredient": "Medus", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Generic honey jar is exactly right for 200 g of honey."}
+{"ingredient": "Cinamonas", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Ground cinnamon jar is the correct pantry spice."}
+{"ingredient": "Gvazdikėliai", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Clove spice jar (SAUDA) is the correct whole-clove product."}
+{"ingredient": "Anyžius", "n": 1, "verdict": "CATALOG_GAP", "class": "no-star-anise", "expected": null, "why": "Catalog only has anise-flavoured candy (6612) and anise tea (7815); no star anise spice exists, so choosing nothing is right."}
+{"ingredient": "Kardamonas", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Catalog stocks only ground cardamom (5122/24945/53038) — no pods — so ground is the best available."}
+{"ingredient": "Muskato riešutas", "n": 1, "verdict": "MINOR", "class": "whole-vs-ground", "expected": "Muskatų riešutai SANTA MARIA (24948)", "why": "Recipe calls for a whole nutmeg and whole nutmegs are stocked, but ground nutmeg was bought instead."}
+{"ingredient": "Imbieras", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Product 49361 'Imbieras' is fresh ginger root (cat. Burokėliai, ridikai ir imbieras) — correct, merely flagged for review."}
+{"ingredient": "Hibiskų žiedai", "n": 1, "verdict": "MAJOR", "class": "candy-for-ingredient", "expected": "Kinrožių žiedų arbata RIMI BASIC (25377)", "why": "Peach-flower gummy sweets were chosen for hibiscus flowers although real hibiscus-flower tea is stocked; caught only because it was flagged."}
+{"ingredient": "Juoda arbata", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Loose black tea (BATIK) is the right product for 1 tsp of black tea."}
+{"ingredient": "braising steak cut into large chunks", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Beef stewing cut matched correctly; 4 packs plausibly covers 1.6 kg."}
+{"ingredient": "bay leaves", "n": 2, "verdict": "OK", "class": "ok", "expected": null, "why": "Bay leaf spice jar is exactly right."}
+{"ingredient": "thyme", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Thyme (IKI DERLIUS) is the correct herb; flagged for review unnecessarily."}
+{"ingredient": "cheap red wine", "n": 1, "verdict": "MINOR", "class": "quantity-under", "expected": "2 bottles of Raudonasis sausas vynas LUNADORO (9024)", "why": "Correct dry red wine, but the recipe needs 2 bottles and only 1 was added."}
+{"ingredient": "oil", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Generic 'oil' for browning mapped to sunflower oil, an acceptable neutral cooking oil."}
+{"ingredient": "or 6 normal carrots cut into large chunks", "n": 1, "verdict": "PARSE_BAD", "class": "modifier-not-head", "expected": null, "why": "Ingredient name kept as 'or 6 normal carrots cut into large chunks'; the query still recovered carrots, but 0.24 kg under-buys 3 large carrots."}
+{"ingredient": "onions", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Yellow onions matched correctly; 0.3 kg covers 2 onions."}
+{"ingredient": "plain flour", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Plain wheat flour (550 D) is the right product for plain flour."}
+{"ingredient": "tomato purée", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "100% tomato paste is the correct product for tomato purée."}
+{"ingredient": "knob butter", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Butter 82% is correct for a knob of butter."}
+{"ingredient": "bacon lardons", "n": 1, "verdict": "CRITICAL", "class": "fresh-vs-processed", "expected": "Šaltai rūkytos šoninės kubeliai (2287) or PANCETTA AFFUMICATA kubeliai (2288)", "why": "Silently bought raw chilled pork belly (cat. Kiauliena) for cured bacon lardons, although smoked bacon cubes are stocked."}
+{"ingredient": "pearl onions or small shallots", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Recipe explicitly allows small shallots and 'Valgomieji svogūnėliai' are shallots; 2 packs cover 500 g."}
+{"ingredient": "mushrooms", "n": 2, "verdict": "OK", "class": "ok", "expected": null, "why": "Fresh champignons are the right product; 0.4 kg matches the recipe."}
+{"ingredient": "parsley", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Fresh parsley bunch is correct."}
+{"ingredient": "pie crusts", "n": 1, "verdict": "MISSING", "class": "no-query-generated", "expected": "Šaldyta sluoksniuota tešla WELL DONE (8082) or Kapotos sviestinės tešlos lakštai (1634)", "why": "No lexicon key and no query were generated even though ready pastry sheets are stocked."}
+{"ingredient": "cream cheese", "n": 1, "verdict": "CRITICAL", "class": "processed-cheese-for-cream-cheese", "expected": "Tepamasis sūris PHILADELPHIA (832/837)", "why": "Silently bought RAMBYNO processed spreadable cheese for 680 g of cheesecake cream cheese while Philadelphia is stocked — the dessert would be ruined."}
+{"ingredient": "sugar", "n": 2, "verdict": "OK", "class": "ok", "expected": null, "why": "White sugar matched; 0.2 kg covers 1 cup."}
+{"ingredient": "sour cream", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Sour cream 30% is correct; 2 tubs cover 240 g."}
+{"ingredient": "vanilla extract", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Real vanilla extract chosen over the vanilla-sugar runner-up."}
+{"ingredient": "ground cinnamon", "n": 2, "verdict": "OK", "class": "ok", "expected": null, "why": "Ground cinnamon jar is exactly right."}
+{"ingredient": "ground nutmeg", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Ground nutmeg jar is exactly right for ground nutmeg."}
+{"ingredient": "eggs", "n": 1, "verdict": "MINOR", "class": "quantity-pack-multiplied", "expected": "1 pack of eggs", "why": "Correct product, but 3 'vnt' of an egg tray means 3 trays (~30 eggs) for a 3-egg recipe."}
+{"ingredient": "apples", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Fresh apples matched; 0.54 kg covers 3 medium apples."}
+{"ingredient": "cornstarch", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Corn starch matched exactly."}
+{"ingredient": "Malti juodieji pipirai", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Ground black pepper jar is exactly right."}
+{"ingredient": "Morkos", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Washed carrots matched; 0.15 kg matches the recipe."}
+{"ingredient": "Druska", "n": 1, "verdict": "MINOR", "class": "specialty-variant", "expected": "Akmens druska EXTRA LINE, 1 kg (4889) or Joduota druska SALT HILL (4887)", "why": "Silently bought pink Himalayan grinder salt for plain cooking salt — right kind but a costlier specialty variant."}
+{"ingredient": "Bulvės", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Packaged fresh Spunta potatoes cover 400 g (over-buy only)."}
+{"ingredient": "Pomidorai", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Vine tomatoes are fresh tomatoes; 0.1 kg matches."}
+{"ingredient": "Raudonasis svogūnas", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Red onions matched; 0.1 kg covers 75 g."}
+{"ingredient": "pagal pageidavimą Šviežios žolelės", "n": 1, "verdict": "PARSE_BAD", "class": "modifier-not-head", "expected": "Šviežios prieskoninės žolelės (e.g. Petražolės 100 / Čiobreliai vazonėlyje 112)", "why": "Ingredient name kept the quantity phrase 'pagal pageidavimą', so the query searched junk and landed on a dried spice blend — flagged, not silent."}
+{"ingredient": "Baklažanai", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Fresh aubergine matched; one aubergine covers ~400 g."}
+{"ingredient": "Sojų padažas", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Soy sauce matched exactly."}
+{"ingredient": "Aitriosios paprikos", "n": 1, "verdict": "MINOR", "class": "wrong-variety", "expected": "Aitriosios paprikos WELL DONE (35) or Raudonos aitriosios paprikos WELL DONE (36)", "why": "Silently bought Padrón peppers, which are mild frying peppers, where the recipe wants 15 g of hot chilli; plain hot chillies are stocked."}
+{"ingredient": "Džiovintos žolelės", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Italian dried-herb blend is a sensible read of 'dried herbs' and it was flagged for review anyway."}
+{"ingredient": "shallots", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "'Valgomieji svogūnėliai' are shallots — exact match."}
+{"ingredient": "garlic", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Fresh garlic matched; 0.1 kg is the smallest sensible buy."}
+{"ingredient": "carrot", "n": 2, "verdict": "OK", "class": "ok", "expected": null, "why": "Washed carrots matched; 0.1 kg covers 1 carrot."}
+{"ingredient": "sticks celery", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Stalk celery (lapkotiniai salierai) is correct for celery sticks, beating the celeriac runner-up."}
+{"ingredient": "leeks", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Leeks matched; 0.4 kg covers 2 leeks."}
+{"ingredient": "bacon", "n": 1, "verdict": "CRITICAL", "class": "fresh-vs-processed", "expected": "Šaltai rūkytos šoninės kubeliai (2287) or PANCETTA AFFUMICATA kubeliai (2288)", "why": "Silently bought raw chilled pork belly for cured bacon although smoked bacon cubes are stocked."}
+{"ingredient": "olive oil", "n": 3, "verdict": "OK", "class": "ok", "expected": null, "why": "Olive oil matched exactly."}
+{"ingredient": "chicken stock", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Chicken bouillon is the right product; one jar/pack makes far more than 1.33 L."}
+{"ingredient": "dried oregano", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Dried oregano matched exactly; flagged for review unnecessarily."}
+{"ingredient": "cannellini beans", "n": 1, "verdict": "MINOR", "class": "wrong-variety-and-underbuy", "expected": "2 x Baltosios pupelės CANNELLINI WELL DONE (3164)", "why": "Butter beans were silently substituted although an exact CANNELLINI product is stocked, and only 1 can was added for the recipe's 2 cans."}
+{"ingredient": "fresh parsley", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Fresh parsley bunch is correct."}
+{"ingredient": "lemon-flavored vodka", "n": 1, "verdict": "MINOR", "class": "wrong-variety", "expected": "Degtinė LITHUANIAN VODKA Auksinė Citrinų skonio (9642)", "why": "Silently bought plain vodka although lemon-flavoured vodka — what the cocktail specifies — is stocked."}
+{"ingredient": "melon liqueur", "n": 1, "verdict": "MISSING", "class": "no-query-generated", "expected": "Likeris KEGLEVICH DELICIOUS VODKA & MELONE (9900)", "why": "No lexicon key, so nothing was searched, yet the catalog has a 70-item Likeris category including a melon liqueur."}
+{"ingredient": "prepared sweet-and-sour mix", "n": 1, "verdict": "MISSING", "class": "no-query-generated", "expected": "Mišinys kokteiliams ruošti „Margarita“, MASTER OF MIXES (10442)", "why": "No query generated; the catalog's cocktail sour mixes are the standard substitute for prepared sweet-and-sour mix."}
+{"ingredient": "Rose's lime juice", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Lime juice matched exactly for Rose's lime juice."}
+{"ingredient": "Sprite", "n": 1, "verdict": "MISSING", "class": "brand-not-in-lexicon", "expected": "Gazuotas gėrimas SPRITE (10148)", "why": "Sprite is stocked in ten variants but no query was generated at all."}
+{"ingredient": "lemon juice", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Bottled lemon juice matched exactly."}
+{"ingredient": "honey", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Generic honey jar matched exactly."}
+{"ingredient": "pepper", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Bare 'pepper' correctly resolved to ground black pepper."}
+{"ingredient": "spinach", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Fresh spinach matched; one pack covers 5 cups of leaves."}
+{"ingredient": "strawberries", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Fresh strawberries matched; one punnet covers 1.5 cups."}
+{"ingredient": "red onion", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Red onions matched; 0.1 kg covers half a cup of rings."}
+{"ingredient": "feta cheese", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Feta cheese matched exactly."}
+{"ingredient": "pasta", "n": 1, "verdict": "MINOR", "class": "wrong-variety", "expected": "Makaronai BARILLA FARFALLE (4071) or LUBELLA FUSILLI (4051)", "why": "Silently bought ribbon tagliatelle although the recipe names short shapes and farfalle/fusilli/rigatoni are all stocked."}
+{"ingredient": "zucchini", "n": 1, "verdict": "MINOR", "class": "quantity-under", "expected": "2 vnt Žaliosios cukinijos", "why": "Correct courgettes, but 1 unit is bought for a recipe needing 2 courgettes (~600 g)."}
+{"ingredient": "Baby Spinach", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Fresh spinach matched; 2 packs cover 283 g."}
+{"ingredient": "pasta sauce", "n": 1, "verdict": "CRITICAL", "class": "head-noun-dropped", "expected": "Pomidorų padažas TRADICINIS KKF (3574) or Picos pomidorų padažas MUTTI (3091)", "why": "'Pasta sauce' was silently resolved to dry tagliatelle noodles via the 'pasta' lexicon key — the sauce is dropped entirely and the basket gets a third pack of pasta."}
+{"ingredient": "parmesan cheese", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Parmigiano Reggiano matched exactly."}
+{"ingredient": "half-and-half", "n": 1, "verdict": "MISSING", "class": "no-query-generated", "expected": "Grietinėlė 35 % rieb. (382/384)", "why": "No query generated although the recipe itself allows heavy cream and the catalog has a full Grietinėlė category."}
+{"ingredient": "mozzarella cheese", "n": 1, "verdict": "MINOR", "class": "form-variant", "expected": "Tarkuota mocarela WELL DONE, 45 % (886)", "why": "Silently bought a mozzarella block/ball where the recipe wants shredded mozzarella and grated mozzarella is stocked."}
