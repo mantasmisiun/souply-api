@@ -18,7 +18,7 @@ receipts/_logs/
 # Recipe-import validation corpus: harvested HTML and sweep output are
 # disposable and huge — regenerate them with `npm run recipes:harvest`.
 # receipts/_recipes/urls/ stays TRACKED: the URL lists are the expensive part.
-receipts/_recipes/pages/
+receipts/_recipes/pages*/
 receipts/_recipes/tables/
 # Raw receipt images (PII)
 receipts/lidl/
