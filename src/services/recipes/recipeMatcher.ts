@@ -549,6 +549,10 @@ export const matchIngredient = async (
      */
     const nonePassed = picks.length > 0
         && !picks.some(p => p.confidence >= SOFT_ACCEPT && queryFullyPresent(query, p.name));
+    if (process.env.RECIPE_DEBUG) {
+        console.log(`[DBG] phrase="${ing.nameFull || ing.name}" query="${query}" nonePassed=${nonePassed}`);
+        for (const p of picks) console.log(`  [pre ] ${p.confidence.toFixed(2)} cat=${p.categoryId} dem=${p.demerits} qfp=${queryFullyPresent(query, p.name)} ${p.name}`);
+    }
 
     let fellBack = false;
     /**
@@ -583,6 +587,10 @@ export const matchIngredient = async (
         }
     }
     if (picks.length === 0) return base;
+    if (process.env.RECIPE_DEBUG) {
+        console.log(`[DBG] fellBack=${fellBack} acceptQuery="${acceptQuery}"`);
+        for (const p of picks) console.log(`  [post] ${p.confidence.toFixed(2)} cat=${p.categoryId} dem=${p.demerits} qfp=${queryFullyPresent(acceptQuery, p.name)} ${p.name}`);
+    }
 
     /**
      * The best pick that actually PASSES the identity bar — not simply the first
