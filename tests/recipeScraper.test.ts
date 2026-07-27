@@ -128,6 +128,27 @@ describe('extractRecipe — the fallback ladder', () => {
             .toThrow(RecipeParseError);
     });
 
+    /**
+     * receptai.lt sells the last <li> of its ingredient list to an advertiser
+     * — "Geriausias ingredientų kainas tikrink - akcijos.lt" reached two
+     * baskets as an "ingredient" on the baseline sweep. The filter demands a
+     * bare domain AND price talk on the same line, so an ingredient that
+     * merely names a brand survives.
+     */
+    it('drops the advert row a site printed inside its ingredient list', () => {
+        const r = extractRecipe(page(`
+            <h2>Ingredientai</h2>
+            <ul>
+              <li>3 kilogramai porų</li>
+              <li>Dr. Oetker aštrus prieskonių mišinys "Pikant fix", 1 pakelis</li>
+              <li>Geriausias ingredientų kainas tikrink - akcijos.lt</li>
+            </ul>`), 'https://example.com/r');
+        expect(r.ingredientLines).toEqual([
+            '3 kilogramai porų',
+            'Dr. Oetker aštrus prieskonių mišinys "Pikant fix", 1 pakelis',
+        ]);
+    });
+
     it('drops a line the site published twice', () => {
         const blob = JSON.stringify({
             '@type': 'Recipe', name: 'Dupe', recipeIngredient: ['1 tsp salt', '1 tsp salt', '2 eggs'],

@@ -626,6 +626,48 @@ describe('water is not a purchase', () => {
     ])('still buys %s', (line, lang) => {
         expect(first(line, lang as 'lt' | 'en').ignored).toBe(false);
     });
+
+    /** "apie 400 ml vandens" (beatosvirtuve.lt) — the spelled approximation hid
+     *  the number from the grammar AND kept "apie" in the name, so TAP_WATER
+     *  never saw plain "vandens" and tap water reached the basket unmatched. */
+    it('still ignores tap water behind a spelled approximation', () => {
+        const p = first('apie 400 ml vandens', 'lt');
+        expect(p.ignored).toBe(true);
+        expect(shape(p)).toEqual({ q: 400, max: null, unit: 'ml', name: 'vandens' });
+    });
+});
+
+/**
+ * Lines a shopper never buys — each one reached the basket as an unmatched row
+ * on the 180-recipe baseline sweep. Same treatment as tap water: the line is
+ * kept and marked ignored, so the UI can show it in the "not added" list.
+ */
+describe('non-ingredients are not purchases', () => {
+    const first = (line: string, lang: 'lt' | 'en' = 'lt') => parseIngredientLine(line, lang)[0];
+
+    it.each([
+        // valgom.lt prints the dough-PROVING step inside its ingredient list —
+        // an instruction, not a thing, even though it carries an amount.
+        ['tešlos rauginimas'],
+        ['1 a.š. tešlos rauginimas'],
+        // Ice cubes are tap water in another shape; receptai.lt also glues them.
+        ['ledukai'],
+        ['šiek tiekledukai'],
+        ['200 mililitrųledukai(kubeliai)'],
+        // A garnish INSTRUCTION — dative of purpose, no amount anywhere.
+        ['daigų papuošimui'],
+    ])('ignores %s', (line) => {
+        expect(first(line).ignored).toBe(true);
+    });
+
+    it.each([
+        // "ledai" is ICE CREAM — one letter from "ledukai" and a real product.
+        ['ledai', 'lt'],
+        // With an amount the site is telling us to BUY the garnish.
+        ['100 g šokolado papuošimui', 'lt'],
+    ])('still buys %s', (line, lang) => {
+        expect(first(line, lang as 'lt' | 'en').ignored).toBe(false);
+    });
 });
 
 /**
@@ -668,6 +710,39 @@ describe('trailing amounts (15min.lt / greitireceptai.lt)', () => {
         expect(shape(one('zest and juice of 1 lime', 'en')))
             .toEqual({ q: 1, max: null, unit: null, name: 'lime' });
     });
+
+    /** greitireceptai.lt also prints a VAGUE amount after the name — "Vanilinas
+     *  žiupsnelis" (a pinch of vanillin). With no number to find, the whole
+     *  string survived as the name and matched nothing. */
+    it('reads a bare pinch-word trailing the name', () => {
+        expect(shape(one('Vanilinas žiupsnelis')))
+            .toEqual({ q: 1, max: null, unit: 'pinch', name: 'Vanilinas' });
+    });
+
+    /** Pinch-words only: a trailing count/package unit names a PART of the
+     *  product, and reading it as an amount of one would underbuy. */
+    it('does not read a trailing part-unit as an amount', () => {
+        expect(shape(one('duonos riekelės')))
+            .toEqual({ q: null, max: null, unit: null, name: 'duonos riekelės' });
+    });
+});
+
+/**
+ * "apie 400 ml vandens", "maždaug 200 g miltų" — the spelled approximation
+ * markers hid the number from the quantity grammar exactly as a "~" does, and
+ * the marker itself survived at the head of the NAME. Digit-gated: a name that
+ * merely starts with one of these words loses nothing.
+ */
+describe('spelled approximation markers', () => {
+    it.each([
+        ['apie 400 ml vandens', 400, 'ml', 'vandens'],
+        ['maždaug 200 g miltų', 200, 'g', 'miltų'],
+        ['about 2 cups flour', 2, 'cup', 'flour'],
+    ])('%s', (line, q, unit, name) => {
+        const lang = /about/.test(line as string) ? 'en' : 'lt';
+        expect(shape(one(line as string, lang as Lang)))
+            .toEqual({ q, max: null, unit, name });
+    });
 });
 
 /**
@@ -702,6 +777,16 @@ describe('comma-separated preparation that selects the product', () => {
         const p = one('500 gramų bulvių, virtų ir sutarkuotų');
         expect(shape(p)).toEqual({ q: 500, max: null, unit: 'g', name: 'bulvių' });
         expect(p.note).toContain('virtų ir sutarkuotų');
+    });
+
+    /** The MIRROR shape: the comma leaves the identity participle as the HEAD
+     *  and the noun in the tail. Noted away, the name became the bare "virtos"
+     *  and confidently bought cooked SAUSAGES for a poultry stew. */
+    it('keeps the line whole when the participle leads and the noun trails', () => {
+        const p = one('Apie 800 g virtos, keptos arba rūkytos paukštienos');
+        expect(shape(p)).toEqual({
+            q: 800, max: null, unit: 'g', name: 'virtos keptos arba rūkytos paukštienos',
+        });
     });
 });
 

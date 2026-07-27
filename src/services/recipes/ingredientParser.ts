@@ -459,8 +459,44 @@ const TAP_WATER = new RegExp(
     'i',
 );
 
-const markUnshoppable = (p: ParsedIngredient): ParsedIngredient =>
-    (!p.ignored && TAP_WATER.test(fold(p.name).trim()) ? { ...p, ignored: true } : p);
+/**
+ * Neither are these — each measured on the 180-recipe baseline sweep, each
+ * reaching the basket as an unmatched row the shopper can do nothing with:
+ *   · "tešlos rauginimas" — valgom.lt prints the dough-PROVING step inside its
+ *     ingredient list ("1 a.š. tešlos rauginimas", ×4). It is an instruction,
+ *     not a thing, and the amount it carries does not make it one — so this
+ *     test is NOT gated on the quantity being empty.
+ *   · "ledukai" — ice cubes are tap water in another shape (receptai.lt glues
+ *     them too: "šiek tiekledukai", "200 mililitrųledukai(kubeliai)").
+ *     Diminutive forms only: "ledai" is ICE CREAM, one letter away and a real
+ *     product, and must never match.
+ * Matched against the FOLDED name, same as TAP_WATER above.
+ */
+const NEVER_BOUGHT = new RegExp(
+    '^(?:teslos\\s+raugini\\p{L}*'
+    + '|leduk\\p{L}*|ledo\\s+kubel\\p{L}*'
+    + '|(?:crushed\\s+)?ice(?:\\s+cubes?)?)$', 'iu');
+
+/**
+ * "daigų papuošimui" (beatosvirtuve.lt) — a garnish INSTRUCTION: a dative of
+ * purpose with no amount anywhere. The colon spelling of the same idea
+ * ("Papuošimui: grietinė") names a real ingredient behind the heading and is
+ * COLON_HEADING's business — this fires only when the purpose word is the
+ * whole tail of a bare, amountless line. The quantity gate in markUnshoppable
+ * is what keeps "100 g šokolado papuošimui" shoppable: with an amount, the
+ * site is telling us to buy some.
+ */
+const GARNISH_INSTRUCTION = /^\p{L}+\s+(?:papuosimui|puosimui|dekoravimui)$/iu;
+
+const markUnshoppable = (p: ParsedIngredient): ParsedIngredient => {
+    if (p.ignored) return p;
+    const name = fold(p.name).trim();
+    if (TAP_WATER.test(name) || NEVER_BOUGHT.test(name)) return { ...p, ignored: true };
+    if (p.quantity == null && p.unit == null && GARNISH_INSTRUCTION.test(name)) {
+        return { ...p, ignored: true };
+    }
+    return p;
+};
 
 /**
  * Split "Druskos, pipirų, lauro lapų" into three.
@@ -624,6 +660,31 @@ const refitTrailingAmount = (text: string, lang: Lang): string => {
     return `${tail} ${head}`;
 };
 
+/**
+ * greitireceptai.lt also prints a VAGUE amount after the name, with no number
+ * anywhere: "Vanilinas žiupsnelis" (vanillin — a pinch). `refitTrailingAmount`
+ * cannot help — there is no number for it to find — so the whole string
+ * survived as the name and matched nothing. When the LAST word alone is a
+ * pinch-word and a name precedes it, rewrite to the ordinary amount-first
+ * shape ("žiupsnelis Vanilinas") and let the existing machinery read it: the
+ * unit-with-no-number rule already makes it ONE pinch.
+ *
+ * Pinch-words ONLY, deliberately. A trailing count or package unit names a
+ * PART of the product ("duonos riekelės" — bread slices, plural, count
+ * unstated), and reading it as an amount of one would underbuy.
+ */
+const refitTrailingPinch = (text: string, lang: Lang): string => {
+    if (lang !== 'lt') return text;
+    const t = text.trim();
+    // A digit anywhere means the ordinary paths own the line.
+    if (new RegExp(`[\\d${VULGAR_CLASS}]`).test(t)) return text;
+    const words = t.split(/\s+/);
+    if (words.length < 2) return text;
+    const last = stripPunct(words[words.length - 1]);
+    if (lookupUnit(last) !== 'pinch') return text;
+    return `${last} ${words.slice(0, -1).join(' ')}`;
+};
+
 /** Where a trailing amount can begin: a number token at a word start, allowing
  *  the "~" approximation prefix. First match only — with the head required
  *  digit-free-ish (it must end in a letter), a later number can only ever be
@@ -656,6 +717,12 @@ const isAmountOnly = (tail: string, lang: Lang): boolean => {
     return bare.adjective != null && bare.rest.trim() === '';
 };
 
+/** The spelled approximation markers, in both languages, gated on a number
+ *  actually following — "apie", "maždaug", "about" in front of anything else
+ *  is prose, not an amount. */
+const APPROX_LEAD_RE = new RegExp(
+    `^\\s*(?:apie|maždaug|mazdaug|about|approx\\.?|approximately|roughly|around)\\s+(?=[~\\d${VULGAR_CLASS}])`, 'i');
+
 const parseSingle = (part: string, rawLine: string, lang: Lang): ParsedIngredient => {
     let text = part;
     text = text.replace(PRICE_RE, ' ').replace(CROSSREF_RE, ' ');
@@ -673,6 +740,7 @@ const parseSingle = (part: string, rawLine: string, lang: Lang): ParsedIngredien
     // two sides is the ingredient.
     if (text.includes(':')) text = splitNonAmountColon(text, notes);
     text = refitTrailingAmount(text, lang);
+    text = refitTrailingPinch(text, lang);
 
     // Parentheses are notes — except when the ONLY content is a size, in which
     // case it is the package the count refers to ("1 (400 g) can tomatoes").
@@ -698,7 +766,14 @@ const parseSingle = (part: string, rawLine: string, lang: Lang): ParsedIngredien
     text = text.replace(TO_TASTE_RE, ' ').replace(/\s+/g, ' ').trim();
 
     // "~500 gramų faršo" — a leading approximation tilde hides the number from
-    // the quantity grammar entirely.
+    // the quantity grammar entirely. beatosvirtuve.lt SPELLS the tilde instead
+    // — "apie 400 ml vandens" — and with "apie" left standing the amount never
+    // parsed and the name kept the word, so the TAP_WATER rule never saw plain
+    // "vandens": tap water reached the basket as an unmatched row. The colon
+    // refit already peels "apie" on its own path; this is the same courtesy on
+    // the ordinary one. Digit-gated, so a name that merely STARTS with one of
+    // these words loses nothing.
+    text = text.replace(APPROX_LEAD_RE, '');
     text = text.replace(/^\s*~\s*/, '');
     // sallysbakingaddiction spells the mixed number: "3 and 1/4 cups". The
     // quantity grammar is whitespace-only, so the "and" stopped it at 3 and the
@@ -982,6 +1057,17 @@ const splitNameAndNote = (
             || (isBareModifier(after) && findIngredient(before) != null
                 && !LT_PREP_LEAD.test(`${after} `) && !/ui$/i.test(after)))) {
             s = `${after} ${before}`;
+            leadIsIdentity = true;
+        } else if (lang === 'lt' && after && LT_IDENTITY_TAIL.test(before)
+            && /^[\p{L}\s]+$/u.test(after)) {
+            // The MIRROR of the fold above: the comma leaves the identity
+            // participle as the HEAD and the noun in the tail. "Apie 800 g
+            // virtos, keptos arba rūkytos paukštienos" — cooked, fried or
+            // smoked POULTRY — noted the tail away, and the bare name "virtos"
+            // then confidently bought cooked SAUSAGES. The line stays whole:
+            // the participle selects, the tail carries the noun. Letters-only
+            // tail, so "grietinėlės, 35%" keeps its note behavior.
+            s = `${before} ${after}`;
             leadIsIdentity = true;
         } else {
             // Usually the tail is preparation: "chicken breasts, cut into

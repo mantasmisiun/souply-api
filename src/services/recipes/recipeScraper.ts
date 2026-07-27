@@ -524,6 +524,20 @@ export const detectLang = (htmlLang: string | undefined, sample: string): Lang =
 };
 
 /**
+ * receptai.lt sells the last slot of its ingredient <ul> to an advertiser:
+ * "Geriausias ingredientų kainas tikrink - akcijos.lt" sits as a sibling <li>
+ * of the real ingredients, so the DOM rung (or any other that reads the list)
+ * swallows it whole — and a price-comparison advert reached two baskets as an
+ * "ingredient" on the 180-recipe sweep. A line is dropped only when it BOTH
+ * names a bare domain and talks prices/deals: an ingredient naming a brand
+ * ("Pikant fix", „dansukker“) has neither and must survive.
+ */
+const PROMO_DOMAIN_RE = /(?<![\p{L}\d.])[\p{L}\d-]{2,}\.(?:lt|com|eu|net|org)(?![\p{L}\d])/iu;
+const PROMO_PITCH_RE = /(?<![\p{L}])(?:kain\p{L}*|akcij\p{L}*|nuolaid\p{L}*|tikrink\p{L}*|prices?|deals?|discounts?)(?![\p{L}])/iu;
+
+const isPromoLine = (s: string): boolean => PROMO_DOMAIN_RE.test(s) && PROMO_PITCH_RE.test(s);
+
+/**
  * Pull a recipe out of a page. Pure — give it stored HTML and it behaves
  * exactly as it does live, which is what makes the fixture corpus meaningful.
  */
@@ -540,6 +554,10 @@ export const extractRecipe = (html: string, sourceUrl: string): ScrapedRecipe =>
     for (const [extractor, fn] of ladder) {
         const raw = fn($);
         if (!raw || raw.ingredients.length === 0) continue;
+        // The advert filter runs before the rung is accepted: a list that was
+        // NOTHING but adverts is not a recipe, and a lower rung deserves a try.
+        const ingredientLines = dedupe(raw.ingredients).filter(l => !isPromoLine(l));
+        if (ingredientLines.length === 0) continue;
 
         const title = raw.title || cleanText($('h1').first().text())
             || cleanText($('title').first().text()) || 'Receptas';
@@ -554,8 +572,8 @@ export const extractRecipe = (html: string, sourceUrl: string): ScrapedRecipe =>
             servings: raw.servings,
             // A site occasionally repeats a line (a section header printed in
             // both the summary and the detail block); the shopper should not
-            // see it twice.
-            ingredientLines: dedupe(raw.ingredients),
+            // see it twice. Deduped and advert-filtered above.
+            ingredientLines,
             lang: detectLang($('html').attr('lang'), raw.ingredients.join(' ')),
             extractor,
         };
