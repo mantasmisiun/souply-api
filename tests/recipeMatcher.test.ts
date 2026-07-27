@@ -188,6 +188,13 @@ beforeAll(async () => {
     ids.meatSkewers = await addProduct('Mėsos iešmeliai su marinatu', { amount: 500, unit: 'g' });
     // The ground-spice jar a counted "1 vienetas paprika" must NOT buy.
     ids.groundPaprika = await addProduct('Malta saldžioji paprika ALVO', { amount: 100, unit: 'g' });
+
+    // --- THE DROPPED-WORD OVERHAUL: the fresh-poultry shelf never says
+    // "vištiena" (recipes always do), and the canned tin whose label cannot
+    // vouch for the "šaldytų" a recipe asked for.
+    ids.broiler = await addProduct('Viščiukas broileris RIMI', { amount: 1, unit: 'kg', weighable: true });
+    ids.chickenThighs = await addProduct('Viščiukų broilerių šlaunelės RIMI', { amount: 700, unit: 'g' });
+    ids.cannedPeas = await addProduct('Žirneliai KĖDAINIŲ KONSERVAI', { amount: 690, unit: 'g' });
 }, 60_000);   // ~40 products × (Product + StoreProduct + Price) — well past Jest's 5 s default
 
 afterAll(async () => {
@@ -723,5 +730,76 @@ describe('a counted piece vetoes a ground-spice reading', () => {
     it('keeps "1 tsp paprika" on the spice jar', async () => {
         const m = await match('1 tsp paprika', 'en');
         expect(m.product?.productId).toBe(ids.groundPaprika);
+    });
+});
+
+/**
+ * THE DROPPED-WORD OVERHAUL. Over a 180-recipe sweep the LT guard fired 249
+ * times — 84% of the whole review queue — overwhelmingly on CORRECT matches:
+ * Lithuanian inflection the blunt stemmer missed, words the lexicon window had
+ * already accounted for, and the vištiena↔viščiukas shelf synonym. The guard
+ * now consults the window (as the EN branch always did), a verified synonym
+ * table and a kitchen-state list — while process words that pick a different
+ * SHELF (rūkytos, šaldytų, konservuotų…) still flag, because those are the
+ * substitutions the guard exists to report.
+ */
+describe('the dropped-word guard flags substitutions, not inflection', () => {
+    /** 'maltų juodųjų pipirų' is a listed form of the pepper entry — the
+     *  lexicon deliberately says ground pepper shops as "Juodieji pipirai",
+     *  and that decision must not come back as a warning 27 times a sweep. */
+    it('does not flag the grinding word the lexicon window accounted for', async () => {
+        const m = await match('1 šaukštelis maltų juodųjų pipirų');
+        expect(m.product?.productId).toBe(ids.blackPepper);
+        expect(m.confident).toBe(true);
+    });
+
+    /** "Vištienos kiaušinis" is an EGG. Leftmost-wins used to stop on the
+     *  1-word 'vištienos' window and buy a WHOLE BROILER — 7× in one sweep. */
+    it('reads a chicken egg as eggs, not as a chicken', async () => {
+        const m = await match('2 vnt. Vištienos kiaušinis');
+        expect(m.product?.productId).toBe(ids.eggs);
+        expect(m.product?.productId).not.toBe(ids.broiler);
+    });
+
+    /** The shelf says "viščiukų broilerių", the recipe says "vištienos" — the
+     *  same bird, and 17 correct matches went to review over the word. */
+    it('does not flag the vištiena↔viščiukas shelf synonym', async () => {
+        const m = await match('400 g vištienos šlaunelių mėsos');
+        expect(m.product?.productId).toBe(ids.chickenThighs);
+        expect(m.confident).toBe(true);
+    });
+
+    /** A kitchen state is the cook's job, not a different purchase. */
+    it('does not flag butter the recipe wants softened', async () => {
+        const m = await match('100 g minkšto sviesto');
+        expect(m.product?.productId).toBe(ids.butter);
+        expect(m.confident).toBe(true);
+    });
+
+    /** The genuine flag the guard exists for: the product is NOT smoked. */
+    it('still flags a preparation the product does not carry', async () => {
+        const m = await match('500 g rūkytos vištienos');
+        expect(m.product?.productId).toBe(ids.broiler);
+        expect(m.confident).toBe(false);
+        expect(m.reviewReason).toBe('dropped_word');
+    });
+
+    /** The window must NOT excuse a process word: 'šaldytų žirnelių' is a
+     *  listed form of the generic peas entry, but a recipe asking for frozen
+     *  peas must never receive a CAN silently. */
+    it('still flags a can offered for frozen peas', async () => {
+        const m = await match('400 g šaldytų žirnelių');
+        expect(m.product?.productId).toBe(ids.cannedPeas);
+        expect(m.confident).toBe(false);
+        expect(m.reviewReason).toBe('dropped_word');
+    });
+
+    /** The product side of the same coin: "Dž." IS the "džiovintų" the recipe
+     *  asked for, and the flag used to fire hardest on exactly the right
+     *  product because the abbreviation stems to nothing. */
+    it('reads the shelf abbreviation as the word the recipe used', async () => {
+        const m = await match('100 g džiovintų spanguolių');
+        expect(m.product?.productId).toBe(ids.driedCranberries);
+        expect(m.confident).toBe(true);
     });
 });

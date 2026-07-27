@@ -80,7 +80,10 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
         key: 'cream_heavy',
         ltName: 'Grietinėlė',
         enName: 'heavy cream',
-        lt: ['grietinėlė', 'grietinėlės'],
+        // 'plakamoji' is the LT label for whipping cream — the 35 % carton IS
+        // it, and without the form the word read as silently dropped and sent
+        // every correct "plakamosios grietinėlės" match to review.
+        lt: ['grietinėlė', 'grietinėlės', 'plakamoji grietinėlė', 'plakamosios grietinėlės'],
         en: ['cream', 'heavy cream', 'whipping cream', 'heavy whipping cream', 'thickened cream', 'double cream', 'pouring cream'],
         gramsPerMl: 0.99,
         pantry: false,
@@ -221,8 +224,27 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
         key: 'cream_cheese',
         ltName: 'Tepamas sūrelis',
         enName: 'cream cheese',
-        lt: ['tepamas sūrelis', 'tepamo sūrelio', 'kreminis sūris', 'kreminio sūrio', 'tepamas sūris', 'tepamo sūrio'],
+        // 'grietinėlės sūris' is the literal LT calque for cream cheese and
+        // 'Filadelfijos sūris' is the brand used generically — without them a
+        // recipe's cream cheese bought a carton of grietinėlė instead.
+        lt: ['tepamas sūrelis', 'tepamo sūrelio', 'kreminis sūris', 'kreminio sūrio', 'tepamas sūris', 'tepamo sūrio',
+            'grietinėlės sūris', 'grietinėlės sūrio', 'filadelfijos sūris', 'filadelfijos sūrio'],
         en: ['cream cheese'],
+        gramsPerMl: 1.0,
+        pantry: false,
+    },
+    {
+        key: 'cheese_processed',
+        // Lydytas sūris is its own shelf (cat 52, 40 live products: 'Lydytas
+        // tepamasis sūris FARM MILK', 'Tepamasis lydytas sūrelis ROKIŠKIO
+        // GRAND'). Without the entry 'lydyto sūrio' fell through to the bare
+        // 'sūrio' form and bought fermentinis — a different product; the entry
+        // is also what makes it safe to treat 'lydyt' as a cook's action
+        // (melted butter/chocolate) in the dropped-word guard.
+        ltName: 'Lydytas sūris',
+        enName: 'processed cheese',
+        lt: ['lydytas sūris', 'lydyto sūrio', 'lydytas sūrelis', 'lydyto sūrelio', 'lydyti sūreliai', 'lydytų sūrelių'],
+        en: ['processed cheese'],
         gramsPerMl: 1.0,
         pantry: false,
     },
@@ -230,7 +252,12 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
         key: 'egg',
         ltName: 'Kiaušiniai',
         enName: 'eggs',
-        lt: ['kiaušinis', 'kiaušiniai', 'kiaušinio', 'kiaušinių'],
+        // 'vištienos kiaušinis' (a chicken egg) MUST be a form: leftmost-wins
+        // matching otherwise stopped on the 1-word 'vištienos' window and the
+        // chicken entry bought a WHOLE BROILER for "2 vnt. Vištienos
+        // kiaušinis" — 7 times in one 180-recipe sweep.
+        lt: ['kiaušinis', 'kiaušiniai', 'kiaušinio', 'kiaušinių',
+            'vištienos kiaušinis', 'vištienos kiaušiniai', 'vištienos kiaušinių', 'vištų kiaušiniai', 'vištų kiaušinių'],
         en: ['egg', 'eggs', 'large egg', 'large eggs', 'beaten egg'],
         gramsPerPiece: 55, // medium egg without shell ≈ edible weight of an M egg
         pantry: false, // perishable — actually bought
@@ -240,7 +267,12 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
         // Bought as whole eggs — the shopping name stays "Kiaušiniai".
         ltName: 'Kiaušiniai',
         enName: 'egg yolks',
-        lt: ['trynys', 'tryniai', 'trynio', 'trynių', 'kiaušinių tryniai', 'kiaušinių trynių'],
+        // The SINGULAR genitive pair is spelled out because the blunt stemmer
+        // cannot collapse it into the plural forms ('kiaušinio' stems to
+        // 'kiausini', 'kiaušinių' to 'kiausin') — so "kiaušinio trynio" missed
+        // this entry and landed on plain eggs with a dropped-word flag.
+        lt: ['trynys', 'tryniai', 'trynio', 'trynių', 'kiaušinių tryniai', 'kiaušinių trynių',
+            'kiaušinio trynys', 'kiaušinio trynio'],
         en: ['egg yolk', 'egg yolks', 'yolk', 'yolks'],
         gramsPerPiece: 18, // yolk of an M/L egg
         pantry: false,
@@ -304,7 +336,12 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
         ltName: 'Viščiukų broilerių šlaunelės',
         enName: 'chicken thighs',
         lt: ['vištienos šlaunelės', 'vištienos šlaunelių', 'vištienos šlaunelė',
-            'viščiukų broilerių šlaunelės', 'viščiukų broilerių šlaunelių'],
+            'viščiukų broilerių šlaunelės', 'viščiukų broilerių šlaunelių',
+            // '…šlaunelių mėsa' is how recipes ask for the boneless meat — the
+            // shelf name above even says so, and without the form the word
+            // 'mėsos' read as dropped on every correct match.
+            'vištienos šlaunelių mėsa', 'vištienos šlaunelių mėsos',
+            'viščiukų broilerių šlaunelių mėsa', 'viščiukų broilerių šlaunelių mėsos'],
         en: ['chicken thigh', 'chicken thighs', 'boneless skinless chicken thighs'],
         gramsPerPiece: 120, // boneless, skinless
         pantry: false,
@@ -505,6 +542,19 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
         weighable: true,
     },
     {
+        key: 'dorada',
+        // The fresh-fish shelf sells it under the full 'auksaspalvės dorados'
+        // ('Šviežios auksaspalvės dorados, skrostos', cat 109; plus five more
+        // live listings — verified 2026-07-27), recipes just say 'dorada'.
+        ltName: 'Dorados',
+        enName: 'sea bream',
+        lt: ['dorada', 'dorados', 'auksaspalvė dorada', 'auksaspalvės dorados'],
+        en: ['sea bream', 'gilthead bream', 'dorada', 'dorade'],
+        gramsPerPiece: 400, // one whole retail fish, gutted
+        pantry: false,
+        weighable: true,
+    },
+    {
         key: 'salmon',
         // The FRESH aisle spells it "Šviežia atlantinių lašišų filė" — plural
         // genitive, never the bare nominative — so "Lašiša" alone returned the
@@ -660,7 +710,11 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
         key: 'flour_wheat',
         ltName: 'Kvietiniai miltai',
         enName: 'wheat flour',
-        lt: ['miltai', 'miltų', 'kvietiniai miltai', 'kvietinių miltų'],
+        // 'kepimo miltai' (baking flour) is a recipe phrase for plain wheat
+        // flour — distinct from 'kepimo milteliai' (baking powder) even after
+        // stemming, so registering it cannot rob that entry.
+        lt: ['miltai', 'miltų', 'kvietiniai miltai', 'kvietinių miltų',
+            'kepimo miltai', 'kepimo miltų', 'kvietiniai kepimo miltai', 'kvietinių kepimo miltų'],
         en: ['flour', 'wheat flour', 'all-purpose flour', 'all purpose flour', 'plain flour', 'ap flour', 'white flour'],
         gramsPerMl: 0.53, // spooned into the cup, NOT packed — packed flour reaches 0.65+
         pantry: true,
@@ -694,6 +748,21 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
         lt: ['ruginiai miltai', 'ruginių miltų'],
         en: ['rye flour'],
         gramsPerMl: 0.5,
+        pantry: false,
+    },
+    {
+        key: 'malt_rye',
+        // The bread-and-kvass staple. One live product carries the noun as
+        // food: 'Sausas salyklas ALVO' (cat 212, verified 2026-07-27) — dry
+        // fermented rye malt, which is exactly what 'ruginio salyklo' recipes
+        // mean. Density omitted: malt is measured in grams by every recipe
+        // that uses it.
+        ltName: 'Salyklas',
+        enName: 'rye malt',
+        lt: ['salyklas', 'salyklo', 'ruginis salyklas', 'ruginio salyklo', 'sausas salyklas', 'sauso salyklo'],
+        // NOT bare 'malt': leftmost-wins would then read "malt vinegar" as
+        // this entry and buy bread malt for vinegar.
+        en: ['rye malt'],
         pantry: false,
     },
     {
@@ -900,6 +969,18 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
         lt: ['mėsainių bandelės', 'mėsainių bandelių', 'mėsainių bandelė'],
         en: ['burger bun', 'burger buns', 'hamburger buns', 'brioche buns'],
         gramsPerPiece: 60,
+        pantry: false,
+    },
+    {
+        key: 'wafer_sheets',
+        // 'Vaflių lakštai KLAIPĖDOS DUONA' / 'Apvalūs vaflių lakštai' — 8 live
+        // products (verified 2026-07-27). 'Tortų karalienė' is the brand LT
+        // bakers use as the generic name for the same sheets, so the branded
+        // phrase resolves here rather than going unmatched.
+        ltName: 'Vaflių lakštai',
+        enName: 'wafer sheets',
+        lt: ['vaflių lakštai', 'vaflių lakštų', 'tortų karalienės lakštai', 'tortų karalienės lakštų'],
+        en: ['wafer sheets', 'cake wafer sheets'],
         pantry: false,
     },
     {
@@ -1269,8 +1350,30 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
         key: 'oil_cooking',
         ltName: 'Aliejus',
         enName: 'cooking oil',
-        lt: ['aliejus', 'aliejaus'],
-        en: ['oil', 'cooking oil', 'vegetable oil', 'canola oil', 'neutral oil', 'plain oil', 'oil spray'],
+        // 'augalinis aliejus' (vegetable oil) IS the generic cooking oil —
+        // recipes print it constantly, and without the form the qualifier read
+        // as a dropped word on every correct sunflower-oil match.
+        lt: ['aliejus', 'aliejaus', 'augalinis aliejus', 'augalinio aliejaus'],
+        // 'oil spray' moved to cooking_spray below: a spray can is a different
+        // purchase from a bottle, and the catalog stocks the cans.
+        en: ['oil', 'cooking oil', 'vegetable oil', 'canola oil', 'neutral oil', 'plain oil'],
+        gramsPerMl: 0.92,
+        pantry: true,
+    },
+    {
+        key: 'cooking_spray',
+        // Verified 2026-07-27: a real shelf, not a US-only import — cats
+        // 186-189 hold 11 live spray oils ('Purškiamasis ypač tyras alyvuogių
+        // aliejus LA ESPANOLA', 'Ekologiškas purškiamasis rapsų aliejus
+        // BIONATURALIS'). Was the single most common unmatched EN ingredient
+        // (4×) in the 180-recipe baseline.
+        // 'Purškiamasis', the definite form, because it is what the PLAIN cans
+        // print — the indefinite 'Purškiamas' surface-matched the one
+        // truffle-flavoured can best and ranked it first.
+        ltName: 'Purškiamasis aliejus',
+        enName: 'cooking spray',
+        lt: ['purškiamas aliejus', 'purškiamo aliejaus', 'purškiamasis aliejus', 'purškiamojo aliejaus'],
+        en: ['cooking spray', 'nonstick cooking spray', 'non-stick cooking spray', 'baking spray', 'oil spray'],
         gramsPerMl: 0.92,
         pantry: true,
     },
@@ -1824,7 +1927,9 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
         key: 'thyme',
         ltName: 'Čiobreliai',
         enName: 'fresh thyme',
-        lt: ['čiobreliai', 'čiobrelių'],
+        // Leaf forms: the leaves ARE the herb (unlike currant leaves vs the
+        // berries), so 'čiobrelių lapelių' must not read as a dropped word.
+        lt: ['čiobreliai', 'čiobrelių', 'čiobrelių lapeliai', 'čiobrelių lapelių'],
         en: ['fresh thyme', 'thyme sprigs', 'sprigs thyme'],
         // ONE SPRIG, like rosemary below — this field converts the RECIPE's
         // count into a weight, and a recipe counts sprigs, never bunches. Set to
@@ -1921,7 +2026,8 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
         key: 'mint',
         ltName: 'Mėtos',
         enName: 'mint',
-        lt: ['mėtos', 'mėtų', 'šviežios mėtos', 'šviežių mėtų'],
+        // Leaf forms for the same reason as thyme: mint leaves are mint.
+        lt: ['mėtos', 'mėtų', 'šviežios mėtos', 'šviežių mėtų', 'mėtų lapeliai', 'mėtų lapelių'],
         en: ['mint', 'fresh mint', 'mint leaves'],
         gramsPerPiece: 25, // one bunch
         pantry: false,
@@ -2210,7 +2316,12 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
         key: 'tahini',
         ltName: 'Tahini pasta',
         enName: 'tahini',
-        lt: ['tahini', 'tahini pasta', 'tahini pastos'],
+        // The declined 'tahinio' has to be spelled out — it stems to 'tahini'
+        // while the listed 'tahini' stems to 'tahin', so the stemmed index
+        // never collapses the pair and the LT genitive went unmatched.
+        // 'Sezamų pasta SUNTAT' / 'Sezamų sėklų pasta tahini DOYAL' are the
+        // shelf names (6 live products, verified 2026-07-27).
+        lt: ['tahini', 'tahinis', 'tahinio', 'tahini pasta', 'tahini pastos', 'sezamų pasta', 'sezamų pastos'],
         en: ['tahini', 'tahini paste', 'sesame paste'],
         gramsPerMl: 1.0,
         pantry: false,
@@ -2671,6 +2782,18 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
         weighable: true,
     },
     {
+        key: 'oyster_mushrooms',
+        // 'Kreivabūdės' (cat 14, live, verified 2026-07-27) — the catalog
+        // spells the mushroom with ū, recipes write 'kreivabudžių'; both
+        // spellings are listed so neither misses.
+        ltName: 'Kreivabūdės',
+        enName: 'oyster mushrooms',
+        lt: ['kreivabūdės', 'kreivabūdžių', 'kreivabudės', 'kreivabudžių'],
+        en: ['oyster mushroom', 'oyster mushrooms'],
+        pantry: false,
+        weighable: true,
+    },
+    {
         key: 'corn_canned',
         ltName: 'Konservuoti kukurūzai',
         enName: 'canned corn',
@@ -2795,7 +2918,9 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
         key: 'lemon',
         ltName: 'Citrinos',
         enName: 'lemon',
-        lt: ['citrina', 'citrinos', 'citrinų'],
+        // Zest forms: you buy the lemon to zest it — the EN side already owns
+        // 'lemon zest', and without the LT pair 'žievelės' read as dropped.
+        lt: ['citrina', 'citrinos', 'citrinų', 'citrinos žievelė', 'citrinos žievelės', 'citrinų žievelės', 'citrinų žievelių'],
         en: ['lemon', 'lemons', 'lemon zest', 'lemon wedges'],
         gramsPerPiece: 90,
         pantry: false,
@@ -2835,7 +2960,9 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
         key: 'orange',
         ltName: 'Apelsinai',
         enName: 'oranges',
-        lt: ['apelsinas', 'apelsino', 'apelsinai', 'apelsinų'],
+        // Zest forms, mirroring lemon.
+        lt: ['apelsinas', 'apelsino', 'apelsinai', 'apelsinų',
+            'apelsino žievelė', 'apelsino žievelės', 'apelsinų žievelės', 'apelsinų žievelių'],
         en: ['orange', 'oranges', 'orange zest'],
         gramsPerPiece: 200,
         pantry: false,
@@ -3357,6 +3484,31 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
         lt: ['brendis', 'brendžio', 'konjakas', 'konjako'],
         en: ['brandy', 'cognac'],
         gramsPerMl: 0.95,
+        pantry: false,
+    },
+    {
+        key: 'vermouth',
+        // Cat 344 holds 16 live 'Vermutas …' listings including the dry ones a
+        // cocktail recipe means ('Vermutas MARTINI DRY, 1 l', 'Vermutas
+        // MARTINI EXTRA DRY, 15 %') — verified 2026-07-27.
+        ltName: 'Vermutas',
+        enName: 'vermouth',
+        lt: ['vermutas', 'vermuto'],
+        en: ['vermouth', 'dry vermouth', 'sweet vermouth', 'white vermouth'],
+        gramsPerMl: 1.0,
+        pantry: false,
+    },
+    {
+        key: 'triple_sec',
+        // 'Likeris DE KUYPER TRIPLE SEC', 'Apelsinų skonio likeris TRIPLE SEC
+        // LE FAVORI' plus two COINTREAU listings (verified 2026-07-27). The
+        // brand-bearing canonical name is deliberate, same as Likeris Kahlua
+        // below: no product says 'apelsinų likeris'.
+        ltName: 'Likeris Triple Sec',
+        enName: 'triple sec',
+        lt: ['triple sec', 'triple sec likeris', 'triple sec likerio'],
+        en: ['triple sec', 'cointreau', 'orange liqueur'],
+        gramsPerMl: 1.05, // sugar-heavy liqueur
         pantry: false,
     },
     {

@@ -688,10 +688,144 @@ const droppedWord = (
         return fold(firstAlternative(ing.nameFull || ing.name)).split(' ')
             .find(w => EN_IDENTITY_QUALIFIERS.has(w) && !covered.has(w)) ?? null;
     }
-    const covered = [...contentWords(query), ...contentWords(productName)];
+    /**
+     * The LT side judges coverage on stems (`contentWords` stems both sides),
+     * but the original rule compared the phrase against ONLY the query and the
+     * product name — and that fired 249 times over a 180-recipe sweep, 84% of
+     * the whole review queue, almost all of it on CORRECT matches. Three gaps,
+     * each fixed here:
+     *
+     *   1. The LEXICON WINDOW was ignored. "vištienos šlaunelių" is a listed
+     *      form of the chicken-thigh entry — the lexicon author deliberately
+     *      mapped that whole phrase to "Viščiukų broilerių šlaunelės" — yet
+     *      'vištienos' was flagged as dropped because neither the query nor
+     *      the product says it. Words inside `hit.form` were accounted for by
+     *      the entry that recognised them; this is the exact reference the EN
+     *      branch above already uses, for the same reason. Words OUTSIDE the
+     *      window ("juodųjų serbentų lapų" recognised through "juodųjų
+     *      serbentų") still flag, which keeps the blackcurrant-vodka case that
+     *      built this guard.
+     *   2. SHOP SYNONYMS read as dropped words. Recipes say "vištienos", the
+     *      fresh shelf says "viščiukas broileris" (135 vs 104 live products,
+     *      counted) — 17 correct chicken matches went to review for it.
+     *   3. The product side abbreviates the very word the recipe used:
+     *      "džiovintų spanguolių" → "Dž. spanguolės NATURFOOD" flagged
+     *      'džiovintų' as dropped on a product that IS dried — the flag firing
+     *      hardest on exactly the right product.
+     *
+     * Kitchen-state and purpose words ("minkšto", "papuošimui") are skipped
+     * the same way the EN branch skips prep participles — see LT_NON_IDENTITY.
+     * Genuine identity words (rūkytos, šaldytų, konservuotų, raudonosios…) are
+     * in none of these sets and still flag.
+     */
+    const covered = [...contentWords(query), ...contentWords(expandShelfAbbrev(productName))];
+    /**
+     * The window CANNOT excuse a PROCESS word. The lexicon generalises those
+     * away on purpose so the search finds anything at all — 'šaldytų žirnelių'
+     * is a listed form of the generic peas entry — but the generalisation is
+     * exactly what the flag exists to report: letting the window vouch for
+     * 'šaldytų' made a CAN of peas a silent answer to a frozen-peas recipe.
+     * A process word must survive in the query or on the product itself
+     * ("Šaldytas uogų mišinys" covers 'šaldytų'; KĖDAINIŲ KONSERVAI does not).
+     */
+    const formWords = hit ? contentWords(hit.form) : [];
     return contentWords(firstAlternative(ing.nameFull || ing.name))
-        .find(w => !isCovered(w, covered)) ?? null;
+        .filter(w => !isNonIdentity(w))
+        .find(w => !isCovered(w, covered) && !synonymCovered(w, covered)
+            && !(!isProcessWord(w) && isCovered(w, formWords))) ?? null;
 };
+
+/**
+ * Preparation stems whose presence in the recipe picks a different SHELF —
+ * the LT mirror of EN_IDENTITY_QUALIFIERS' processing block. Folded, matched
+ * as prefixes of the already-stemmed word. 'malt' is deliberately absent from
+ * this list even though PREPARED_MARKER has it: for spices the jar is the same
+ * purchase ground or whole ('maltų juodųjų pipirų' → "Juodieji pipirai SAUDA"
+ * was 27 correct matches sent to review), and for meat the mince entries
+ * ('malta vištiena' → Vištienos faršas) resolve to products that ARE minced.
+ */
+const LT_PROCESS_STEMS: readonly string[] = [
+    'saldyt', 'rukyt', 'konservuot', 'marinuot', 'raugint', 'sudyt',
+    'vytint', 'troskint', 'skrudint', 'dziovint', 'cukruot', 'kept',
+];
+const isProcessWord = (w: string): boolean => LT_PROCESS_STEMS.some(p => w.startsWith(p));
+
+/**
+ * Shelf abbreviations expanded before the product name is stemmed for
+ * coverage. `contentWords` drops tokens under 4 letters, so "Dž." vanishes
+ * entirely and can never vouch for the recipe's "džiovintų" — the same
+ * abbreviations PREPARED_MARKER already has to spell out, for the same
+ * shelf-label reason. Coverage only: ranking still sees the raw name.
+ */
+const SHELF_ABBREV: ReadonlyArray<readonly [RegExp, string]> = [
+    [/(?:^|\s)(?:dž|dz|džiov|dziov)\./gi, ' džiovintos '],
+    [/(?:^|\s)(?:rūk|ruk)\./gi, ' rūkyta '],
+    [/(?:^|\s)mar\./gi, ' marinuoti '],
+    [/(?:^|\s)(?:švž|svz)\./gi, ' šviežia '],
+    [/(?:^|\s)šald\./gi, ' šaldyta '],
+];
+
+const expandShelfAbbrev = (name: string): string =>
+    SHELF_ABBREV.reduce((s, [re, full]) => s.replace(re, full), name);
+
+/**
+ * Recipe-word ↔ shelf-word pairs that name the SAME purchase, as stem groups.
+ * A recipe's word is covered when any covered word belongs to the same group.
+ *
+ * Only catalog-verified pairs earn a row: the chicken group reflects the
+ * fresh-poultry shelf, where the lexicon already documents that recipes say
+ * "vištiena" while products say "viščiukas broileris" / "broilerių" (135
+ * 'viščiuk' and 104 'broiler' live products against 6 fresh 'vištien' ones).
+ * Comparison goes through `isCovered` so the blunt stemmer's variants
+ * ('visciuku', 'broileriu') still land in their group.
+ */
+const LT_SHOP_SYNONYM_STEMS: ReadonlyArray<readonly string[]> = [
+    ['vistien', 'visciuk', 'broiler'],
+];
+
+const synonymCovered = (word: string, covered: string[]): boolean =>
+    LT_SHOP_SYNONYM_STEMS.some(group =>
+        group.some(g => isCovered(word, [g])) && covered.some(c => group.some(g => isCovered(c, [g]))));
+
+/**
+ * LT stems that describe what the COOK does or why — never what the shop
+ * sells — plus the quantity hedges the parser sometimes fails to eat. The LT
+ * mirror of the EN branch's decision to flag identity words only: "minkšto
+ * sviesto" is butter you soften and "sviesto bandelėm aptepti" is butter with
+ * its purpose attached, and both spent the review queue's budget teaching the
+ * shopper to tap through warnings.
+ *
+ * EXACT stems where the word's own stem collapses to one token ('virtų' /
+ * 'virti' / 'virtas' all stem to 'virt'), so that neighbours stay flaggable —
+ * exact 'virt' leaves 'virtin' (virtiniai, dumplings) alone, exact 'salt'
+ * (cold) leaves 'saltibarsc' alone, exact 'kel'/'keli' (a few) leaves
+ * 'kelmuci' (kelmučiai, a mushroom) alone. PREFIX stems only where declension
+ * genuinely fans out ('papuošimui'/'papuošti' → papuosim/papuost).
+ *
+ * Deliberately ABSENT, measured one by one before shipping: rūkyt, šaldyt,
+ * džiovint, konservuot, marinuot, raugint, malt, sūdyt — those change what is
+ * bought (EN lists their translations as identity qualifiers), and every one
+ * of them still flags. 'malt' in particular must stay: "maltos jautienos" is
+ * mince, not a grinding instruction.
+ */
+const LT_NON_IDENTITY_EXACT: ReadonlySet<string> = new Set([
+    // cook's actions and states
+    'lydyt', 'minkst', 'smulk', 'tarkuot', 'gliaudyt', 'virt', 'persijot', 'salt',
+    // grades and marketing that do not change the shelf product
+    'sviez', 'sviezi', 'natural', 'naturala', 'neutral', 'neutrala',
+    'rafinuot', 'ekologisk', 'riebum', 'megiam', 'megstam', 'spalv', 'skon', 'skoni',
+    // quantity hedges and units the parser left in the name
+    'api', 'kel', 'keli', 'por', 'sauj', 'saujel', 'rysel', 'kristal', 'proc',
+    // purpose nouns ("skardai ištepti" — for the baking tin)
+    'skard', 'pagal', 'pageidavim',
+]);
+const LT_NON_IDENTITY_PREFIX: readonly string[] = ['papuos', 'ziupsn', 'aptep', 'istep'];
+
+const isNonIdentity = (w: string): boolean =>
+    // A bare number is parser residue ("apie 500-600 g"), not an ingredient word.
+    /^\d/.test(w)
+    || LT_NON_IDENTITY_EXACT.has(w)
+    || LT_NON_IDENTITY_PREFIX.some(p => w.startsWith(p));
 
 /**
  * English words that change WHAT the ingredient is, not how it is prepared.
