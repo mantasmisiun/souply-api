@@ -23,6 +23,7 @@ import basketRoutes from './routes/basketRoutes.js';
 import basketItemRoutes from './routes/basketItemRoutes.js';
 import basketTemplateRoutes from './routes/basketTemplateRoutes.js';
 import smartBasketRoutes from './routes/smartBasketRoutes.js';
+import recipeImportRoutes from './routes/recipeImportRoutes.js';
 import authRoutes from './routes/authRoutes.js';
 import shoppingListRoutes from './routes/shoppingListRoutes.js';
 import shoppingListItemRoutes from './routes/shoppingListItemRoutes.js';
@@ -122,6 +123,7 @@ app.use('/api/auth/oauth', publicLimiter);
 
 app.use('/api', appRoutes);
 app.use('/api', smartBasketRoutes);
+app.use('/api', recipeImportRoutes);
 app.use('/api', joinRoutes);
 app.use('/api', tripRoutes);
 app.use('/api', notificationRoutes);
