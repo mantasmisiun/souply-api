@@ -359,7 +359,30 @@ beforeAll(async () => {
     await addTranslation(ids.cheddarBlock, 'Cheddar cheese TESTBILLA');
     ids.sprite = await addProduct('Gaivusis gėrimas SPRITE TESTDRINK', { amount: 1500, unit: 'ml' });
     ids.cola = await addProduct('Gaivusis gėrimas COCA-COLA TESTDRINK', { amount: 1500, unit: 'ml' });
-}, 60_000);   // ~80 products × (Product + StoreProduct + Price) — well past Jest's 5 s default
+
+    // --- JUDGED ROUND 9 (one defect class, eleven faces): a QUALIFIER dropped
+    // in the lexicon hop, or a lexicon entry hit on a SUBSTRING of a token.
+    // The brandy that answered a steak rub, and the mix that should have.
+    ids.brandy = await addProduct('Brendis TORRES TESTSPIRIT', { amount: 700, unit: 'ml' });
+    ids.steakSeasoning = await addProduct('Kepsnių prieskoniai TESTMARIA', { amount: 100, unit: 'g' });
+    // The brown bag that answered "red lentils" while the red one sat beside it.
+    ids.brownLentils = await addProduct('Lęšiai TESTBROWN', { amount: 500, unit: 'g' });
+    ids.redLentils = await addProduct('Raudonieji lęšiai TESTRED', { amount: 500, unit: 'g' });
+    // Baking soda vs the carbonated water a bar recipe means by 'sodos vanduo'.
+    ids.bakingSoda = await addProduct('Maistinė soda TESTSODA', { amount: 500, unit: 'g' });
+    ids.sparklingWater = await addProduct('Gazuotas šaltinio vanduo TESTRIMI', { amount: 1500, unit: 'ml' });
+    // Simple syrup: the sugar-FREE flavoured impostor whose name contains both
+    // query words, and the real light sugar syrup.
+    ids.flavouredSyrup = await addProduct('Sirupas TESTTEISSEIRE, karamelės skonio, be cukraus', { amount: 600, unit: 'ml' });
+    ids.lightSyrup = await addProduct('Šviesusis sirupas TESTSUKKER', { amount: 500, unit: 'ml' });
+    // The note's exemplar: a sweet sparkling wine that outscores the dry
+    // Prosecco the recipe literally named in its parenthetical.
+    ids.sweetSparkling = await addProduct('Putojantis saldus vynas TESTALITA', { amount: 750, unit: 'ml' });
+    ids.prosecco = await addProduct('Putojantis baltasis sausas vynas PROSECCO TESTWINE', { amount: 750, unit: 'ml' });
+    // The same brand sells RUM — the short name that outscored the bitters.
+    ids.angosturaRum = await addProduct('Romas ANGOSTURA 7YO TESTRUM', { amount: 700, unit: 'ml' });
+    ids.angosturaBitters = await addProduct('Kartaus skonio spiritinis gėrimas Angostura Arom.Bitter TESTBIT', { amount: 200, unit: 'ml' });
+}, 60_000);   // ~90 products × (Product + StoreProduct + Price) — well past Jest's 5 s default
 
 afterAll(async () => {
     const productIds = Object.values(ids);
@@ -1540,5 +1563,97 @@ describe('judged round 8: dish heads, homonyms, purpose variants, named brands',
         const m = await match('Ledo gabaliukai');
         expect(m.ingredient.ignored).toBe(true);
         expect(m.product).toBeNull();
+    });
+});
+
+/**
+ * JUDGED ROUND 9 — over 212 decisions from 24 unseen recipes, 11 of 13 silent
+ * errors shared ONE root cause: a qualifier dropped in the lexicon hop, or a
+ * lexicon entry hit on a SUBSTRING of a token. All at 0.94–1.00 confidence,
+ * so no threshold could catch them — the fixes are whole-token lookup
+ * (measure.ts) and entries that keep the qualifier in the query.
+ */
+describe('judged round 9: dropped qualifiers and substring hits', () => {
+    /** "McCormick's Montreal BRAND steak seasoning" bought Brendis TORRES —
+     *  a SPIRIT for a spice rub — because 'Brand' matched inside 'brandy'
+     *  via the stemmer ('brandy' sheds its 'y' as a Lithuanian case ending).
+     *  The stemmed map is LT-only now, and the phrase has a real owner. */
+    it('a steak rub is a spice mix, never brandy', async () => {
+        const m = await match("1 tbsp McCormick's Montreal Brand steak seasoning", 'en');
+        expect(m.key).toBe('steak_seasoning');
+        expect(m.product?.productId).toBe(ids.steakSeasoning);
+    });
+
+    /** 'tamarind paste' bought Makaronai TAGLIATELLE: 'paste' and 'pasta'
+     *  collide at the stem 'past'. Whole-token lookup returns the honest
+     *  answer — the catalog stocks no tamarind paste, so nothing. */
+    it('tamarind paste never buys pasta', async () => {
+        const m = await match('2 tbsp tamarind paste', 'en');
+        expect(m.key).toBeNull();
+        expect(m.product).toBeNull();
+    });
+
+    /** 'red lentils' resolved to the generic entry, whose bare 'Lęšiai'
+     *  query bought the BROWN bag. The red forms own an entry now. */
+    it('red lentils buy the red bag, plain lentils the plain one', async () => {
+        const red = await match('200 g red lentils', 'en');
+        expect(red.key).toBe('lentils_red');
+        expect(red.product?.productId).toBe(ids.redLentils);
+        const plain = await match('200 g lentils', 'en');
+        expect(plain.product?.productId).toBe(ids.brownLentils);
+    });
+
+    /** 'sodos vandens' fell through to the bare 'sodos' window and bought
+     *  BAKING SODA for a highball; the two-word phrase owns an entry. */
+    it('sodos vanduo is carbonated water, never baking soda', async () => {
+        const m = await match('100 ml sodos vandens');
+        expect(m.key).toBe('soda_water');
+        expect(m.product?.productId).toBe(ids.sparklingWater);
+        // The bare noun still belongs to the cupboard box.
+        const soda = await match('1 a.š. kepimo sodos');
+        expect(soda.key).toBe('baking_soda');
+    });
+
+    /** The bare 'Cukraus sirupas' query fully matched "Sirupas TEISSEIRE,
+     *  karamelės skonio, BE CUKRAUS" — sugar-free caramel syrup carrying
+     *  both query words. The shelf's own qualifier keeps the impostor out. */
+    it('simple syrup buys the light sugar syrup, not a sugar-free flavour', async () => {
+        const m = await match('20 ml simple syrup', 'en');
+        expect(m.key).toBe('sugar_syrup');
+        expect(m.product?.productId).toBe(ids.lightSyrup);
+    });
+
+    /** "Putojantis vynas (pvz. Prosecco)" — the parenthetical exemplar used
+     *  to be discarded before search, and a sweet ALITA beat the dry
+     *  Prosecco the recipe literally named. The hint now rides the query
+     *  and is preferred at acceptance. */
+    it('a parenthetical exemplar picks the bottle the recipe named', async () => {
+        const m = await match('200 ml putojančio vyno (pvz. Prosecco)');
+        expect(m.key).toBe('sparkling_wine');
+        expect(m.product?.productId).toBe(ids.prosecco);
+    });
+
+    /** The Angostura BRAND also sells rum, whose short name outscored the
+     *  bitters bottle — 'bitter' is the label's own word and the query
+     *  carries it. */
+    it('angostura bitters buy the bitters, not the rum', async () => {
+        const m = await match('2 dashes Angostura Bitters', 'en');
+        expect(m.key).toBe('bitters');
+        expect(m.product?.productId).toBe(ids.angosturaBitters);
+        expect(m.product?.productId).not.toBe(ids.angosturaRum);
+    });
+
+    /** Bare 'Ledas' / '200 g ledo' — the SINGULAR is ice, and ice is tap
+     *  water in another shape, like the 'ledukai' this list already pins.
+     *  The plural 'ledai' really is ice cream and must stay matchable. */
+    it('ledas and ledo are ignored ice, not ice cream', async () => {
+        for (const line of ['Ledas', '200 g ledo']) {
+            const m = await match(line);
+            expect(m.ingredient.ignored).toBe(true);
+            expect(m.product).toBeNull();
+        }
+        const iceCream = await match('200 g ledų');
+        expect(iceCream.ingredient.ignored).toBe(false);
+        expect(iceCream.key).toBe('ice_cream');
     });
 });

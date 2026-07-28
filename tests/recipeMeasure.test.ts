@@ -56,6 +56,36 @@ describe('findIngredient', () => {
         expect(full?.form).toBe('alyvuogiu aliejaus');   // folded surface words, not the stemmed key
         expect(full?.words).toBe(2);
     });
+
+    /**
+     * JUDGED ROUND 9 — surface lookup must account for WHOLE tokens. The
+     * blunt LT stemmer read English through Lithuanian eyes: 'brandy' shed
+     * its 'y' as a case ending and became the key 'brand', 'pasta' and
+     * 'paste' collided at 'past' — and a steak rub bought BRANDY while
+     * tamarind paste bought NOODLES, both at full confidence. The stemmed
+     * map is Lithuanian-only now; English gets exactly one inflection, the
+     * plural 's'.
+     */
+    it('never matches inside an English word', () => {
+        expect(findIngredient('brand', 'en')).toBeNull();               // not brandy
+        expect(findIngredient('paste', 'en')).toBeNull();               // not pasta
+        expect(findIngredient('tamarind paste', 'en')).toBeNull();
+        expect(findIngredient('brandy', 'en')?.info.key).toBe('brandy');
+        expect(findIngredient('pasta', 'en')?.info.key).toBe('pasta');
+    });
+
+    it('still stems Lithuanian declension — whole tokens, whole words', () => {
+        expect(findIngredient('pipirų')?.info.key).toBe('pepper_black');
+        // An UNLISTED case ending, reachable only through the stemmer.
+        expect(findIngredient('pipirus')?.info.key).toBe('pepper_black');
+        expect(findIngredient('sviestą')?.info.key).toBe('butter');
+    });
+
+    it('still collapses an unlisted English plural onto its singular form', () => {
+        // 'craisins' is the listed form; the singular has no row of its own.
+        expect(findIngredient('craisin', 'en')?.info.key).toBe('cranberries_dried');
+        expect(findIngredient('seltzers', 'en')?.info.key).toBe('soda_water');
+    });
 });
 
 describe('toMetric', () => {

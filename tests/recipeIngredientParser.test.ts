@@ -1048,4 +1048,18 @@ describe('ledo gabaliukai are ignored ice, not ice cream', () => {
         expect(parts).toHaveLength(1);
         expect(parts[0].ignored).toBe(true);
     });
+
+    /** ROUND 9: the bare SINGULAR too — "Ledas" / "200 g ledo" is ice, and it
+     *  took the same lexicon fall into ice cream. The plural 'ledai' really
+     *  IS ice cream, one letter away, and must never be swallowed. */
+    it.each([['Ledas'], ['200 g ledo'], ['ledo']])('%s is ignored ice', line => {
+        const parts = parseIngredientLine(line, 'lt');
+        expect(parts).toHaveLength(1);
+        expect(parts[0].ignored).toBe(true);
+    });
+
+    it('ledai (ice cream) stays a real ingredient', () => {
+        const parts = parseIngredientLine('200 g ledų', 'lt');
+        expect(parts[0].ignored).toBe(false);
+    });
 });

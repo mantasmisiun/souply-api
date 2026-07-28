@@ -871,10 +871,13 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
     {
         key: 'flour_self_raising',
         // Not plain flour — it carries raising agents, and UK bakes fail
-        // without them. No self-raising flour exists in the catalog (verified),
-        // so the shopping name is the nearest real purchase: plain wheat flour
-        // (the shopper adds baking powder).
-        ltName: 'Kvietiniai miltai',
+        // without them. The catalog now stocks the real thing: 'Kvietiniai
+        // miltai MALSENA SELF RAISING' (24591 / 4760 / 53372, verified
+        // 2026-07-28). The shelf prints the English words on a Lithuanian
+        // bag, so the query carries them — the old bare 'Kvietiniai miltai'
+        // resolved to plain 550D flour at 1.00 and the raising agents
+        // silently vanished from the bake.
+        ltName: 'Kvietiniai miltai self raising',
         enName: 'self-raising flour',
         lt: ['miltai su kepimo milteliais', 'miltų su kepimo milteliais'],
         en: ['self-raising flour', 'self raising flour', 'self-rising flour', 'self rising flour'],
@@ -1339,6 +1342,29 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
         pantry: false,
     },
     {
+        key: 'sugar_syrup',
+        // 'Šviesusis cukraus sirupas DAN SUKKER' (25152, verified
+        // 2026-07-28). 'Simple syrup' had no owner at all, so every
+        // cocktail's sweetener resolved to nothing — yet the jar is on the
+        // shelf and its Lithuanian name is just 'cukraus sirupas'. 'golden
+        // syrup' lands here too: the light cane syrup IS what that bottle is.
+        //
+        // 'Šviesusis' is load-bearing, not branding: the bare 'Cukraus
+        // sirupas' query fully matched "Sirupas TEISSEIRE, karamelės skonio,
+        // BE CUKRAUS" — a sugar-FREE caramel syrup whose name happens to
+        // contain both words — and bought it silently at 0.91. The shelf's
+        // own qualifier is what keeps the impostor out. NOT '…cukraus
+        // sirupas': that spelling (25152) is a duplicate listing MERGED into
+        // 5063 'Šviesusis sirupas DAN SUKKER', so only the shorter canonical
+        // name is reachable by search.
+        ltName: 'Šviesusis sirupas',
+        enName: 'simple syrup',
+        lt: ['cukraus sirupas', 'cukraus sirupo'],
+        en: ['simple syrup', 'sugar syrup', 'golden syrup'],
+        gramsPerMl: 1.3, // dense sugar solution
+        pantry: false,
+    },
+    {
         key: 'maple_syrup',
         ltName: 'Klevų sirupas',
         enName: 'maple syrup',
@@ -1680,7 +1706,11 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
         ltName: 'Aitriosios paprikos',
         enName: 'fresh chilli',
         lt: ['aitrioji paprika', 'aitriosios paprikos', 'aitriųjų paprikų', 'čili pipirai', 'čili pipirų'],
-        en: ['chilli', 'chili', 'chillies', 'chilies', 'fresh chilli', 'red chilli', 'birds eye chilli'],
+        // 'chile'/'chiles' is the US spelling Serious Eats prints ("bird's
+        // eye chiles", "serrano chiles") — it used to reach this entry only
+        // through the old cross-language stem accident ('chiles' and 'chili'
+        // both chopped to 'chil'), so the whole-token fix spells it out.
+        en: ['chilli', 'chili', 'chillies', 'chilies', 'chile', 'chiles', 'fresh chilli', 'red chilli', 'birds eye chilli'],
         gramsPerPiece: 25,
         pantry: false,
         weighable: true,
@@ -1776,6 +1806,19 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
         lt: ['jalapenai', 'jalapenų', 'jelapeno pipirai', 'jelapeno pipirų', 'konservuoti jalapenai', 'konservuotų jalapenų'],
         en: ['jalapeño', 'jalapeno', 'jalapenos', 'pickled jalapenos'],
         gramsPerPiece: 15,
+        pantry: false,
+    },
+    {
+        key: 'habanero',
+        // 'Datulinės paprikos (HABANERO) WELL DONE' (42, verified 2026-07-28)
+        // — fresh habaneros, stocked. Without an owner the only window in
+        // "habanero pepper" was 'pepper', and one of the hottest chillies on
+        // the shelf was silently swapped for a jar of BLACK PEPPERCORNS.
+        ltName: 'Paprikos habanero',
+        enName: 'habanero',
+        lt: ['habanero paprika', 'habanero paprikos', 'habanero paprikų', 'datulinės paprikos', 'datulinių paprikų'],
+        en: ['habanero', 'habaneros', 'habanero pepper', 'habanero peppers', 'habanero chilli', 'habanero chili', 'habanero chile'],
+        gramsPerPiece: 10,
         pantry: false,
     },
     {
@@ -2238,6 +2281,21 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
         pantry: true,
     },
     {
+        key: 'steak_seasoning',
+        // 'Kepsnių prieskoniai SANTA MARIA / SAUDA / SALDVA' (5220, 5241,
+        // 5244 — a whole cat-660 line, verified 2026-07-28). "McCormick's
+        // Montreal Brand steak seasoning" used to be bought as BRANDY — the
+        // token 'Brand' matched inside 'brandy' — and even with that
+        // substring fixed, the phrase needs an owner: the shelf stocks the
+        // exact mix under its literal Lithuanian name.
+        ltName: 'Kepsnių prieskoniai',
+        enName: 'steak seasoning',
+        lt: ['kepsnių prieskoniai', 'kepsnių prieskonių'],
+        en: ['steak seasoning', 'montreal steak seasoning', 'steak spice', 'steak rub', 'grill seasoning'],
+        gramsPerMl: 0.5, // same dry ground-spice blend as its cajun neighbour
+        pantry: true,
+    },
+    {
         key: 'taco_seasoning',
         ltName: 'Meksikietiški prieskoniai',
         enName: 'taco seasoning',
@@ -2456,8 +2514,26 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
         key: 'tomatoes_canned',
         ltName: 'Konservuoti pomidorai',
         enName: 'canned tomatoes',
-        lt: ['konservuoti pomidorai', 'konservuotų pomidorų', 'pomidorai savo sultyse', 'smulkinti pomidorai', 'smulkintų pomidorų'],
-        en: ['canned tomatoes', 'crushed tomatoes', 'diced tomatoes', 'chopped tomatoes', 'fire roasted diced tomatoes', 'canned diced tomatoes'],
+        lt: ['konservuoti pomidorai', 'konservuotų pomidorų', 'pomidorai savo sultyse'],
+        en: ['canned tomatoes', 'crushed tomatoes'],
+        gramsPerMl: 1.0,
+        pantry: false,
+    },
+    {
+        key: 'tomatoes_canned_diced',
+        // The diced tin is its own SKU family — 'Smulkinti pomidorai HEINZ'
+        // (24157), 'Konservuoti smulkinti pomidorai MUTTI/COPPOLA' (verified
+        // 2026-07-28) — and it kept losing to the WHOLE peeled tin because
+        // 'diced' dissolved into the generic 'Konservuoti pomidorai' query;
+        // the judged sweep had the diced SKU sitting in the runner-up slot.
+        // 'Smulkinti' is the qualifier the shelf prints, so it leads the
+        // query. ('crushed tomatoes' stays on the generic entry: polpa-style
+        // crushed tins are named both ways and the whole tin is a fair
+        // answer there.)
+        ltName: 'Smulkinti pomidorai',
+        enName: 'diced tomatoes',
+        lt: ['smulkinti pomidorai', 'smulkintų pomidorų', 'konservuoti smulkinti pomidorai', 'konservuotų smulkintų pomidorų'],
+        en: ['diced tomatoes', 'chopped tomatoes', 'canned diced tomatoes', 'canned chopped tomatoes', 'fire roasted diced tomatoes', 'tin of chopped tomatoes'],
         gramsPerMl: 1.0,
         pantry: false,
     },
@@ -2489,6 +2565,22 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
         enName: 'peanut butter',
         lt: ['žemės riešutų sviestas', 'žemės riešutų sviesto', 'riešutų sviestas', 'riešutų sviesto'],
         en: ['peanut butter', 'smooth peanut butter', 'crunchy peanut butter'],
+        gramsPerMl: 1.05,
+        pantry: false,
+    },
+    {
+        key: 'almond_butter',
+        // NO almond butter is stocked (searched migdolų sviestas/pasta,
+        // 2026-07-28 — the only hit is a cookie FILLED with almond paste).
+        // The honest nearest purchase is the nut-butter shelf itself:
+        // 'Žemės riešutų pasta NUTURA' (56371). A deliberate substitution,
+        // same as crème fraîche → Grietinė above — chosen, not guessed.
+        // Without an owner the only window in "almond butter" was 'butter',
+        // and a vegan sandwich spread became a block of DAIRY BUTTER.
+        ltName: 'Žemės riešutų pasta',
+        enName: 'almond butter',
+        lt: ['migdolų sviestas', 'migdolų sviesto'],
+        en: ['almond butter', 'smooth almond butter', 'crunchy almond butter'],
         gramsPerMl: 1.05,
         pantry: false,
     },
@@ -2606,6 +2698,20 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
         enName: 'red onion',
         lt: ['raudonasis svogūnas', 'raudonojo svogūno', 'raudonieji svogūnai', 'raudonųjų svogūnų'],
         en: ['red onion', 'red onions'],
+        gramsPerPiece: 130,
+        pantry: false,
+        weighable: true,
+    },
+    {
+        key: 'onion_pink',
+        // 'Rausvieji svogūnai' (68, verified 2026-07-28) — the pink onion is
+        // its own produce listing, not a spelling of the red one. The
+        // 'rausvųjų' qualifier used to dissolve into the bare 'svogūnų'
+        // window and a salad was silently sold YELLOW cooking onions.
+        ltName: 'Rausvieji svogūnai',
+        enName: 'pink onions',
+        lt: ['rausvasis svogūnas', 'rausvojo svogūno', 'rausvieji svogūnai', 'rausvųjų svogūnų', 'rausvi svogūnai', 'rausvų svogūnų'],
+        en: ['pink onion', 'pink onions'],
         gramsPerPiece: 130,
         pantry: false,
         weighable: true,
@@ -3053,13 +3159,27 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
     },
     {
         key: 'dried_lentils',
-        // Only 'Daiginti lęšiai' (sprouted) is live today (verified) — dry
-        // lentils are a catalog gap, but the query is still the right word and
-        // the nearest hit is at least a lentil.
+        // The generic bag — 'Lęšiai SKANĖJA' and friends. The RED forms left
+        // for their own entry below: they used to sit here, collapse into the
+        // bare 'Lęšiai' query, and a dal recipe was silently sold the BROWN
+        // bag while 'Raudonieji lęšiai SKANĖJA' sat one shelf over.
         ltName: 'Lęšiai',
         enName: 'lentils',
-        lt: ['lęšiai', 'lęšių', 'raudonieji lęšiai', 'raudonųjų lęšių', 'žalieji lęšiai', 'žaliųjų lęšių'],
-        en: ['lentils', 'dried lentils', 'red lentils', 'green lentils', 'brown lentils', 'cooked lentils'],
+        lt: ['lęšiai', 'lęšių', 'žalieji lęšiai', 'žaliųjų lęšių'],
+        en: ['lentils', 'dried lentils', 'green lentils', 'brown lentils', 'cooked lentils'],
+        gramsPerMl: 0.8, // dry
+        pantry: false,
+    },
+    {
+        key: 'lentils_red',
+        // 'Raudonieji lęšiai SKANĖJA' is live (4374, verified 2026-07-28).
+        // Red lentils cook down where brown ones hold shape — the qualifier
+        // names a distinct product, so it gets the entry that keeps it in
+        // the query instead of dissolving into the generic noun.
+        ltName: 'Raudonieji lęšiai',
+        enName: 'red lentils',
+        lt: ['raudonieji lęšiai', 'raudonųjų lęšių'],
+        en: ['red lentils', 'split red lentils', 'dried red lentils'],
         gramsPerMl: 0.8, // dry
         pantry: false,
     },
@@ -3249,8 +3369,29 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
         // density: fresh vs dried differ hugely.
         ltName: 'Spanguolės',
         enName: 'cranberries',
-        lt: ['spanguolės', 'spanguolių', 'džiovintos spanguolės', 'džiovintų spanguolių'],
-        en: ['cranberries', 'cranberry', 'dried cranberries', 'fresh cranberries'],
+        lt: ['spanguolės', 'spanguolių'],
+        en: ['cranberries', 'cranberry', 'fresh cranberries'],
+        pantry: false,
+    },
+    {
+        key: 'cranberries_dried',
+        // 'Džiovintos spanguolės EXTRA LINE' (5650, verified 2026-07-28).
+        // The dried forms used to sit on the fresh entry, whose shopping
+        // name is the bare 'Spanguolės' — so "dried cranberries" silently
+        // bought a tub of fresh berries in water for a granola. Dried is a
+        // different shelf (667) and a different purchase, and the query has
+        // to say so itself.
+        ltName: 'Džiovintos spanguolės',
+        enName: 'dried cranberries',
+        lt: ['džiovintos spanguolės', 'džiovintų spanguolių'],
+        en: ['dried cranberries', 'craisins'],
+        // Half the dried shelf abbreviates the qualifier ("Dž. spanguolės
+        // NATURFOOD"), which no SQL search for 'džiovintos' can recall — the
+        // bare noun is the only query that reaches those rows. Acceptance
+        // still demands the dried word (expandShelfAbbrev vouches for the
+        // abbreviation), so the fresh berries this wider net drags in can
+        // never win, only pad the alternatives.
+        aliases: ['Spanguolės'],
         pantry: false,
     },
     {
@@ -3408,7 +3549,12 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
         key: 'raisins',
         ltName: 'Razinos',
         enName: 'raisins',
-        lt: ['razinos', 'razinų'],
+        // 'sultanės' is the LT word for sultanas ("100 g Sultanės" in a curd
+        // bake su razinomis). It used to reach this entry only by ACCIDENT —
+        // the folded 'sultanes' and the English 'sultanas' collided in the
+        // old cross-language stem map — so the whole-token fix had to spell
+        // the Lithuanian forms out.
+        lt: ['razinos', 'razinų', 'sultanės', 'sultanių', 'sultanos', 'sultanų'],
         en: ['raisins', 'sultanas'],
         gramsPerMl: 0.8,
         pantry: false,
@@ -3632,11 +3778,40 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
         pantry: false,
     },
     {
+        key: 'soda_water',
+        // Bar recipes say 'sodos vanduo' / 'soda water' and mean CARBONATED
+        // WATER — 'Gazuotas šaltinio vanduo RIMI' (27526, verified
+        // 2026-07-28). The two-word phrase used to fall through to the bare
+        // 'sodos' window and a highball was silently sold a box of BAKING
+        // SODA. The entry owns the compound, so the generic soda owner is
+        // never robbed of its bare noun.
+        ltName: 'Gazuotas vanduo',
+        enName: 'soda water',
+        lt: ['sodos vanduo', 'sodos vandens', 'gazuotas vanduo', 'gazuoto vandens'],
+        en: ['soda water', 'club soda', 'seltzer', 'seltzer water', 'carbonated water'],
+        gramsPerMl: 1.0,
+        pantry: false,
+    },
+    {
         key: 'tea',
         ltName: 'Arbata',
         enName: 'tea',
-        lt: ['arbata', 'arbatos', 'žalioji arbata', 'žaliosios arbatos', 'juodoji arbata', 'juodosios arbatos'],
-        en: ['tea', 'black tea', 'green tea', 'brewed tea'],
+        lt: ['arbata', 'arbatos', 'juodoji arbata', 'juodosios arbatos'],
+        en: ['tea', 'black tea', 'brewed tea'],
+        gramsPerMl: 1.0, // brewed
+        pantry: true,
+    },
+    {
+        key: 'tea_green',
+        // 'Žalioji arbata LOYD GREEN PURE' (7582, verified 2026-07-28).
+        // 'green tea' and 'žalioji arbata' were listed forms of the generic
+        // entry — the colour dissolved into the bare 'Arbata' query and the
+        // ranking answered with BLACK tea, the shelf default. Green tea is
+        // its own product family; the qualifier stays in the query.
+        ltName: 'Žalioji arbata',
+        enName: 'green tea',
+        lt: ['žalioji arbata', 'žaliosios arbatos', 'žalia arbata', 'žalios arbatos'],
+        en: ['green tea', 'green tea leaves', 'green tea bags'],
         gramsPerMl: 1.0, // brewed
         pantry: true,
     },
@@ -3704,6 +3879,24 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
         pantry: false,
     },
     {
+        key: 'bitters',
+        // 'Kartaus skonio spiritinis gėrimas Angostura Arom.Bitter 44,7%'
+        // (10051, verified 2026-07-28). No Lithuanian noun for cocktail
+        // bitters exists on the shelf, so the brand carries the query — the
+        // same decision as Likeris Kahlua below. NOT the bare 'Angostura':
+        // the brand also sells RUM ('Romas ANGOSTURA 7YO'), whose short name
+        // outscored the bitters bottle and a cocktail dash bought a bottle
+        // of rum. 'bitter' is the label's own spelling ('Arom.Bitter') and
+        // it is what separates the two.
+        ltName: 'Angostura bitter',
+        enName: 'angostura bitters',
+        lt: ['angostura', 'angostura biteris', 'angostura biterio'],
+        en: ['angostura bitters', 'bitters', 'aromatic bitters', 'cocktail bitters'],
+        gramsPerMl: 0.95,
+        // Dash amounts, keeps for years — a cupboard bottle, bought once.
+        pantry: true,
+    },
+    {
         key: 'vermouth',
         // Cat 344 holds 16 live 'Vermutas …' listings including the dry ones a
         // cocktail recipe means ('Vermutas MARTINI DRY, 1 l', 'Vermutas
@@ -3711,7 +3904,22 @@ export const INGREDIENTS: readonly IngredientInfo[] = [
         ltName: 'Vermutas',
         enName: 'vermouth',
         lt: ['vermutas', 'vermuto'],
-        en: ['vermouth', 'dry vermouth', 'sweet vermouth', 'white vermouth'],
+        en: ['vermouth', 'dry vermouth', 'white vermouth'],
+        gramsPerMl: 1.0,
+        pantry: false,
+    },
+    {
+        key: 'vermouth_sweet',
+        // Sweet (red) vermouth is its own bottle and the shelf spells it the
+        // Italian way: 'Vermutas MARTINI ROSSO, 1 l' (9558, verified
+        // 2026-07-28). On the generic entry the 'sweet' dissolved into the
+        // bare 'Vermutas' query and a Manhattan was silently poured MARTINI
+        // DRY — the opposite bottle. 'rosso' is the word the label prints,
+        // so the query carries it, same as Likeris Kahlua below.
+        ltName: 'Vermutas rosso',
+        enName: 'sweet vermouth',
+        lt: ['saldusis vermutas', 'saldžiojo vermuto', 'raudonasis vermutas', 'raudonojo vermuto', 'vermutas rosso'],
+        en: ['sweet vermouth', 'red vermouth', 'rosso vermouth', 'vermouth rosso', 'sweet red vermouth'],
         gramsPerMl: 1.0,
         pantry: false,
     },

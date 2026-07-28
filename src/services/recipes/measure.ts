@@ -78,9 +78,30 @@ const stemPhrase = (s: string): string => s.split(' ').map(stemWord).join(' ');
 /** Longest surface form, in words — bounds the window scan. */
 let MAX_FORM_WORDS = 1;
 
-/** form → entry, in two flavours: folded-exact and folded-stemmed. */
+/** form → entry, in three flavours: folded-exact, folded-LT-stemmed, and
+ *  folded-EN-depluralised. */
 const EXACT = new Map<string, IngredientInfo>();
 const STEMMED = new Map<string, IngredientInfo>();
+const EN_SINGULAR = new Map<string, IngredientInfo>();
+
+/**
+ * THE STEMMED MAP IS LITHUANIAN-ONLY, and that is the whole-token guarantee.
+ *
+ * The blunt stemmer reads English through Lithuanian eyes: 'y', 'a' and 'e'
+ * are case endings to it, so 'brandy' and 'pasta' shed them and became the
+ * keys 'brand' and 'past' — and a judged sweep bought Brendis TORRES for
+ * "McCormick's Montreal BRAND steak seasoning" (the token "Brand" matched
+ * inside "brandy": a SPIRIT for a spice rub) and Makaronai TAGLIATELLE for
+ * "tamarind PASTE" ("paste" stemmed into "pasta"), both at full confidence.
+ * A surface hit must account for the WHOLE token: Lithuanian forms, which
+ * genuinely decline, go through the stemmer — "pipirų" still reaches the
+ * 'pipirai' entry — while an English form matches exactly, or via the one
+ * inflection English actually has: the plural 's' below. Nothing matches
+ * inside a word.
+ */
+const enSingularWord = (w: string): string =>
+    w.length >= 4 && w.endsWith('s') && !w.endsWith('ss') ? w.slice(0, -1) : w;
+const enSingularPhrase = (s: string): string => s.split(' ').map(enSingularWord).join(' ');
 
 for (const info of INGREDIENTS) {
     for (const form of [...info.lt, ...info.en]) {
@@ -88,11 +109,21 @@ for (const info of INGREDIENTS) {
         if (!f) continue;
         MAX_FORM_WORDS = Math.max(MAX_FORM_WORDS, f.split(' ').length);
         if (!EXACT.has(f)) EXACT.set(f, info);
+    }
+    for (const form of info.lt) {
+        const f = fold(form);
+        if (!f) continue;
         const st = stemPhrase(f);
         // First writer wins: the table is ordered, and a stemmed collision
         // between two entries must not let a later, less specific row steal a
         // form the earlier one owns outright.
         if (!STEMMED.has(st)) STEMMED.set(st, info);
+    }
+    for (const form of info.en) {
+        const f = fold(form);
+        if (!f) continue;
+        const sg = enSingularPhrase(f);
+        if (!EN_SINGULAR.has(sg)) EN_SINGULAR.set(sg, info);
     }
 }
 
@@ -169,7 +200,11 @@ export const findIngredientHits = (name: string): IngredientHit[] => {
             // compares it against the phrase's own words to find what was left
             // uncovered, and a stemmed form would never line up with them.
             const window = words.slice(i, i + n).join(' ');
-            const hit = STEMMED.get(stemPhrase(window));
+            // LT declension first, EN plural second — each map only ever holds
+            // its own language's forms, so a window can never shed an English
+            // letter and land inside a different English word (see the
+            // brandy/pasta note above the maps).
+            const hit = STEMMED.get(stemPhrase(window)) ?? EN_SINGULAR.get(enSingularPhrase(window));
             if (hit) hits.push({ info: hit, form: window, words: n, exact: false });
         }
         if (hits.length > 0) return hits;

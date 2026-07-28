@@ -480,7 +480,12 @@ const NEVER_BOUGHT = new RegExp(
     // ice cubes. Ignored like 'ledukai', not matched to the 'Ledo kubeliai'
     // category: ice is tap water in another shape, same as the rest of this
     // list.
-    + '|leduk\\p{L}*|ledo\\s+kubel\\p{L}*|ledo\\s+gabal\\p{L}*'
+    //
+    // The bare noun too: a cocktail's "Ledas" / "200 g ledo" is the SINGULAR
+    // (ledas = ice, the substance) and it took the same lexicon fall into
+    // ice cream. Anchored full-name alternatives, so the PLURAL 'ledai' —
+    // which really is ice cream, one letter away — can never match.
+    + '|leduk\\p{L}*|led(?:as|o)|ledo\\s+kubel\\p{L}*|ledo\\s+gabal\\p{L}*'
     + '|(?:crushed\\s+)?ice(?:\\s+cubes?)?)$', 'iu');
 
 /**

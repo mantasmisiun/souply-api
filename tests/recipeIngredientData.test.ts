@@ -620,3 +620,54 @@ describe('judged round 8: salad phrasings never key to shallot', () => {
         expect(lexKey('2 shallots')).toBe('shallot');
     });
 });
+
+/**
+ * JUDGED ROUND 9 — the qualifier must survive the lexicon hop. Nine silent
+ * errors shared the shape: a phrase resolved to a bare-noun entry and the
+ * word that SELECTS the product (red, dried, green, sweet, self-raising…)
+ * vanished before search. Where the catalog stocks a distinct SKU family,
+ * the qualifier owns an entry; the generic noun keeps its own.
+ */
+describe('judged round 9: qualifiers own entries where the shelf splits', () => {
+    const lexKey = (phrase: string) => findIngredient(phrase)?.info.key;
+    const lexKeyEn = (phrase: string) => findIngredient(phrase, 'en')?.info.key;
+
+    it('the qualified phrase and the bare noun resolve to different entries', () => {
+        expect(lexKeyEn('self-raising flour')).toBe('flour_self_raising');
+        expect(ingredientByKey('flour_self_raising')?.ltName).toMatch(/self raising/i);
+        expect(lexKeyEn('red lentils')).toBe('lentils_red');
+        expect(lexKeyEn('lentils')).toBe('dried_lentils');
+        expect(lexKeyEn('dried cranberries')).toBe('cranberries_dried');
+        expect(lexKeyEn('cranberries')).toBe('cranberries');
+        expect(lexKeyEn('green tea')).toBe('tea_green');
+        expect(lexKeyEn('tea')).toBe('tea');
+        expect(lexKeyEn('sweet vermouth')).toBe('vermouth_sweet');
+        expect(lexKeyEn('dry vermouth')).toBe('vermouth');
+        expect(lexKeyEn('diced tomatoes')).toBe('tomatoes_canned_diced');
+        expect(lexKeyEn('canned tomatoes')).toBe('tomatoes_canned');
+    });
+
+    it('habanero is a chilli, never black pepper', () => {
+        expect(lexKeyEn('habanero pepper')).toBe('habanero');
+        expect(lexKeyEn('habanero')).toBe('habanero');
+    });
+
+    it('almond butter shops the nut-butter shelf, never dairy', () => {
+        expect(lexKeyEn('almond butter')).toBe('almond_butter');
+        expect(ingredientByKey('almond_butter')?.ltName).toMatch(/riešutų past/i);
+        expect(lexKeyEn('butter')).toBe('butter');
+    });
+
+    it('rausvieji svogūnai are their own produce listing', () => {
+        expect(lexKey('rausvųjų svogūnų')).toBe('onion_pink');
+        expect(lexKey('svogūnų')).toBe('onion_yellow');
+    });
+
+    it('bar staples resolve to drinks, not the food lexicon', () => {
+        expect(lexKey('sodos vandens')).toBe('soda_water');
+        expect(lexKey('sodos')).toBe('baking_soda');
+        expect(lexKeyEn('simple syrup')).toBe('sugar_syrup');
+        expect(lexKeyEn('angostura bitters')).toBe('bitters');
+        expect(lexKeyEn('steak seasoning')).toBe('steak_seasoning');
+    });
+});

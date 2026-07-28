@@ -6,7 +6,7 @@ import {
     type AffinityCache, getProductAffinity, loadAffinityCache, rankAffinity,
 } from '../productAffinityService.js';
 import { levenshtein } from '../../utils/addressMatcher.js';
-import { type MatchCandidate, findBestProductMatches } from '../../utils/productMatcher.js';
+import { type MatchCandidate, findBestProductMatches, normalizeProductName } from '../../utils/productMatcher.js';
 import { INGREDIENTS, INGREDIENT_INDEX, ingredientByKey } from './ingredientData.js';
 import {
     type IngredientHit, contentWords, findIngredient, findIngredientHits, fold, formatMeasure, toMetric,
@@ -526,15 +526,20 @@ export const matchIngredient = async (
      * nothing BUT genitive-modifier products. `firstAlternative` is load-bearing
      * here: "pieno arba vandens" must not re-open the arm through "arba/vandens".
      */
-    // `ltName` first (it is the canonical name the ranking judges against),
-    // then the lexicon's catalog-facing aliases, then the recipe's own wording.
+    // The note's exemplar, when the recipe gave one, leads the list: "pvz.
+    // Prosecco" is the recipe picking the bottle, and the arm that carries
+    // the word is the only one that can find it. `ltName` next (it is the
+    // canonical name the ranking judges against), then the lexicon's
+    // catalog-facing aliases, then the recipe's own wording.
+    const hint = info != null ? exemplarHint(ing.note, query) : null;
     const queries = unique([
+        hint ? `${query} ${hint}` : null,
         query,
         ...(info?.aliases ?? []),
         recipeArm(ing.nameFull, query, lang),
         recipeArm(ing.name, query, lang),
     ]);
-    let picks = await findProducts(queries, ing, info, locale, cache, userId, affinityCache, viaEnPhrase);
+    let picks = await findProducts(queries, ing, info, locale, cache, userId, affinityCache, viaEnPhrase, query);
 
     /**
      * Nothing at all — or nothing that IS the thing? Try the head noun on its own.
@@ -655,10 +660,21 @@ export const matchIngredient = async (
     // On the EN fallback path the query and the product name are in different
     // LANGUAGES by construction, so full presence is also asked of the
     // product's English translations — the very strings the arm matched on.
-    const acceptable = (p: ProductPick) =>
-        p.confidence >= SOFT_ACCEPT && (queryFullyPresent(acceptQuery, p.name)
-            || (p.enNames ?? []).some(n => queryFullyPresent(acceptQuery, n)));
-    const chosenIndex = picks.findIndex(acceptable);
+    const acceptableFor = (q: string) => (p: ProductPick) =>
+        p.confidence >= SOFT_ACCEPT && (queryFullyPresent(q, p.name)
+            || (p.enNames ?? []).some(n => queryFullyPresent(q, n)));
+    const acceptable = acceptableFor(acceptQuery);
+    /**
+     * The exemplar outranks the plain read at ACCEPTANCE, not just recall: a
+     * pool of sparkling wines all carry 'Putojantis vynas', so full presence
+     * of the canonical query cannot see that only one of them is the
+     * Prosecco the note named. When any candidate carries the hint word too,
+     * it is the one the recipe meant. Falls straight through to the ordinary
+     * rule when none does — the hint is a preference, never a veto.
+     */
+    const hintIndex = hint != null && acceptQuery === query
+        ? picks.findIndex(acceptableFor(`${query} ${hint}`)) : -1;
+    const chosenIndex = hintIndex >= 0 ? hintIndex : picks.findIndex(acceptable);
     const best = chosenIndex >= 0 ? picks[chosenIndex] : picks[0];
     const rest = picks.filter((_, i) => i !== (chosenIndex >= 0 ? chosenIndex : 0));
     /**
@@ -744,7 +760,12 @@ const CONTAINS_MARKER = /\b(su|with)\b/i;
 const queryFullyPresent = (query: string, productName: string): boolean => {
     const words = contentWords(query);
     if (words.length === 0) return false;
-    const head = productName.split(CONTAINS_MARKER)[0];
+    // Shelf abbreviations expanded, same as droppedWord and carriesIdentity:
+    // "Dž. spanguolės NATURFOOD" IS the "Džiovintos spanguolės" a query asks
+    // for — the abbreviation folds to a 2-letter token that contentWords
+    // drops, and without the expansion the exactly-right product failed full
+    // presence and armed the head-noun fallback against itself.
+    const head = expandShelfAbbrev(productName).split(CONTAINS_MARKER)[0];
     const inName = contentWords(head);
     return words.every(w => isCovered(w, inName));
 };
@@ -1089,6 +1110,33 @@ const ALTERNATIVE_MARKER = /\s(?:arba|ar|or)\s/i;
 const firstAlternative = (name: string): string => name.split(ALTERNATIVE_MARKER)[0];
 
 /**
+ * A PARENTHETICAL EXEMPLAR IS THE RECIPE NAMING THE PRODUCT.
+ *
+ * "Putojantis vynas (pvz. Prosecco)" resolves through the sparkling-wine
+ * entry, whose canonical query is the bare 'Putojantis vynas' — and the note
+ * carrying the one word that picks the bottle was discarded before search, so
+ * a sweet ALITA beat the dry Prosecco the recipe literally named. The hint is
+ * not a qualifier the lexicon could model (it is a style/brand, different in
+ * every recipe), so it rides the note: appended to the canonical query as an
+ * extra search arm, and preferred at acceptance when a candidate actually
+ * carries it. Only explicit exemplar markers count — a free-text note is prep
+ * instructions far more often than it is a product name.
+ */
+const EXEMPLAR_MARKER = /(?:^|[\s(])(?:pvz\.?|pavyzdžiui|pavyzdziui|e\.?\s?g\.?|such as)[\s:,]+([\p{L}][\p{L}\s-]{1,30})/iu;
+
+const exemplarHint = (note: string | null, query: string): string | null => {
+    if (!note) return null;
+    const m = EXEMPLAR_MARKER.exec(note.replace(/["„“”«»']/g, ' '));
+    if (!m) return null;
+    // At most two words — an exemplar is a name, not a sentence — and only
+    // words the query does not already carry, so "pvz. vyno" adds nothing.
+    const covered = contentWords(query);
+    const words = m[1].trim().split(/\s+/).slice(0, 2)
+        .filter(w => w.length >= 3 && !isCovered(fold(w), covered));
+    return words.length > 0 ? words.join(' ') : null;
+};
+
+/**
  * The recipe's own phrase earns a query arm only by ADDING a content word over
  * the canonical name ("šaldytų uogų" adds "šaldyt" over "Uogos" — the arm is
  * what finds the frozen mix, and deleting it outright broke that case). A
@@ -1127,6 +1175,15 @@ const findProducts = async (
     userId: string | null = null,
     affinityCache?: AffinityCache,
     enArm = false,
+    /**
+     * What the RANKING judges against, when it is not queries[0]. The
+     * exemplar-hint arm has to lead the list for recall (early-stop would
+     * otherwise skip it), but a hint that recalls nothing must not change how
+     * the pool is ordered: "such as Oscar Mayer®" turned the bare "Jautiena"
+     * into a three-word rank query, collapsed the bare-noun tie band, and a
+     * pork-and-beef blend beat the fresh mince it had always lost to.
+     */
+    rankQuery?: string,
 ): Promise<ProductPick[]> => {
     const best = new Map<number, ProductPick>();
     for (const q of queries) {
@@ -1161,9 +1218,10 @@ const findProducts = async (
     // Stamping afterwards (the first cut) left the order already decided and the
     // shopper's history with no effect at all.
     const stamped = await withAffinity([...best.values()], userId, affinityCache);
-    // Rank against the FIRST query — the canonical shopping name, which is the
-    // one the head-noun preference is meaningful for.
-    return rankPicks(stamped, queries[0], ing.nameFull || ing.name, info).slice(0, 4);
+    // Rank against the canonical shopping name — the one the head-noun
+    // preference is meaningful for. That is queries[0] except when a hint arm
+    // leads the list (see rankQuery above).
+    return rankPicks(stamped, rankQuery ?? queries[0], ing.nameFull || ing.name, info).slice(0, 4);
 };
 
 /**
@@ -2059,6 +2117,25 @@ const findProductsFor = async (
         for (const c of candidates) {
             const t = enNames.get(c.productId);
             if (t && t.length > 0) c.aliases = t;
+        }
+    }
+
+    /**
+     * A shelf ABBREVIATION scores as the word it abbreviates. "Dž. spanguolės
+     * NATURFOOD" IS "Džiovintos spanguolės" — coverage already reads it that
+     * way (expandShelfAbbrev in droppedWord/carriesIdentity) — but the SCORE
+     * was still computed against the raw name, where 'Dž.' matches nothing:
+     * the exactly-right product landed under the accept bar and armed the
+     * head-noun fallback against itself. The expanded spelling rides the
+     * existing `aliases` mechanism, and the matcher takes the best of the two.
+     */
+    for (const c of candidates) {
+        const expanded = expandShelfAbbrev(c.storeProductName);
+        // Aliases are contractually PRE-normalized (the matcher tokenizes them
+        // as-is against the normalized query), so the expansion goes through
+        // the same normalizer or its diacritics would match nothing.
+        if (expanded !== c.storeProductName) {
+            c.aliases = [...(c.aliases ?? []), normalizeProductName(expanded)];
         }
     }
 
