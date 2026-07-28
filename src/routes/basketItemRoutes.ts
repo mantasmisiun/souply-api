@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { addBasketItem, fetchBasketItemsByBasketId, updateBasketItem, removeBasketItem, convertBasketMode } from '../controllers/basketItemController.js';
+import { addBasketItem, fetchBasketItemsByBasketId, fetchBasketQuantities, putBasketItemByProduct, updateBasketItem, removeBasketItem, convertBasketMode } from '../controllers/basketItemController.js';
 import { requireUser } from '../middleware/sessionAuth.js';
 import { requireBasketOwner, requireBasketOwnerFromBody, requireBasketItemWritable } from '../middleware/resourceAuth.js';
 
@@ -60,6 +60,44 @@ router.post('/basket-items', requireUser, requireBasketOwnerFromBody('basketId')
  */
 // GET /api/baskets/:basketId/items - Get all items in a basket
 router.get('/baskets/:basketId/items', requireUser, requireBasketOwner('basketId'), fetchBasketItemsByBasketId);
+
+/**
+ * @swagger
+ * /api/baskets/{basketId}/quantities:
+ *   get:
+ *     summary: productId → quantity map for a basket (catalog Add/stepper state)
+ *     tags: [BasketItem]
+ *     responses:
+ *       200:
+ *         description: '{ "12": 2, "48": 0.5 }'
+ */
+// The catalog surfaces' cheap read — see fetchBasketQuantities. /items stays for
+// the basket screen, which needs names, images and canonical units.
+router.get('/baskets/:basketId/quantities', requireUser, requireBasketOwner('basketId'), fetchBasketQuantities);
+
+/**
+ * @swagger
+ * /api/baskets/{basketId}/items/by-product/{productId}:
+ *   put:
+ *     summary: Set a product's quantity in a basket (upsert; 0 removes)
+ *     tags: [BasketItem]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [quantity]
+ *             properties:
+ *               quantity: { type: number, example: 2 }
+ *               matchMode: { type: string, enum: [sku, base] }
+ *     responses:
+ *       200:
+ *         description: '{ id, quantity, created, remaining, revertedToDraft }'
+ */
+// The stepper's write: ONE round trip, addressed by product. Owner-gated on the
+// parent basket exactly like the other item routes.
+router.put('/baskets/:basketId/items/by-product/:productId', requireUser, requireBasketOwner('basketId'), putBasketItemByProduct);
 
 // POST /api/baskets/:basketId/convert-mode - flip all items in a basket
 // between 'sku' and 'base'. Sums quantities on sku→base cluster collisions.

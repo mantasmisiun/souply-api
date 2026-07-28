@@ -122,6 +122,65 @@ export const deleteBasketItem = async (id: number) => {
     await pool.query('DELETE FROM BasketItem WHERE id = ?', [id]);
 };
 
+/**
+ * QUANTITIES ONLY — productId → quantity for one basket.
+ *
+ * The catalog surfaces (cards, search, discounts) only need to answer "is this
+ * product in the basket, and how much?". They used to call
+ * getBasketItemsByBasketId for that, which resolves localized names, image
+ * aggregates, canonical units, the user's product scores AND a p80 percentile
+ * over Product — a basket-screen payload, fetched on every stepper tap and on
+ * every basketRev bump of every mounted surface. This is the same answer in one
+ * indexed query.
+ */
+export const getBasketQuantitiesByBasketId = async (
+    basketId: number,
+): Promise<Record<number, number>> => {
+    const [rows]: any = await pool.query(
+        'SELECT productId, quantity FROM BasketItem WHERE basketId = ?',
+        [basketId],
+    );
+    const out: Record<number, number> = {};
+    for (const r of rows) out[Number(r.productId)] = parseFloat(r.quantity);
+    return out;
+};
+
+/**
+ * UPSERT one product's quantity in a basket, addressed by PRODUCT id.
+ *
+ * The client knows the productId (that's what a catalog card is); the basketItem
+ * id was only ever reachable by fetching the whole basket first, so every ± tap
+ * cost a heavy GET before its PUT. This makes a step ONE round trip.
+ *
+ * quantity <= 0 deletes the row. Returns the resulting row id (null when
+ * deleted / absent) and how many items the basket has left, so the caller can
+ * tear down a basket that just lost its last line without another query.
+ */
+export const upsertBasketItemByProduct = async (
+    basketId: number,
+    productId: number,
+    quantity: number,
+    matchMode: MatchMode = 'sku',
+): Promise<{ id: number | null; quantity: number; created: boolean; remaining: number }> => {
+    const existing = await getBasketItemByBasketAndProduct(basketId, productId);
+    let id: number | null = existing?.id ?? null;
+    let created = false;
+
+    if (quantity <= 0) {
+        if (existing) await deleteBasketItem(existing.id);
+        id = null;
+    } else if (existing) {
+        await updateBasketItemQuantity(existing.id, quantity);
+    } else {
+        id = await createBasketItem(basketId, productId, quantity, matchMode);
+        created = true;
+    }
+
+    const [[count]]: any = await pool.query(
+        'SELECT COUNT(*) AS n FROM BasketItem WHERE basketId = ?', [basketId]);
+    return { id, quantity: Math.max(0, quantity), created, remaining: Number(count.n) };
+};
+
 //Function to get a basket item by basketId and productId (used to check if item already exists in basket)
 export const getBasketItemByBasketAndProduct = async (basketId: number, productId: number) => {
     const [rows]: any = await pool.query(

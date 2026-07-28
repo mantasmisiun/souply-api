@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { createBasketItem, getBasketItemById, getBasketItemsByBasketId, updateBasketItemQuantity, deleteBasketItem, getBasketItemByBasketAndProduct, convertBasketItemsMode } from '../models/basketItemModel.js';
+import { createBasketItem, getBasketItemById, getBasketItemsByBasketId, updateBasketItemQuantity, deleteBasketItem, getBasketItemByBasketAndProduct, convertBasketItemsMode, getBasketQuantitiesByBasketId, upsertBasketItemByProduct } from '../models/basketItemModel.js';
 import { getProductById } from '../models/productModel.js';
 import { getBasketById, updateBasketUpdatedAt, markBasketUserEdited, updateBasketStatus } from '../models/basketModel.js';
 import { logInteraction } from '../models/productInteractionModel.js';
@@ -97,6 +97,67 @@ export const fetchBasketItemsByBasketId = async (req: Request, res: Response, ne
         const basket = await getBasketById(basketId);
         const items = await getBasketItemsByBasketId(basketId, basket?.userId ?? null, req.locale);
         res.json(items);
+    } catch (error) {
+        next(error);
+    }
+};
+
+/**
+ * GET /api/baskets/:basketId/quantities → { "<productId>": qty }
+ *
+ * The catalog surfaces' read: just enough to decide Add vs stepper. See
+ * getBasketQuantitiesByBasketId for why this exists next to /items.
+ */
+export const fetchBasketQuantities = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const basketId = Number(req.params.basketId);
+        if (isNaN(basketId)) {
+            res.status(400).json({ error: 'Invalid basket ID' });
+            return;
+        }
+        res.json(await getBasketQuantitiesByBasketId(basketId));
+    } catch (error) {
+        next(error);
+    }
+};
+
+/**
+ * PUT /api/baskets/:basketId/items/by-product/:productId  { quantity, matchMode? }
+ *
+ * Set a product's quantity in one call — the stepper's write. quantity 0 removes
+ * the line. Addressing by PRODUCT is what removes the client's "fetch the whole
+ * basket to find the row id" step before every ±.
+ *
+ * Same edit gate as every other item mutation (a priced basket reverts to
+ * draft), and the same interaction logging as a fresh add.
+ */
+export const putBasketItemByProduct = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const basketId = Number(req.params.basketId);
+        const productId = Number(req.params.productId);
+        const quantity = Number(req.body?.quantity);
+        const matchMode = req.body?.matchMode === 'base' ? 'base' : 'sku';
+        if (!Number.isFinite(basketId) || !Number.isFinite(productId) || !Number.isFinite(quantity)) {
+            res.status(400).json({ error: 'basketId, productId and quantity are required' });
+            return;
+        }
+
+        const gate = await ensureBasketEditable(basketId);
+        if (!gate.ok) {
+            res.status(gate.status).json({ error: gate.error });
+            return;
+        }
+
+        const result = await upsertBasketItemByProduct(basketId, productId, quantity, matchMode);
+        await updateBasketUpdatedAt(basketId);
+        await markBasketUserEdited(basketId);
+        if (result.created) {
+            const basket = await getBasketById(basketId);
+            if (basket?.userId) {
+                logInteraction(basket.userId, productId, 'basket_add').catch(() => {});
+            }
+        }
+        res.json({ ...result, revertedToDraft: gate.reverted });
     } catch (error) {
         next(error);
     }
