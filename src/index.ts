@@ -2,6 +2,7 @@ import './config/env.js';
 import './config/sentry.js';
 import express from 'express';
 import cors from 'cors';
+import compression from 'compression';
 import helmet from 'helmet';
 import * as path from 'path';
 import * as fsSync from 'fs';
@@ -47,10 +48,13 @@ import { Sentry } from './config/sentry.js';
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Trust the single reverse proxy (Nginx/Traefik) in front of the API so
-// `req.ip` resolves to the real client IP — required for the per-IP rate
-// limiter below to bucket per visitor rather than per proxy. Assumes ONE
-// proxy hop; bump the number if another hop (e.g. Cloudflare) is added.
+// Trust ONE proxy hop so `req.ip` resolves to the real client IP — required
+// for the per-IP rate limiter below to bucket per visitor rather than per
+// proxy. Reality check (perf audit #4): there is NO nginx/traefik in front of
+// this API — staging/prod compose publish the port directly, and prod's only
+// hop is the Cloudflare Tunnel (cloudflared). Nothing upstream compresses the
+// origin leg, which is why compression() below runs in-process. Bump the hop
+// count if another proxy layer is ever added.
 app.set('trust proxy', 1);
 
 // Allow-list of origins permitted to talk to this API from a browser.
@@ -91,6 +95,14 @@ app.use(cors({
     },
     credentials: true,
 }));
+
+// Response compression (perf audit #4): the API serves large repetitive JSON
+// (receipt lists, catalog pages, price histories) that gzips 8-12x, and no
+// proxy compresses the origin leg (see the trust-proxy note above). Default
+// filter: only compressible content-types, only responses >1KB; clients that
+// send no Accept-Encoding get identity, so nothing breaks. Registered before
+// the routers so every response body is eligible.
+app.use(compression());
 
 app.use(express.json({ limit: '10mb' }));
 app.use(resolveLocale);

@@ -106,11 +106,25 @@ export const markSwipesDone = async (req: Request, res: Response, next: NextFunc
     }
 };
 
+/**
+ * GET /users/:userId/receipts — blob-free rows (see getReceiptsByUserId) with
+ * optional keyset pagination.
+ *
+ * BACKWARDS COMPAT: clients that pass NO pagination params get the legacy
+ * plain-array response (first page, default limit). Passing `limit` and/or
+ * `cursor` opts into the `{ receipts, nextCursor }` envelope — old builds
+ * never send those params, so their `Array.isArray(data)` handling keeps
+ * working unchanged.
+ */
 export const fetchReceiptsByUserId = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const userId = String(req.params.userId);
-        const receipts = await getReceiptsByUserId(userId);
-        res.json(receipts);
+        const wantsEnvelope = req.query.limit !== undefined || req.query.cursor !== undefined;
+        const page = await getReceiptsByUserId(userId, {
+            limit: req.query.limit !== undefined ? Number(req.query.limit) : undefined,
+            cursor: typeof req.query.cursor === 'string' ? req.query.cursor : undefined,
+        });
+        res.json(wantsEnvelope ? page : page.receipts);
     } catch (error) {
         next(error);
     }

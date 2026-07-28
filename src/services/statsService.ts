@@ -155,8 +155,12 @@ export const computeReceiptSavings = async (
 // ---------------------------------------------------------------------------
 
 export const getUserStats = async (userId: string, locale: Locale = 'lt') => {
+    // Perf (audit #14): NO r.parsedData here — the blob (full OCR dump) was
+    // loaded for EVERY completed receipt on every stats call, yet it is only
+    // the legacy item fallback for receipts without ReceiptItem rows. Those
+    // few are hydrated in a second, id-scoped query below.
     const [receipts]: any = await pool.query(
-        `SELECT r.id, r.receiptDate, r.parsedData, sc.name AS chainName, sc.miniLogoUrl AS chainMiniLogoUrl
+        `SELECT r.id, r.receiptDate, sc.name AS chainName, sc.miniLogoUrl AS chainMiniLogoUrl
            FROM Receipt r
            LEFT JOIN Store s ON s.id = r.storeId
            LEFT JOIN StoreChain sc ON sc.id = s.chainId
@@ -209,12 +213,26 @@ export const getUserStats = async (userId: string, locale: Locale = 'lt') => {
             list.push(row);
             itemsByReceipt.set(Number(row.receiptId), list);
         }
+        // Legacy fallback, now CONDITIONAL (audit #14): fetch parsedData only
+        // for receipts with no ReceiptItem rows (pre-migration receipts an
+        // environment never backfilled — 77/110 on dev as of 2026-07). The
+        // set can only shrink: every new receipt writes ReceiptItem rows.
+        const legacyIds = receipts
+            .map((r: any) => Number(r.id))
+            .filter((id: number) => !(itemsByReceipt.get(id)?.length));
+        const legacyBlobById = new Map<number, any>();
+        if (legacyIds.length > 0) {
+            const [blobRows]: any = await pool.query(
+                'SELECT id, parsedData FROM Receipt WHERE id IN (?)',
+                [legacyIds],
+            );
+            for (const b of blobRows) legacyBlobById.set(Number(b.id), b.parsedData);
+        }
         perReceiptItems = receipts.map((receipt: any) => {
             const rows = itemsByReceipt.get(Number(receipt.id));
             if (rows && rows.length > 0) return { receipt, items: rows };
-            const parsed = typeof receipt.parsedData === 'string'
-                ? JSON.parse(receipt.parsedData)
-                : receipt.parsedData;
+            const blob = legacyBlobById.get(Number(receipt.id));
+            const parsed = typeof blob === 'string' ? JSON.parse(blob) : blob;
             return { receipt, items: parsed?.products ?? parsed?.items ?? [] };
         });
 

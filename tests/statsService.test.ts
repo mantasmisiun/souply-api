@@ -127,21 +127,41 @@ describe('computeReceiptSavings', () => {
 // ---------------------------------------------------------------------------
 
 describe('getUserStats', () => {
-    // Query order (post-ReceiptItem-cutover):
-    //   1. Receipts query (always)
+    // Query order (post-ReceiptItem-cutover, perf audit #14):
+    //   1. Receipts query (always — NO parsedData column anymore)
     //   2. ReceiptItem batch query (when any receipts exist)
-    //   3. SP→productId+category join (when any item has storeProductId)
-    //   4. Market avg query for savings (when spPriceList is non-empty)
+    //   3. LEGACY BLOB fetch: parsedData for ONLY the receipts with no
+    //      ReceiptItem rows (skipped entirely when every receipt has rows)
+    //   4. SP→productId+category join (when any item has storeProductId)
+    //   5. Market avg query for savings (when spPriceList is non-empty)
     //
     // Items come from ReceiptItem rows; the blob products/items is ONLY the
     // legacy fallback for receipts that have no rows. Receipts need an `id`
-    // for the item grouping — every fixture row carries one.
+    // for the item grouping AND the blob linkage — helpers assign one when a
+    // fixture omits it (production rows always have ids).
+
+    // Queue the conditional legacy-blob fetch: the fixture keeps parsedData on
+    // the receipt row for authoring convenience; production serves it from the
+    // dedicated id-scoped query this mocks.
+    function queueLegacyBlobFetch(receipts: any[], itemRows: any[]) {
+        receipts.forEach((r: any, i: number) => { if (r.id == null) r.id = i + 1; });
+        const withRows = new Set(itemRows.map((r: any) => Number(r.receiptId)));
+        const legacy = receipts.filter((r: any) => !withRows.has(Number(r.id)));
+        if (legacy.length > 0) {
+            mockPoolQuery.mockResolvedValueOnce([
+                legacy.map((r: any) => ({ id: r.id, parsedData: r.parsedData })),
+            ]);
+        }
+    }
 
     // Helper: receipts whose items carry no storeProductId (SP + avg queries skipped).
     // itemRows defaults to [] = legacy blob fallback path.
     function setupPoolNoSp(receipts: any[], itemRows: any[] = []) {
         mockPoolQuery.mockResolvedValueOnce([receipts]);
-        if (receipts.length > 0) mockPoolQuery.mockResolvedValueOnce([itemRows]);
+        if (receipts.length > 0) {
+            mockPoolQuery.mockResolvedValueOnce([itemRows]);
+            queueLegacyBlobFetch(receipts, itemRows);
+        }
     }
 
     // Helper: receipts WITH storeProductId items.
@@ -153,7 +173,9 @@ describe('getUserStats', () => {
     ) {
         mockPoolQuery
             .mockResolvedValueOnce([receipts])  // receipts
-            .mockResolvedValueOnce([itemRows])  // ReceiptItem batch
+            .mockResolvedValueOnce([itemRows]); // ReceiptItem batch
+        queueLegacyBlobFetch(receipts, itemRows);
+        mockPoolQuery
             .mockResolvedValueOnce([spRows])    // SP→productId+category
             .mockResolvedValueOnce([avgRows]);  // market avg
     }
@@ -375,7 +397,23 @@ describe('getUserStats', () => {
         expect(sum).toBeCloseTo(7.00);
     });
 
-    it('issues at most 4 pool queries for receipts with matched SPs', async () => {
+    it('issues at most 4 pool queries for row-backed receipts (no blob fetch)', async () => {
+        // Post-cutover receipt: items come from ReceiptItem rows, so the
+        // conditional legacy-blob query must NOT run.
+        setupPoolWithSp(
+            [{ id: 1, receiptDate: '2026-05-01', parsedData: { products: [] }, chainName: 'Maxima' }],
+            [{ spId: 10, productId: 100, categoryName: 'Pienas' }],
+            [{ productId: 100, avg_price: '2.00' }],
+            [{ receiptId: 1, storeProductId: 10, price: '1.00', promoPrice: null, quantity: '1' }],
+        );
+
+        await getUserStats('user1');
+
+        // receipts + ReceiptItem batch + SP join + market avg = 4
+        expect(mockPoolQuery).toHaveBeenCalledTimes(4);
+    });
+
+    it('adds exactly ONE extra query when legacy blob-only receipts are present', async () => {
         const parsedData = { products: [{ price: '1.00', quantity: '1', storeProductId: 10 }] };
         setupPoolWithSp(
             [{ id: 1, receiptDate: '2026-05-01', parsedData, chainName: 'Maxima' }],
@@ -385,8 +423,8 @@ describe('getUserStats', () => {
 
         await getUserStats('user1');
 
-        // receipts + ReceiptItem batch + SP join + market avg = 4
-        expect(mockPoolQuery).toHaveBeenCalledTimes(4);
+        // receipts + ReceiptItem batch + LEGACY BLOB + SP join + market avg = 5
+        expect(mockPoolQuery).toHaveBeenCalledTimes(5);
     });
 
     it('issues only 1 pool query when there are no receipts', async () => {

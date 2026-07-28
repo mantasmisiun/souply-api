@@ -210,6 +210,53 @@ export const getPriceHistoryForStoreProductAllStores = async (storeProductId: nu
 };
 
 /**
+ * Bulk variant of getPriceHistoryForStoreProductAllStores (perf audit #13):
+ * ONE query for many storeProductIds instead of the client's serial per-SP
+ * round trips. Same SQL (the GROUP BY already includes storeProductId, so the
+ * per-(date,price,promo,flags) dedup is naturally per SP), then grouped in JS
+ * with the SAME per-SP rule as the single fetch: prefer real-receipt rows
+ * (isFallback=0), fall back to scraped rows only when an SP has no verified
+ * observation at all. Element shape is IDENTICAL to the single endpoint's.
+ *
+ * Every requested id gets a key in the result (empty array when no history),
+ * so the client needs no missing-key handling.
+ */
+export const getPriceHistoryForStoreProductsAllStores = async (
+    storeProductIds: number[],
+): Promise<Record<string, any[]>> => {
+    const histories: Record<string, any[]> = {};
+    if (storeProductIds.length === 0) return histories;
+    for (const id of storeProductIds) histories[String(id)] = [];
+
+    const [rows]: any = await pool.query(
+        `SELECT MIN(p.id) AS id,
+                p.storeProductId,
+                COALESCE(p.validFrom, p.date) AS date,
+                CAST(p.price AS DECIMAL(10,4))      AS price,
+                CAST(p.promoPrice AS DECIMAL(10,4)) AS promoPrice,
+                p.promoEnd,
+                p.isFallback,
+                p.priceVerified
+           FROM Price p
+          WHERE p.storeProductId IN (?)
+          GROUP BY COALESCE(p.validFrom, p.date), p.price, p.promoPrice, p.promoEnd, p.isFallback, p.priceVerified, p.storeProductId
+          ORDER BY p.storeProductId ASC, COALESCE(p.validFrom, p.date) ASC`,
+        [storeProductIds]
+    );
+
+    const allBySp = new Map<string, any[]>();
+    for (const row of rows) {
+        const key = String(row.storeProductId);
+        (allBySp.get(key) ?? allBySp.set(key, []).get(key)!).push(row);
+    }
+    for (const [key, spRows] of allBySp) {
+        const nonFallback = spRows.filter((r: any) => r.isFallback !== 1);
+        histories[key] = nonFallback.length > 0 ? nonFallback : spRows;
+    }
+    return histories;
+};
+
+/**
  * Average of the last N verified, non-fallback prices for a (storeProduct, store) pair.
  * Returns null if fewer than 2 baseline prices exist — not enough data to judge clearance.
  */

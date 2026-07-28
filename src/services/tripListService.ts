@@ -2,6 +2,7 @@ import pool from '../config/db.js';
 import { itemPreviewSql, listItemPreviewSql } from '../models/basketModel.js';
 import type { Locale } from '../middleware/locale.js';
 import { deriveTripStage, type TripSlotFacts, type TripStage } from './tripStageService.js';
+import { SLOT_ITEMS_COVERED_SQL } from './slotCoverage.js';
 
 /**
  * Souply 2.0 Phase 4 — the Apsipirkimai tab's trip list, batched (no
@@ -21,6 +22,8 @@ export interface TripSlotSummary {
     longitude: number | null;
     listStatus: 'active' | 'completed';
     hasReceipt: boolean;
+    /** Every planned item of this slot was bought somewhere on the trip. */
+    itemsCovered: boolean;
     receiptSkipped: boolean;
     /** Checked/total items for the stage-3 progress pills ("2/10"). */
     checkedCount: number;
@@ -64,6 +67,60 @@ export interface TripSummary {
      *  for it exists — drives the card's logo strip (full colour vs dimmed). */
     chains: { chainId: number; chainName: string | null; hasReceipt: boolean }[];
 }
+
+/**
+ * Perf (audit #6): the tab-badge poller needs ONE integer — the number of the
+ * user's non-archived trips in derived stage 1-4 — and used to get it by
+ * running the full listTripsForUser assembly (SELECT t.* with correlated
+ * ORDER BY subqueries + 5 batch queries) and filtering in JS. This COUNT
+ * reproduces exactly the same filter, derived from deriveTripStage
+ * (tripStageService):
+ *
+ *   stage 5 (excluded) ⟺ ad-hoc, OR (slots exist AND every list completed
+ *   AND every slot closed). "Closed" = has a VISIBLE receipt, or was skipped,
+ *   or its items were covered elsewhere on the trip (SLOT_ITEMS_COVERED_SQL).
+ *   So stage<5 ⟺ NOT ad-hoc AND (no slots yet — stage 1/2 — OR some list
+ *   still active — stage 3 — OR some slot not closed — stage 4).
+ *
+ * Receipt visibility mirrors the slot query above verbatim: own receipts
+ * always count; someone else's only once its mandatory swipes are done.
+ * The phantom-guard filter (ad-hoc orphans) only ever removes ad-hoc trips,
+ * which stage 5 already excludes, so it needs no SQL counterpart. The only
+ * deliberate difference: no LIMIT — listTripsForUser clips at 100 trips, the
+ * badge counts them all (indistinguishable below 100 active trips).
+ */
+export const countActiveTripsForUser = async (userId: string): Promise<number> => {
+    const [rows]: any = await pool.query(
+        `SELECT COUNT(*) AS cnt
+           FROM Trip t
+           JOIN TripMember tm ON tm.tripId = t.id AND tm.userId = ?
+          WHERE t.archivedAt IS NULL
+            AND COALESCE(t.isAdHoc, 0) = 0
+            AND (
+                 NOT EXISTS (SELECT 1 FROM ShoppingList sl0 WHERE sl0.tripId = t.id)
+              OR EXISTS (
+                   SELECT 1 FROM ShoppingList sl
+                    WHERE sl.tripId = t.id
+                      AND (
+                           COALESCE(sl.status, 'active') <> 'completed'
+                        OR NOT (
+                             sl.receiptSkippedAt IS NOT NULL
+                          OR EXISTS (
+                               SELECT 1 FROM Receipt r
+                                WHERE r.shoppingListId = sl.id
+                                  AND r.userDeletedAt IS NULL
+                                  AND (COALESCE(r.uploaderUserId, r.userId) = ?
+                                       OR r.mandatorySwipesRequired = 0
+                                       OR r.mandatorySwipesCompleted >= r.mandatorySwipesRequired))
+                          OR (${SLOT_ITEMS_COVERED_SQL})
+                        )
+                      )
+                 )
+            )`,
+        [userId, userId],
+    );
+    return Number(rows[0]?.cnt) || 0;
+};
 
 export const listTripsForUser = async (userId: string, locale: Locale = 'lt', limit = 100): Promise<TripSummary[]> => {
     const [trips]: any = await pool.query(
@@ -145,7 +202,8 @@ export const listTripsForUser = async (userId: string, locale: Locale = 'lt', li
                 ${listItemPreviewSql(locale, 'sl.id')} AS itemPreview,
                 (SELECT COUNT(*) FROM Receipt r WHERE r.shoppingListId = sl.id AND r.userDeletedAt IS NULL
                     AND (COALESCE(r.uploaderUserId, r.userId) = ?
-                         OR r.mandatorySwipesRequired = 0 OR r.mandatorySwipesCompleted >= r.mandatorySwipesRequired)) AS receiptCount
+                         OR r.mandatorySwipesRequired = 0 OR r.mandatorySwipesCompleted >= r.mandatorySwipesRequired)) AS receiptCount,
+                (${SLOT_ITEMS_COVERED_SQL}) AS itemsCovered
            FROM ShoppingList sl
            LEFT JOIN Store s ON s.id = sl.storeId
            LEFT JOIN StoreChain sc ON sc.id = s.chainId
@@ -206,6 +264,7 @@ export const listTripsForUser = async (userId: string, locale: Locale = 'lt', li
             listStatus: l.status === 'completed' ? 'completed' : 'active',
             hasReceipt: Number(l.receiptCount) > 0,
             receiptSkipped: l.receiptSkippedAt != null,
+            itemsCovered: Number(l.itemsCovered) === 1,
             checkedCount: Number(l.checkedCount) || 0,
             itemCount: Number(l.itemCount) || 0,
             itemPreview: typeof l.itemPreview === 'string' && l.itemPreview.length > 0
@@ -217,6 +276,7 @@ export const listTripsForUser = async (userId: string, locale: Locale = 'lt', li
             listStatus: s.listStatus,
             hasReceipt: s.hasReceipt,
             receiptSkipped: s.receiptSkipped,
+            itemsCovered: s.itemsCovered,
         }));
         const stage = deriveTripStage({
             isAdHoc: !!t.isAdHoc,

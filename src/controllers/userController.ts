@@ -7,7 +7,7 @@ import { createUser, getUserById, updateLastActive } from '../models/userModel.j
 import { getUserPointsProfile } from '../services/userPointsService.js';
 import { hasPendingMandatorySwipes, shouldShowBurstWarning } from '../services/swipeSessionService.js';
 import { getPendingMandatorySwipeCount } from '../models/receiptModel.js';
-import { listTripsForUser } from '../services/tripListService.js';
+import { countActiveTripsForUser } from '../services/tripListService.js';
 import { getEquivalencesForUser, upsertEquivalence, deleteEquivalence, getUserProductMergeMap, type EquivalenceVerdict } from '../models/userEquivalenceModel.js';
 import { getUserStats } from '../services/statsService.js';
 import { getVoteHistory, orderPair, type MatchVote } from '../models/storeProductMatchModel.js';
@@ -91,19 +91,23 @@ export const updateUserLastActive = async (req: Request, res: Response, next: Ne
 
 /**
  * Souply 2.0 tab badges — ONE call replacing the client's 3-fetch poller.
- * Phase 4: `trips` now counts REAL trips (non-archived, derived stage 1-4)
- * via the batched trip list — every basket/list/receipt mints its trip at
- * persist time (tripLinkService), so the Trip table is authoritative.
+ * Phase 4: `trips` counts REAL trips (non-archived, derived stage 1-4) —
+ * every basket/list/receipt mints its trip at persist time (tripLinkService),
+ * so the Trip table is authoritative. Counted by a dedicated SQL COUNT
+ * (countActiveTripsForUser), NOT the full trip-list assembly.
  */
 export const fetchTabBadges = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const id = String(req.params.id);
-        const [trips, pendingSwipeCount] = await Promise.all([
-            listTripsForUser(id),
+        // Perf (audit #6): this endpoint is polled constantly and returns two
+        // integers — both sides are now direct COUNTs. countActiveTripsForUser
+        // reproduces the old `listTripsForUser(...).filter(archived==null &&
+        // stage<5).length` exactly (equivalence covered in tabBadges tests).
+        const [activeTrips, pendingSwipeCount] = await Promise.all([
+            countActiveTripsForUser(id),
             getPendingMandatorySwipeCount(id),
         ]);
-        const active = trips.filter(t => t.archivedAt == null && t.stage < 5).length;
-        res.json({ trips: active, pendingSwipes: pendingSwipeCount });
+        res.json({ trips: activeTrips, pendingSwipes: pendingSwipeCount });
     } catch (error) {
         next(error);
     }

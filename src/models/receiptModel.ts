@@ -38,10 +38,68 @@ export const createReceipt = async (
     return result.insertId;
 };
 
-export const getReceiptsByUserId = async (userId: string) => {
+export interface ReceiptListOpts {
+    limit?: number;
+    cursor?: string;   // opaque: base64url(JSON({ id: <last row's receipt id> }))
+}
+
+export interface ReceiptListPage {
+    receipts: any[];
+    nextCursor: string | null;
+}
+
+/** Default/max page size for the receipts list. Generous on purpose: legacy
+ *  clients don't paginate, so the first page must cover any realistic history
+ *  (dev's heaviest user has ~110 receipts). Rows are blob-free (~0.5 KB each),
+ *  so even a full page is a few hundred KB pre-compression. */
+const RECEIPT_LIST_DEFAULT_LIMIT = 300;
+const RECEIPT_LIST_MAX_LIMIT = 300;
+
+/**
+ * Perf (audit #1): NO `r.*` here — that shipped the parsedData LONGTEXT (full
+ * per-word OCR geometry, ~1.16 MB per fetch on dev) when the list screens read
+ * exactly ONE field from it. The blob is replaced by `receiptFooterDate`
+ * (JSON-extracted `$.footer.date`, with the same `$.date` legacy fallback the
+ * client used), and the row is otherwise a superset of what the three list
+ * consumers (receipt index, shopping-list picker, receipt-picker) read.
+ *
+ * Keyset pagination follows getVoteHistory (storeProductMatchModel): fetch
+ * limit+1 rows to detect a next page without a COUNT; the cursor is the last
+ * row's id (the sort is `r.id DESC`, so `r.id < ?` resumes exactly).
+ */
+export const getReceiptsByUserId = async (
+    userId: string,
+    opts: ReceiptListOpts = {},
+): Promise<ReceiptListPage> => {
+    const limit = Math.min(Math.max(Math.floor(Number(opts.limit) || RECEIPT_LIST_DEFAULT_LIMIT), 1), RECEIPT_LIST_MAX_LIMIT);
+    const conditions = ['r.userId = ?', 'r.userDeletedAt IS NULL'];
+    const params: any[] = [userId];
+
+    if (opts.cursor) {
+        try {
+            const { id } = JSON.parse(Buffer.from(opts.cursor, 'base64url').toString('utf8'));
+            if (Number.isFinite(Number(id))) {
+                conditions.push('r.id < ?');
+                params.push(Number(id));
+            }
+        } catch { /* malformed cursor — just return from the start */ }
+    }
+
+    params.push(limit + 1);
+
     const [rows]: any = await pool.query(
-        `SELECT r.*,
+        `SELECT r.id, r.userId, r.storeId, r.shoppingListId, r.tripId,
+                r.filePath, r.fileType, r.receiptDate, r.processingStatus,
+                r.receiptNos,
+                r.mandatorySwipesRequired, r.mandatorySwipesCompleted,
+                r.hasBurstSwipes, r.savedAmount,
+                r.adminEditedAt, r.userDeletedAt, r.uploaderUserId, r.uploadedAt,
                 r.receiptNoCanonical AS receiptNo,
+                CASE WHEN JSON_VALID(r.parsedData)
+                     THEN NULLIF(TRIM(COALESCE(
+                         NULLIF(JSON_UNQUOTE(JSON_EXTRACT(r.parsedData, '$.footer.date')), 'null'),
+                         NULLIF(JSON_UNQUOTE(JSON_EXTRACT(r.parsedData, '$.date')), 'null'))), '')
+                     ELSE NULL END AS receiptFooterDate,
                 sc.name         AS chainName,
                 sc.logoUrl      AS chainLogoUrl,
                 sc.miniLogoUrl  AS chainMiniLogoUrl,
@@ -50,12 +108,18 @@ export const getReceiptsByUserId = async (userId: string) => {
            FROM Receipt r
       LEFT JOIN Store      s  ON s.id        = r.storeId
       LEFT JOIN StoreChain sc ON sc.id       = s.chainId
-          WHERE r.userId = ?
-            AND r.userDeletedAt IS NULL
-          ORDER BY r.id DESC`,
-        [userId]
+          WHERE ${conditions.join(' AND ')}
+          ORDER BY r.id DESC
+          LIMIT ?`,
+        params
     );
-    return rows;
+
+    const hasMore = rows.length > limit;
+    const receipts = hasMore ? rows.slice(0, limit) : rows;
+    const nextCursor = hasMore
+        ? Buffer.from(JSON.stringify({ id: receipts[receipts.length - 1].id })).toString('base64url')
+        : null;
+    return { receipts, nextCursor };
 };
 
 /** The owning userId of a receipt (null if it doesn't exist). Cheap — one indexed
