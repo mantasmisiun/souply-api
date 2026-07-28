@@ -588,6 +588,84 @@ export const revokeShareLink = async (req: Request, res: Response, next: NextFun
 };
 
 /**
+ * POST /api/basket-templates/:id/invites
+ * Body: { email?, handle? } — at least one required.
+ *
+ * Addressed template invite — the recipe dock's counterpart to
+ * POST /trips/:id/invites (whose contract this copies: same body parse, same
+ * oracle-free 200, same registered-user-vs-email split). One deliberate
+ * divergence from trips: the delivered link is the template's existing
+ * /t/:slug share page, NOT a /join/:code token. Templates have no membership
+ * to claim — viewing IS accepting — so minting an InviteToken (whose scope
+ * enum, /join preview/claim flow and the souply.lt landing all know only
+ * trip|household) would deliver links that 404 everywhere. And unlike trips,
+ * a bare POST is rejected: the QR/link mint already lives at /:id/share, so
+ * a body with neither address has no meaning here.
+ *
+ * Owner-only (loadOwnedTemplate) — trips let any member mint, but a template
+ * has no members, only its owner.
+ */
+export const createTemplateInvite = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const template = await loadOwnedTemplate(req, res);
+        if (!template) return;
+        const id = Number(req.params.id);
+        // Body parse copied verbatim from createTripInvite.
+        const handle = typeof req.body?.handle === 'string' ? req.body.handle.trim().replace(/^@/, '') : null;
+        const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : null;
+        if (!handle && !email) {
+            res.status(400).json({ error: 'email or handle required' });
+            return;
+        }
+        const items = await getTemplateItems(id);
+        if (items.length === 0) {
+            // Same guard as generateShareLink — an empty template prices to
+            // nothing, and the invite would land on an empty share page.
+            res.status(400).json({ error: 'Template has no items to share' });
+            return;
+        }
+        // Reuses the live slug when one exists; mints (and auto-upgrades
+        // private → unlisted) exactly like the share sheet — sending an
+        // addressed invite IS sharing intent.
+        const { slug } = await shareTemplate(id);
+        const inviterId = callerId(req)!;
+        // Delivery is fire-and-forget and the response is 200-shaped
+        // IDENTICALLY whether or not the target exists — no handle/email
+        // existence oracle (same as trips/households).
+        void (async () => {
+            try {
+                const [rows]: any = handle
+                    ? await pool.query('SELECT id FROM User WHERE username = ? LIMIT 1', [handle])
+                    : await pool.query('SELECT id FROM User WHERE email = ? LIMIT 1', [email]);
+                const target = rows[0]?.id;
+                if (target && target !== inviterId) {
+                    const { notifyUser } = await import('../services/notificationService.js');
+                    await notifyUser(target, 'template_invite', {
+                        title: 'Pasidalintas krepšelis',
+                        body: `Su tavimi pasidalino krepšeliu „${template.name}“.`,
+                        route: `/t/${slug}`,
+                    });
+                } else if (!target && email) {
+                    // No account behind this address → a real email with the
+                    // share link (registered users get the in-app notification).
+                    const [me]: any = await pool.query(
+                        'SELECT displayName, firstName, username FROM User WHERE id = ? LIMIT 1', [inviterId]);
+                    const inviterName = me[0]?.displayName ?? me[0]?.firstName ?? (me[0]?.username ? `@${me[0].username}` : null);
+                    const { sendTemplateInviteEmail } = await import('../services/emailService.js');
+                    await sendTemplateInviteEmail({
+                        to: email,
+                        templateUrl: shareUrlForSlug(slug),
+                        templateName: String(template.name ?? ''),
+                        inviterName,
+                    });
+                }
+            } catch {}
+        })();
+        res.json({ code: slug, addressed: !!(handle || email) });
+    } catch (e) { next(e); }
+};
+
+/**
  * GET /api/t/:slug
  *
  * Public slug resolution — used by both the souply.lt landing page and

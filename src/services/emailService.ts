@@ -266,3 +266,41 @@ export async function sendTripInviteEmail(opts: {
 </div>`,
     });
 }
+
+/**
+ * Basket-template ("recipe") invite for an address with NO registered account —
+ * registered users get the in-app notification instead (basketTemplateController).
+ * Same shape as sendTripInviteEmail, but the link is the template's public
+ * /t/:slug page (templates have no /join membership to claim — viewing IS
+ * accepting). Template names are free user text landing in HTML, so escape.
+ */
+export async function sendTemplateInviteEmail(opts: {
+    to: string;
+    templateUrl: string;
+    templateName: string;
+    inviterName: string | null;
+}): Promise<void> {
+    const from = process.env.SMTP_FROM ?? 'Souply <noreply@souply.lt>';
+    const esc = (s: string) => s.replace(/[&<>"]/g, ch =>
+        ch === '&' ? '&amp;' : ch === '<' ? '&lt;' : ch === '>' ? '&gt;' : '&quot;');
+    const who = esc(opts.inviterName?.trim() || 'Draugas');
+    const name = esc(opts.templateName.trim());
+    await transporter.sendMail({
+        from,
+        to: opts.to,
+        subject: `${who} dalinasi pirkinių krepšeliu – Souply`,
+        text: `${who} pasidalino su tavimi pirkinių krepšeliu „${name}“ programėlėje Souply.\n\nPeržiūrėk: ${opts.templateUrl}\n\n(Someone shared a Souply shopping basket with you — open the link to view it.)`,
+        html: `
+<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:520px;margin:0 auto;padding:24px;">
+  <h2 style="color:#212121;margin:0 0 8px;">🛒 ${who} dalinasi krepšeliu</h2>
+  <p style="color:#555;line-height:1.5;">Su tavimi pasidalino pirkinių krepšeliu <b>„${name}“</b> programėlėje
+  <b>Souply</b> — pamatysi produktus ir pigiausią parduotuvę jiems nupirkti.</p>
+  <p style="text-align:center;margin:28px 0;">
+    <a href="${opts.templateUrl}" style="background:#EB6784;color:#fff;text-decoration:none;
+       padding:13px 28px;border-radius:12px;font-weight:700;display:inline-block;">Peržiūrėti</a>
+  </p>
+  <p style="color:#999;font-size:12px;">Jei mygtukas neveikia: <a href="${opts.templateUrl}">${opts.templateUrl}</a><br>
+  Someone shared a Souply shopping basket with you — open the link to view it.</p>
+</div>`,
+    });
+}

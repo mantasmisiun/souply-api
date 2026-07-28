@@ -287,6 +287,11 @@ export interface ResolvedSlug {
         visibility: 'unlisted' | 'public' | 'private';
         coverColor: string | null;
         coverImage: unknown | null;
+        /** Where an imported recipe came from. The share page credits the SITE
+         *  rather than the shopper who pasted the link — they did not write it.
+         *  Null for hand-made recipes, which keep the creator byline. */
+        sourceUrl: string | null;
+        sourceSite: string | null;
     };
     snapshot: {
         cheapestChainId: number | null;
@@ -314,6 +319,11 @@ export async function resolveSlug(
     const [rows]: any = await pool.query(
         `SELECT id, userId, name, creatorHandle, useCount, visibility,
                 coverColor, coverImage,
+                -- An imported recipe is attributed to the SITE it came from, not
+                -- to whoever imported it: the shopper who pasted a lamaistas.lt
+                -- link did not write the recipe. Stats still accrue to the
+                -- creator; only the byline changes.
+                sourceUrl, sourceSite,
                 snapshotCheapestChainId, snapshotTotalEur, snapshotRunnerUpEur,
                 snapshotMostExpensiveEur, snapshotCalculatedAt
            FROM BasketTemplate
@@ -336,6 +346,8 @@ export async function resolveSlug(
                 visibility: 'private',
                 coverColor: row.coverColor ?? null,
                 coverImage: row.coverImage ?? null,
+                sourceUrl: row.sourceUrl ?? null,
+                sourceSite: row.sourceSite ?? null,
             },
             snapshot: {
                 cheapestChainId: null,
@@ -380,6 +392,8 @@ export async function resolveSlug(
             visibility: row.visibility,
             coverColor: row.coverColor ?? null,
             coverImage: row.coverImage ?? null,
+            sourceUrl: row.sourceUrl ?? null,
+            sourceSite: row.sourceSite ?? null,
         },
         snapshot: {
             cheapestChainId: row.snapshotCheapestChainId !== null ? Number(row.snapshotCheapestChainId) : null,
