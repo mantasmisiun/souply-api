@@ -24,6 +24,10 @@ export interface TripSlotFacts {
     hasReceipt: boolean;
     /** "Nepirkau čia" — slot explicitly closed without a receipt. */
     receiptSkipped: boolean;
+    /** Every item on this slot's list was bought SOMEWHERE on this trip (see
+     *  slotCoverage). Products are what "done" means; the store slot is the
+     *  plan — buying the IKI list at Maxima fulfils it just as well. */
+    itemsCovered?: boolean;
 }
 
 export interface TripStageFacts {
@@ -38,8 +42,10 @@ export interface TripStageFacts {
 
 export type TripStage = 1 | 2 | 3 | 4 | 5;
 
-/** A slot is CLOSED when its receipt arrived or the user skipped it. */
-export const slotClosed = (s: TripSlotFacts): boolean => s.hasReceipt || s.receiptSkipped;
+/** A slot is CLOSED when its receipt arrived, its items were bought anywhere on
+ *  this trip, or the user skipped it. */
+export const slotClosed = (s: TripSlotFacts): boolean =>
+    s.hasReceipt || s.receiptSkipped || s.itemsCovered === true;
 
 export function deriveTripStage(f: TripStageFacts): TripStage {
     // Ad-hoc trips are born terminal: receipts without a plan.

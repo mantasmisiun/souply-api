@@ -7,6 +7,9 @@ import { computePlanningScore, monthlyPlanningScores, planningBaselineDelta } fr
 import { attributeComboDiscount } from '../services/comboAttribution.js';
 import { assessQuality } from '../services/receiptHealService.js';
 import { getTripComparison } from '../services/tripComparisonService.js';
+import { attachReceiptToTrip } from '../services/tripLinkService.js';
+import { readTripBasketComparison, snapshotTripComparison } from '../services/tripBasketComparison.js';
+import { getReceiptOwnerId } from '../models/receiptModel.js';
 
 export const listTrips = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -45,7 +48,7 @@ export const fetchTripScore = async (req: Request, res: Response, next: NextFunc
         const tripId = Number(req.params.id);
         if (!Number.isFinite(tripId)) { res.status(400).json({ error: 'bad id' }); return; }
         if (!(await isTripMember(tripId, req.authUserId!))) { res.status(404).json({ error: 'not found' }); return; }
-        const score = await computePlanningScore(tripId);
+        const score = await computePlanningScore(tripId, { allowLiveComparison: true });
         const deltaPct = await planningBaselineDelta(req.authUserId!, tripId, score.score);
         res.json({ ...score, deltaPct });
     } catch (error) { next(error); }
@@ -115,7 +118,7 @@ export const putTripLineLink = async (req: Request, res: Response, next: NextFun
                 "INSERT IGNORE INTO TripLineLink (tripId, listItemId, receiptItemId, kind, createdByUserId) VALUES (?,?,?,'manual',?)",
                 [tripId, listItemId, receiptItemId, req.authUserId]);
         }
-        res.json(await computePlanningScore(tripId));
+        res.json(await computePlanningScore(tripId, { allowLiveComparison: true }));
     } catch (error) { next(error); }
 };
 
@@ -141,6 +144,21 @@ export const fetchMonthlyTripSpend = async (req: Request, res: Response, next: N
  * screen's data (TRIP_MAP_SURFACE_PLAN.md rework: one screen per stage).
  * Member-gated with the same 404-over-403 probing defense.
  */
+/** parsedData.footer.loyalty as MySQL hands it back (JSON string or object). */
+const parseLoyalty = (raw: unknown): { program: string; redeemed: number; earned: number | null; balance: number | null } | null => {
+    if (raw == null) return null;
+    try {
+        const o = typeof raw === 'string' ? JSON.parse(raw) : raw as any;
+        if (!o || typeof o !== 'object') return null;
+        return {
+            program: String(o.program ?? 'unknown'),
+            redeemed: Number(o.redeemed) || 0,
+            earned: o.earned == null ? null : Number(o.earned),
+            balance: o.balance == null ? null : Number(o.balance),
+        };
+    } catch { return null; }
+};
+
 export const fetchTripReceipts = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const tripId = Number(req.params.id);
@@ -155,14 +173,22 @@ export const fetchTripReceipts = async (req: Request, res: Response, next: NextF
                     r.mandatorySwipesRequired, r.mandatorySwipesCompleted,
                     COALESCE(r.uploaderUserId, r.userId) AS uploaderUserId,
                     s.name AS storeName, s.address AS storeAddress, c.name AS chainName, c.id AS chainId,
-                    -- Old-receipt flag: the receipt was already >30 days old WHEN
-                    -- UPLOADED (uploadedAt is frozen at insert, so this never drifts
-                    -- — fresh-at-upload stays fresh forever). Seen by all members.
+                    -- Old-receipt flag: is this receipt old RELATIVE TO THE SHOPPING
+                    -- IT DOCUMENTS? Anchored on the trip, not on uploadedAt: a
+                    -- receipt uploaded months ago and only now attached to today's
+                    -- trip scored 0 days against its own upload and showed no
+                    -- warning at all (reported: a April receipt on a July trip, no
+                    -- flag). The trip's creation date is what the receipt is meant
+                    -- to match; uploadedAt remains the fallback for a receipt whose
+                    -- trip predates it (plan Monday, shop Friday → still fresh).
+                    -- Both are frozen values, so the flag never drifts with time.
                     -- SUPPRESSED for ad-hoc trips: the trip IS this uploaded receipt,
                     -- so an old date is intentional, not a "wrong receipt?" warning.
-                    (t.isAdHoc = 0 AND r.receiptDate IS NOT NULL AND DATEDIFF(r.uploadedAt, r.receiptDate) > 30) AS staleReceipt,
+                    (t.isAdHoc = 0 AND r.receiptDate IS NOT NULL
+                        AND DATEDIFF(GREATEST(t.createdAt, r.uploadedAt), r.receiptDate) > 30) AS staleReceipt,
                     JSON_EXTRACT(r.parsedData, '$.footer.total') AS printedTotal,
                     JSON_EXTRACT(r.parsedData, '$.footer.comboDiscount') AS comboDiscount,
+                    JSON_EXTRACT(r.parsedData, '$.footer.loyalty') AS loyalty,
                     JSON_EXTRACT(r.parsedData, '$.footer.comboDiscountAnchors') AS comboAnchors
                FROM Receipt r
                JOIN Trip t ON t.id = r.tripId
@@ -184,6 +210,10 @@ export const fetchTripReceipts = async (req: Request, res: Response, next: NextF
                               * COALESCE(quantity, 1), 2) AS lineTotal
                    FROM ReceiptItem WHERE receiptId = ? ORDER BY lineIdx ASC`,
                 [r.id]) as any;
+            // Loyalty money ("MAXIMOS pinigai") — redeemed reduces THIS bill, so
+            // reconciliation must know about it; earned/balance ride along for the
+            // stats surfaces.
+            const loyalty = parseLoyalty(r.loyalty);
             // Scan-quality signal → drives the "Perfotografuoti" (retake) banner.
             // lowQuality trips on unreadable-line fraction OR a reconciliation gap
             // vs the printed total; unmatchedCount is the user-facing "N unrecognised".
@@ -202,11 +232,12 @@ export const fetchTripReceipts = async (req: Request, res: Response, next: NextF
                 // this the line sum legitimately overshoots the total and a clean
                 // receipt gets flagged for a retake.
                 Number.isFinite(Number(r.comboDiscount)) ? Number(r.comboDiscount) : null,
+                loyalty?.redeemed ?? null,
             );
             // printedTotal = the receipt's OWN footer total (what the user actually paid).
             // Surfaced so the detail card shows the recognised total, not a line-item sum
             // that a single mis-parsed line can throw off.
-            const { printedTotal, comboDiscount, comboAnchors, ...rr } = r;
+            const { printedTotal, comboDiscount, comboAnchors, loyalty: _rawLoyalty, ...rr } = r;
             const combo = Number(comboDiscount) > 0 ? Number(comboDiscount) : 0;
             // WHICH lines the set deal is shown against. A deal needs 2+ qualifying
             // items, so spreading it over every line made unrelated products (a lone
@@ -239,6 +270,7 @@ export const fetchTripReceipts = async (req: Request, res: Response, next: NextF
                  *  keep showing this at footer level so the total still adds up. */
                 comboUnattributed: attribution.unattributed,
                 comboBasis: attribution.basis,
+                loyalty,
                 lowQuality: quality.lowQuality, unmatchedCount: quality.unmatchedCount,
             });
         }
@@ -249,6 +281,53 @@ export const fetchTripReceipts = async (req: Request, res: Response, next: NextF
 /** How long after trip creation the UPLOADER may still detach their own wrong
  *  receipt. The trip OWNER moderates with no window (see below). */
 const RECEIPT_DETACH_WINDOW_DAYS = 7;
+
+/**
+ * GET /api/trips/:id/basket-comparison
+ *
+ * The trip-level Sutaupyta: your spend split by store, and the whole basket
+ * priced at each nearby store as a single shop. Frozen per trip (prices drift,
+ * verdicts shouldn't) — see tripBasketComparison.
+ */
+export const fetchTripBasketComparison = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const tripId = Number(req.params.id);
+        if (!Number.isFinite(tripId)) { res.status(400).json({ error: 'bad id' }); return; }
+        if (!(await isTripMember(tripId, req.authUserId!))) { res.status(404).json({ error: 'not found' }); return; }
+        const fresh = String(req.query.refresh ?? '') === '1';
+        res.json(fresh
+            ? await snapshotTripComparison(tripId)
+            : await readTripBasketComparison(tripId));
+    } catch (error) { next(error); }
+};
+
+/**
+ * POST /api/trips/:id/attach-receipt   { receiptId }
+ *
+ * Put a receipt on this trip WITHOUT claiming a planned store slot — the
+ * "I shopped somewhere the plan didn't include" case. Slot fulfilment is a
+ * separate statement (POST /shopping-lists/:id/link-receipt), and forcing the
+ * two together is what made an off-plan receipt borrow an unrelated store's
+ * slot just to join the trip.
+ *
+ * Membership rules mirror detach: any trip member may attach a receipt they
+ * uploaded/own; the receipt must be theirs.
+ */
+export const attachTripReceipt = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const tripId = Number(req.params.id);
+        const receiptId = Number(req.body?.receiptId);
+        if (!Number.isFinite(tripId) || !Number.isFinite(receiptId)) { res.status(400).json({ error: 'bad id' }); return; }
+        const viewer = req.authUserId!;
+        // 404-over-403 probe defense: non-members learn nothing about the trip.
+        if (!(await isTripMember(tripId, viewer))) { res.status(404).json({ error: 'not found' }); return; }
+        const owner = await getReceiptOwnerId(receiptId);
+        if (owner === null) { res.status(404).json({ error: 'receipt not found' }); return; }
+        if (owner !== viewer) { res.status(403).json({ error: 'forbidden' }); return; }
+        await attachReceiptToTrip(receiptId, tripId);
+        res.json({ ok: true });
+    } catch (error) { next(error); }
+};
 
 /**
  * "Wrong receipt": DETACH a receipt from the trip (tripId → NULL — the receipt

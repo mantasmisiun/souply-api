@@ -1,6 +1,7 @@
 import pool from '../config/db.js';
 import type { Connection } from 'mysql2/promise';
 import { deriveTripStage, type TripStage, type TripStageFacts } from '../services/tripStageService.js';
+import { SLOT_ITEMS_COVERED_SQL } from '../services/slotCoverage.js';
 
 /**
  * Souply 2.0 trip aggregate (Phase 1a). Additive layer over the existing
@@ -86,7 +87,8 @@ export const getTripStageFacts = async (tripId: number): Promise<TripStageFacts 
     // receipts (extra receipts with off-plan storeIds don't close any slot).
     const [slotRows]: any = await pool.query(
         `SELECT sl.status, sl.receiptSkippedAt,
-                EXISTS(SELECT 1 FROM Receipt r WHERE r.tripId = sl.tripId AND r.storeId = sl.storeId) AS hasReceipt
+                EXISTS(SELECT 1 FROM Receipt r WHERE r.tripId = sl.tripId AND r.storeId = sl.storeId) AS hasReceipt,
+                (${SLOT_ITEMS_COVERED_SQL}) AS itemsCovered
          FROM ShoppingList sl WHERE sl.tripId = ?`,
         [tripId],
     );
@@ -104,6 +106,7 @@ export const getTripStageFacts = async (tripId: number): Promise<TripStageFacts 
             listStatus: s.status === 'completed' ? 'completed' as const : 'active' as const,
             hasReceipt: Number(s.hasReceipt) === 1,
             receiptSkipped: s.receiptSkippedAt != null,
+            itemsCovered: Number(s.itemsCovered) === 1,
         })),
         extraReceiptCount: Number(extraRows[0]?.extra ?? 0),
     };

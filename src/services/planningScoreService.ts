@@ -3,6 +3,7 @@ import { normalizeProductName } from '../utils/productNameNormalize.js';
 import { lemmaOf } from '../utils/ltLemmas.js';
 import { localizedProductNameSql } from '../middleware/locale.js';
 import { loadCanonicalsForProducts } from './productCanonical.js';
+import { readCachedTripComparison, readTripBasketComparison } from './tripBasketComparison.js';
 
 const UNASSIGNED_CATEGORY = 688; // "Nepriskirta" — never counts as a category match
 // Filler tokens that must not create a false name match on their own.
@@ -155,7 +156,15 @@ export interface PlanningScore {
     listItemsDetail: { listItemId: number; name: string; imageUrls: string | (string | null)[] | null; quantity: number; isWeighable: boolean; canonicalStep: number | null; packAmount: number | null; packUnit: string | null; bought: boolean }[];
 }
 
-export const computePlanningScore = async (tripId: number): Promise<PlanningScore> => {
+export const computePlanningScore = async (
+    tripId: number,
+    opts: {
+        /** Compute (and freeze) the trip comparison when none is cached. ONLY the
+         *  single-trip endpoint does this — the monthly loops would otherwise
+         *  price a basket at five stores per trip. */
+        allowLiveComparison?: boolean;
+    } = {},
+): Promise<PlanningScore> => {
     const [[trip]]: any = await pool.query('SELECT isAdHoc, scoreExempt FROM Trip WHERE id = ?', [tripId]);
     const base: PlanningScore = {
         tripId, score: null, coverage: 0, discipline: 0,
@@ -444,22 +453,45 @@ export const computePlanningScore = async (tripId: number): Promise<PlanningScor
         s + (listItems.some((li: any) => sameKind(li, ri)) ? spend(ri) : 0), 0);
     const discipline = totalSpend > 0 ? onPlanSpend / totalSpend : 0;
 
-    // storeChoice — frozen store-selection quality from the receipt comparison
-    // snapshots (paid vs median vs cheapest comparable-store totals).
-    const [snaps]: any = await pool.query(
-        `SELECT s.paidTotal, s.medianAltTotal, s.cheapestAltTotal
-           FROM ReceiptComparisonSnapshot s
-           JOIN Receipt r ON r.id = s.receiptId
-          WHERE r.tripId = ? AND r.userDeletedAt IS NULL`,
-        [tripId],
-    );
+    // storeChoice — "could this whole shopping have cost less somewhere else?"
+    //
+    // Asked at TRIP level (tripBasketComparison): the union of every receipt line
+    // priced at each nearby store as a SINGLE shop. The old source was the
+    // per-receipt snapshots, which compare each receipt only against alternatives
+    // for ITS OWN items — so a split trip could score a perfect store choice
+    // while one shop would have been cheaper for everything (trip 191: 100/100
+    // next to a Sutaupyta sheet saying Maxima alone was €0.40 less). It also
+    // inherited that comparison's flat imputation: when every alternative came
+    // back equal to the paid total, "nothing to compare" scored as "you couldn't
+    // have done better".
+    //
+    // Falls back to the per-receipt snapshots when no trip comparison is cached
+    // and we aren't allowed to compute one (bulk monthly scoring).
     let P = 0, M = 0, C = 0, snapRows = 0;
-    for (const row of snaps) {
-        if (row.medianAltTotal == null || row.cheapestAltTotal == null) continue;
-        P += Number(row.paidTotal) || 0;
-        M += Number(row.medianAltTotal);
-        C += Number(row.cheapestAltTotal);
-        snapRows++;
+    const tripCmp = opts.allowLiveComparison
+        ? await readTripBasketComparison(tripId).catch(() => null)
+        : await readCachedTripComparison(tripId);
+    if (tripCmp && tripCmp.candidates.length > 0 && tripCmp.paidTotal > 0) {
+        const totals = tripCmp.candidates.map(c => c.total).sort((a, b) => a - b);
+        P = tripCmp.paidTotal;
+        C = tripCmp.bestSingleTotal ?? totals[0];
+        M = totals[Math.floor((totals.length - 1) / 2)];
+        snapRows = 1;
+    } else {
+        const [snaps]: any = await pool.query(
+            `SELECT s.paidTotal, s.medianAltTotal, s.cheapestAltTotal
+               FROM ReceiptComparisonSnapshot s
+               JOIN Receipt r ON r.id = s.receiptId
+              WHERE r.tripId = ? AND r.userDeletedAt IS NULL`,
+            [tripId],
+        );
+        for (const row of snaps) {
+            if (row.medianAltTotal == null || row.cheapestAltTotal == null) continue;
+            P += Number(row.paidTotal) || 0;
+            M += Number(row.medianAltTotal);
+            C += Number(row.cheapestAltTotal);
+            snapRows++;
+        }
     }
     let storeChoice: number | null = null;
     if (snapRows > 0) {
