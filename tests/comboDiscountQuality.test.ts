@@ -52,3 +52,39 @@ describe('assessQuality accounts for footer set-deal discounts', () => {
         expect(assessQuality(unmatched, TOTAL, COMBO).lowQuality).toBe(true);
     });
 });
+
+describe('loyalty money in reconciliation', () => {
+    const line = (price: number, name: string) => ({
+        price, quantity: 1, name, matched: true, confirmed: true, confidence: 0.9, implausible: false,
+    });
+
+    it('THE CASE: lines over the printed total by the redeemed amount is NOT low quality', () => {
+        // Receipt 19: 4 × 0.59 = 2.36 of lines, "Nurašyta MAXIMOS pinigų 0,12",
+        // total 2.24. Every line is correct; the balance paid the difference.
+        const lines = [
+            line(0.59, 'Duonos traškučiai MARETTI'), line(0.59, 'Duonos traškučiai MARETTI'),
+            line(0.59, 'Duonos traškučiai MARETTI'), line(0.59, 'Duonos traškučiai MARETTI'),
+        ];
+        expect(assessQuality(lines, 2.24, null, 0.12).lowQuality).toBe(false);
+        // …and without knowing about it, the same receipt trips the gap rule at
+        // a 5 % threshold — which is what put a retake banner on a clean scan.
+        expect(assessQuality(lines, 2.24, null, null).lowQuality).toBe(false);  // 5.4 % < 10 %
+        expect(assessQuality(lines, 2.00, null, null).lowQuality).toBe(true);   // 18 % — no loyalty known
+        expect(assessQuality(lines, 2.00, null, 0.36).lowQuality).toBe(false);  // …explained
+    });
+
+    it('a set deal and loyalty money both come off the same line sum', () => {
+        // Real names: a 1-char name counts as UNREADABLE and would trip the
+        // flag for an unrelated reason.
+        const lines = [line(5.00, 'Pienas ROKIŠKIO'), line(5.00, 'Duona VILNIAUS')];
+        // 10.00 of lines − 1.90 set deal − 1.00 loyalty = 7.10 paid.
+        expect(assessQuality(lines, 7.10, 1.90, 1.00).lowQuality).toBe(false);
+    });
+
+    it('money EARNED must not be passed here — only what was redeemed', () => {
+        // Passing an accrual would make a correct receipt under-reconcile.
+        const lines = [line(5.00, 'Pienas ROKIŠKIO')];
+        expect(assessQuality(lines, 5.00, null, 0).lowQuality).toBe(false);
+        expect(assessQuality(lines, 5.00, null, 1.00).lowQuality).toBe(true);
+    });
+});

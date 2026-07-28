@@ -115,6 +115,11 @@ export const assessQuality = (
      *  showed a 71 % gap and raised the "Perfotografuoti" retake banner on a scan
      *  whose every line was correct and matched. */
     comboDiscount: number | null = null,
+    /** Loyalty money paid off an earned balance ("Nurašyta MAXIMOS pinigų 0,12").
+     *  Deducted at the FOOTER like a set deal, so the line sum legitimately
+     *  exceeds the printed total by exactly this much — receipt 19's €2.36 of
+     *  lines against a €2.24 total was entirely this. */
+    loyaltyRedeemed: number | null = null,
 ): QualityAssessment => {
     const lineCount = lines.length;
     const unreadableCount = lines.filter(isUnreadable).length;
@@ -124,7 +129,8 @@ export const assessQuality = (
     let gapTrips = false;
     if (total != null && total > 0) {
         const combo = comboDiscount != null && comboDiscount > 0 ? comboDiscount : 0;
-        const sum = lines.reduce((s, l) => s + (l.price > 0 ? l.price : 0), 0) - combo;
+        const loyalty = loyaltyRedeemed != null && loyaltyRedeemed > 0 ? loyaltyRedeemed : 0;
+        const sum = lines.reduce((s, l) => s + (l.price > 0 ? l.price : 0), 0) - combo - loyalty;
         gapTrips = Math.abs(total - sum) / total > CFG.reconcileGapFrac;
     }
     return {
