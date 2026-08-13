@@ -40,3 +40,7 @@ receipts/parsed json/
 receipts/request json/
 receipts/*.xlsx
 .env.bak*
+
+# Operational runbooks — kept out of the public repo
+INFRA.md
+scripts/BACKUP.md
