@@ -1,80 +1,123 @@
 # souply-api
 
-Backend for [Souply](https://souply.lt) — the Lithuanian grocery
-price-comparison platform. Powers price comparison, receipt OCR &
-matching, basket templates, the swipe-based product cluster system,
-gamification, and the admin moderation queues.
+Backend for [Souply](https://souply.lt) — a grocery price-comparison platform for the
+Lithuanian market. It ingests prices from five supermarket chains, turns photographed
+receipts into structured line items, and answers the question the product exists to
+answer: *what would this basket cost at each shop near me?*
 
-Web client lives in `souply-web`. Mobile client lives in `souply-app`.
+Souply is split across four repositories:
+
+| Repo | Role |
+|---|---|
+| **`souply-api`** | **This repo — Node/Express/MariaDB backend** |
+| `souply-app` | React Native / Expo mobile client — receipt scanning, basket building |
+| `souply-web` | Web client — landing, creator auth, dashboard |
+| `souply-shared` | Receipt parsers and recognition config, shared with the app |
 
 ## Stack
 
-- **Node.js 20 + TypeScript** on Express
-- **MySQL/MariaDB** (`Souply_DB`), accessed via mysql2/promise pool
-- **MinIO** for receipt images + product photography
-- **BullMQ + Redis** for background scrape jobs and receipt processing
-- **Jest** for unit + integration tests
-- Cross-stack `shared/` folder consumed by both api and the mobile app
+- **TypeScript 6 · Node · Express 5**, native ESM
+- **MariaDB** via `mysql2/promise` — raw SQL, no ORM
+- **MinIO** (S3-compatible) for receipt images
+- **`jose`** for JWTs, including JWKS verification of Google and Apple ID tokens
+- **`node-cron`** for the scrape schedule
+- **Playwright** (+ stealth) and **cheerio** for scraping — see below
+- **Jest + supertest**, 137 test files
+- **Sentry**, **helmet**, **compression**, **swagger-jsdoc**
 
-## Commands
+Roughly 71,000 lines across 320 source files and 85 SQL migrations.
+
+## Things worth a look
+
+**No barcodes exist, so identity is the hard problem.** No Lithuanian chain publishes an
+EAN — one has an `eans` field that is empty in every record. There is no join key, so
+matching a receipt line to a catalogue product is done on name, size and price signals.
+Two rules came out of failures rather than design: numbers are treated as *disambiguating*
+rather than decorative, so 2.5% and 3.5% milk carry a mismatch penalty instead of being
+smoothed over; and matching is zero-fallback — below the confidence threshold an item
+stays unmatched, because showing a wrong price is worse than showing none.
+
+**The connection pool encodes two production incidents.** `config/db.ts` is worth reading
+for the comments alone. MariaDB has no native JSON type — `JSON` is `LONGTEXT` plus a
+check constraint — so columns built with `JSON_ARRAYAGG` come back as strings, sometimes
+double-encoded. That's normalised once in the pool's `typeCast` hook rather than at 1,000+
+call sites. The connection charset is separately pinned to `utf8mb4` because mysql2
+defaults the *connection* to three-byte `utf8mb3`, which silently mangles emoji in transit
+and fails a downstream `json_valid` constraint.
+
+**Overload sheds instead of hanging.** The pool is 20 connections with a queue limit of
+256. The queue limit is the interesting number: a basket calculation fires ~8 short
+queries, so a burst of concurrent users produces a burst of acquisitions. Too low and
+legitimate spikes fail; unbounded and a pathological burst queues forever and takes the
+API with it.
+
+**Two scraping strategies, chosen by measurement.** Three chains serve their promotional
+data in the initial HTML response and are read with a plain fetch plus cheerio. Two render
+it client-side and need a real browser. That split is measured per site rather than
+assumed, because a headless browser costs roughly an order of magnitude more per page.
+
+**Shared expenses are an append-only ledger.** Household balances are never stored — they
+are derived by folding events. Everything is integer cents, and each event's shares are
+materialised at write time so the entries sum to zero by construction rather than by
+convention. A balance cannot drift out of step with its history.
+
+## Running locally
 
 ```bash
-npm run dev                # nodemon + tsx, hot reload on src/ changes
-npm run build              # tsc -> dist/
-npm start                  # node dist/souply-api/src/index.js
-npm test                   # NODE_ENV=test jest
+npm install
+cp .env.example .env      # then fill in DB, MinIO and OAuth values
+npm run dev               # nodemon + tsx, hot reload
+```
 
-# Scrapers (Mon: IKI + Lidl; Tue: Rimi + Barbora; Thu: Norfa; Sat: Lidl)
-npm run scrape:barbora
-npm run scrape:rimi
-npm run scrape:iki
-npm run scrape:norfa
-npm run scrape:lidl
-npm run scrape:all
+```bash
+npm run build             # tsc → dist/
+npm start                 # node dist/souply-api/src/index.js
+npm test                  # jest (needs a test database — see tests/schema/README.md)
+npx tsc --noEmit          # typecheck
+```
 
-# Receipt batch test pipeline (runs the dev MLKit phone-side flow)
-npm run receipts:stage     # stage receipts/<chain>/*.pdf as PNGs + manifest
-npm run receipts:batch     # import + parse a staged batch
-npm run receipts:cleanup   # purge test data
+Scrapers and maintenance CLIs each have a script:
 
-# Truths corpus (manual labels for matcher regression)
-npm run truths:bootstrap
-npm run truths:review
-
-# Admin CLI (one-off moderation tools)
-npm run admin
+```bash
+npm run scrape:all        # or :rimi :iki :barbora :norfa :lidl
+npm run receipts:batch    # import + parse a staged receipt batch
+npm run receipts:matchaudit   # match-quality harness with baseline diffing
+npm run admin             # moderation CLI
 ```
 
 ## Layout
 
 ```
 src/
-├── index.ts                ← express bootstrap + middleware chain
-├── config/                 ← db pool, MinIO client, env loader
-├── middleware/             ← locale, auth, error handler, admin gate
-├── routes/                 ← one file per resource group
-├── controllers/            ← thin: request -> service -> response
-├── services/               ← business logic (basket calc, matching, share, OAuth)
-├── models/                 ← raw SQL queries + row mappers
-├── scrapers/               ← chain-specific scrapers + shared scheduler
-├── scripts/                ← one-off CLIs (admin, truth corpus, receipt batch)
-└── utils/                  ← fuzzyNameClause, productMatcher, name parsers
+├── index.ts        express bootstrap + middleware chain
+├── config/         db pool, MinIO client, env loader, swagger
+├── middleware/     auth, resource authorization, rate limit, locale, version gate
+├── routes/         one file per resource group
+├── controllers/    thin — request → service → response
+├── services/       business logic: basket calc, matching, ledger, OAuth
+├── models/         raw SQL and row mappers
+├── scrapers/       per-chain scrapers + cron scheduler
+├── scripts/        operational CLIs (receipt batches, audits, backfills)
+└── utils/          matching helpers, name parsing
+
+sql/                85 migrations, applied in order
+tests/              137 suites, mostly integration via supertest
 ```
 
-## Deployment
+## Tests and CI
 
-Multi-stage Docker build. From the parent `Projects/` directory:
+GitHub Actions runs typecheck, build and the full suite on every push and pull request,
+against a MariaDB service container. The workflow checks out `souply-shared` alongside
+this repo and pins it to the **same environment branch** as the run, so a pull request
+into `staging` is tested against staging's parsers rather than `main`'s.
 
-```bash
-docker compose -f souply-api/docker-compose.yml build
-docker compose -f souply-api/docker-compose.yml up -d
-docker compose -f souply-api/docker-compose.yml logs -f
-```
+Branches are `dev` → `staging` → `main`, promoted by pull request. Commits follow
+Conventional Commits, enforced by commitlint through husky.
 
-External Docker networks expected on the host:
+## Status and licence
 
-- `mysql_net` — backing MariaDB
-- `minio_2_default` — backing MinIO
-- `souply_redis_default` — backing Redis (rename per your env)
+Actively developed and deployed. Published so the work can be read; not currently
+accepting contributions, and no open-source licence is granted — all rights reserved.
 
-Traefik on the LAN proxy reaches this service via host LAN IP + port 3000.
+The receipt corpus used for parser regression testing is deliberately **not** in this
+repository: it consists of real receipts, which are personal data.
