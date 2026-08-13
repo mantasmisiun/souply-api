@@ -17,10 +17,10 @@ jobs:
   typecheck-build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: souply-api
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: mantasmisiun/souply-shared
           path: shared
@@ -76,10 +76,10 @@ jobs:
       MINIO_BUCKET: receipts
       MINIO_PRODUCT_IMAGES_BUCKET: product-images
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: souply-api
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: mantasmisiun/souply-shared
           path: shared
