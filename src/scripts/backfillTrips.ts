@@ -22,12 +22,18 @@ const run = async () => {
     let created = 0;
 
     // ── 1. Baskets → trips ────────────────────────────────────────────────
+    // `householdId` rides along for the same reason ensureTripForBasket carries
+    // it (family spec §4): a household's SHARED basket has tripId NULL until
+    // something shops from it, so a re-run of this backfill would otherwise
+    // claim it into a PERSONAL trip — permanently, since Basket.tripId is then
+    // set — and every family receipt hung off it would resolve as personal.
     const [baskets]: any = await pool.query(
-        `SELECT id, userId, name, status, createdAt FROM Basket WHERE tripId IS NULL`);
+        `SELECT id, userId, name, status, createdAt, householdId FROM Basket WHERE tripId IS NULL`);
     for (const b of baskets) {
         const terminal = b.status === 'completed';
         const tripId = await createTrip(b.userId, {
             name: b.name ?? null,
+            householdId: b.householdId ?? null,
             createdAt: b.createdAt,
             archivedAt: terminal ? b.createdAt : null,
         });

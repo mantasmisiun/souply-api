@@ -23,16 +23,43 @@ import { fishListForLinkedReceipt } from './listScopedMatcher.js';
  *                       because stage 5 doesn't).
  */
 
+/**
+ * THE BASKET'S HOUSEHOLD IS THE TRIP'S HOUSEHOLD (family spec §1.1/§4).
+ *
+ * `Trip.householdId` has existed since sql/trip_foundation.sql and, until this
+ * line, NOTHING ever wrote it — every trip in the database was personal by
+ * omission. That is not cosmetic: `receiptFamilyScope.getReceiptScopeContext`
+ * resolves Receipt.tripId → Trip.householdId and treats NULL as "an ordinary
+ * personal receipt", so with the column never set the entire family half of a
+ * receipt (the ledger record, §4.5's member read, the §4.4 lock) could never
+ * engage. The family basket was shared, the trip born from it was not.
+ *
+ * This is the right choke point rather than the call sites: a household has
+ * exactly one shared basket (UNIQUE Basket.householdId), every trip born from a
+ * basket comes through here, and `ensureTripForList`/`ensureTripForReceipt`
+ * both delegate to it — so a list built from the family basket, and a receipt
+ * handed in against that list, inherit the household without either path
+ * knowing households exist.
+ *
+ * A trip is NEVER made family by the CALLER's membership. Only the basket it
+ * grew out of decides: a member's own personal basket stays personal even
+ * though they belong to a household, which is exactly what §4's family/personal
+ * split would otherwise silently violate (every solo shop would land in the
+ * family ledger). Standalone lists and bare ad-hoc receipts have no basket and
+ * so stay personal — §7's "Convert to family shopping" is the deliberate,
+ * user-initiated way in for those.
+ */
 export const ensureTripForBasket = async (
     basketId: number,
     userId: string,
     conn?: Connection,
 ): Promise<number> => {
     const db = (conn ?? pool) as any;
-    const [rows]: any = await db.query('SELECT tripId FROM Basket WHERE id = ?', [basketId]);
+    const [rows]: any = await db.query('SELECT tripId, householdId FROM Basket WHERE id = ?', [basketId]);
     const existing = rows[0]?.tripId;
     if (existing != null) return existing;
-    const tripId = await createTrip(userId, {}, conn);
+    const householdId = rows[0]?.householdId ?? null;
+    const tripId = await createTrip(userId, { householdId }, conn);
     await db.query('UPDATE Basket SET tripId = ? WHERE id = ? AND tripId IS NULL', [tripId, basketId]);
     // Idempotency under a race: someone else linked first → use theirs.
     const [after]: any = await db.query('SELECT tripId FROM Basket WHERE id = ?', [basketId]);

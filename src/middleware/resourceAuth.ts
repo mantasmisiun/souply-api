@@ -59,7 +59,7 @@ export const requireBasketTemplateOwner = (paramName: 'id' | 'templateId' = 'id'
 /** A basket is writable by its OWNER — or, for a household's SHARED basket
  *  (Basket.householdId set), by ANY member of that household (2.0 family
  *  basket: every member adds/edits items). */
-const basketWritableBy = async (basketId: number, userId: string): Promise<'ok' | 'not-found' | 'forbidden'> => {
+export const basketWritableBy = async (basketId: number, userId: string): Promise<'ok' | 'not-found' | 'forbidden'> => {
     const [rows]: any = await pool.query('SELECT userId, householdId FROM Basket WHERE id = ? LIMIT 1', [basketId]);
     const basket = rows[0];
     if (!basket) return 'not-found';
@@ -77,6 +77,29 @@ export const requireBasketOwnerFromBody = (field = 'basketId') =>
     async function (req: Request, res: Response, next: NextFunction): Promise<void> {
         const id = num(req.body?.[field]);
         if (!Number.isFinite(id) || id <= 0) { res.status(400).json({ error: `invalid ${field}` }); return; }
+        if (!req.authUserId) { res.status(401).json({ error: 'auth-required' }); return; }
+        const verdict = await basketWritableBy(id, req.authUserId);
+        if (verdict === 'not-found') { res.status(404).json({ error: 'not found' }); return; }
+        if (verdict === 'forbidden') { res.status(403).json({ error: 'forbidden' }); return; }
+        next();
+    };
+
+/** BASKET-scoped guard honouring the shared-basket rule, reading the id from a
+ *  path param. The counterpart to requireBasketOwnerFromBody (which, despite its
+ *  name, already applies basketWritableBy).
+ *
+ *  Use this — not requireBasketOwner — on any route a household member must
+ *  reach for the family basket. Members could already ADD, EDIT and DELETE
+ *  items while being unable to LIST them or use the by-product upsert (the
+ *  catalog stepper's path), which made the shared basket unusable for everyone
+ *  except the household creator.
+ *
+ *  Personal baskets are unaffected: basketWritableBy only widens when
+ *  Basket.householdId IS NOT NULL, otherwise it is a plain owner check. */
+export const requireBasketWritable = (paramName: 'id' | 'basketId' = 'basketId') =>
+    async function (req: Request, res: Response, next: NextFunction): Promise<void> {
+        const id = num(req.params[paramName]);
+        if (!Number.isFinite(id) || id <= 0) { res.status(400).json({ error: 'invalid basket id' }); return; }
         if (!req.authUserId) { res.status(401).json({ error: 'auth-required' }); return; }
         const verdict = await basketWritableBy(id, req.authUserId);
         if (verdict === 'not-found') { res.status(404).json({ error: 'not found' }); return; }

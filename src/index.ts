@@ -324,4 +324,32 @@ if (process.env.NODE_ENV !== 'test') {
             .catch(e => console.error('[adminLease] sweeper failed:', e.message));
     }, HOUR_MS);
     sweeper.unref();
+
+    // Family-shopping settlement sweeper (spec §3.2.2): auto-confirms a
+    // proposal after 7 days of silence, writes member_left if that was what a
+    // leaving member was waiting on, and sends the reminders that go out before
+    // it lapses.
+    //
+    // DELIBERATELY NOT BEHIND ENABLE_SCHEDULER. That flag gates the store
+    // SCRAPERS — work with an EXTERNAL side effect (hitting retailer sites)
+    // that dev and staging must never perform. This job has no external side
+    // effect at all; it is internal ledger maintenance, and it is the mechanism
+    // that makes §3.2.2's anti-hostage guarantee true. Gating it would give
+    // dev and staging a DIFFERENT money model from production — proposals that
+    // never lapse and leavers who stay trapped — so the one behaviour most
+    // worth testing before release would be the one behaviour that only ever
+    // runs in production. The admin lease sweeper above is the right precedent:
+    // same class of thing (internal state maintenance, hourly, ungated).
+    const settlementSweeper = setInterval(() => {
+        import('./services/householdSettlements.js')
+            .then(m => m.sweepLapsedSettlements())
+            .then(r => {
+                if (r.confirmed || r.reminded || r.departed.length) {
+                    console.log(`[household] settlements: ${r.confirmed} auto-confirmed, `
+                        + `${r.reminded} reminded, ${r.departed.length} departed`);
+                }
+            })
+            .catch(e => console.error('[household] settlement sweeper failed:', e.message));
+    }, HOUR_MS);
+    settlementSweeper.unref();
 }

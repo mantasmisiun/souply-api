@@ -34,6 +34,8 @@ import { buildReceiptResolveCards, markServedResolveLinesAsked } from '../servic
 import { castReceiptLineVote } from '../services/receiptLineVoteService.js';
 import { markLineResolved } from '../models/receiptLineResolutionModel.js';
 import { deleteReceiptWithData } from '../services/receiptDeletionService.js';
+import { assertReceiptDeletable } from '../services/receiptFamilyScope.js';
+import { HouseholdActionError } from '../services/householdMembership.js';
 import { getReceiptComparison } from '../services/receiptComparisonService.js';
 import { hydrateReceiptCategoriesIfNeeded } from '../services/receiptHydrationService.js';
 import { generateDefaultTemplate } from '../services/defaultTemplateService.js';
@@ -167,6 +169,21 @@ export const removeReceipt = async (req: Request, res: Response, next: NextFunct
             res.status(400).json({ error: 'Invalid receipt ID' });
             return;
         }
+        // §8 — a receipt counted into a household ledger can never be deleted,
+        // not even by the dev purge: its shares are already inside other
+        // people's balances. Correction goes through an `adjustment` (§4.4).
+        try {
+            await assertReceiptDeletable(id);
+        } catch (e) {
+            if (e instanceof HouseholdActionError) {
+                res.status(e.status).json({
+                    error: e.code,
+                    message: 'This receipt is counted in a family ledger and cannot be deleted',
+                });
+                return;
+            }
+            throw e;
+        }
         const result = await deleteReceiptWithData(id);
         if (!result.deleted) {
             res.status(404).json({ error: 'Receipt not found' });
@@ -206,6 +223,22 @@ export const hideReceiptForUser = async (req: Request, res: Response, next: Next
         if (!receipt) {
             res.status(404).json({ error: 'Receipt not found' });
             return;
+        }
+        // §8 — checked BEFORE the swipe gate: "counted into the ledger" is the
+        // stronger and more permanent refusal of the two, and unlike the swipe
+        // gate there is no alternative route (the photo-only delete below is
+        // still allowed — dropping the image moves no money).
+        try {
+            await assertReceiptDeletable(id);
+        } catch (e) {
+            if (e instanceof HouseholdActionError) {
+                res.status(e.status).json({
+                    error: e.code,
+                    message: 'This receipt is counted in a family ledger and cannot be removed',
+                });
+                return;
+            }
+            throw e;
         }
         const required = Number(receipt.mandatorySwipesRequired ?? 0);
         const completed = Number(receipt.mandatorySwipesCompleted ?? 0);

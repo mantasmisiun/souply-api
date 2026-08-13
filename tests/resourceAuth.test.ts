@@ -184,3 +184,153 @@ describe('non-prod dev-header shim (x-user-id) works when NODE_ENV!=production',
         expect(res.status).toBe(403);
     });
 });
+
+/**
+ * SHARED (household) basket — the 2.0 family basket rule.
+ *
+ * `basketWritableBy` widens access to any HouseholdMember, but ONLY when
+ * Basket.householdId is set. Members could already add/edit/delete items while
+ * being unable to LIST them or use the by-product upsert (the catalog stepper's
+ * path), which made the shared basket unusable for anyone but its creator.
+ *
+ * The regression that matters most here is the LAST test: personal baskets must
+ * stay strictly owner-only. Widening them would be a silent data leak.
+ */
+describe('shared household basket — member access', () => {
+    const OWNER = 'resauth-hh01-0000-0000-000000000001';
+    const MEMBER = 'resauth-hh02-0000-0000-000000000002';
+    const OUTSIDER = 'resauth-hh03-0000-0000-000000000003';
+    let householdId: number;
+    let sharedBasketId: number;
+
+    beforeAll(async () => {
+        await primeTokens(OWNER, MEMBER, OUTSIDER);
+        const conn = await (pool as any).getConnection();
+        try {
+            for (const u of [OWNER, MEMBER, OUTSIDER]) {
+                await conn.query('INSERT INTO User (id, isAdmin, points) VALUES (?,0,0) ON DUPLICATE KEY UPDATE points=points', [u]);
+                await conn.query('DELETE FROM HouseholdMember WHERE userId = ?', [u]);
+                await conn.query('DELETE FROM Basket WHERE userId = ?', [u]);
+            }
+            const [hh]: any = await conn.query('INSERT INTO Household (createdByUserId, name) VALUES (?, ?)', [OWNER, 'authz-hh']);
+            householdId = hh.insertId;
+            await conn.query("INSERT INTO HouseholdMember (userId, householdId, role) VALUES (?,?,'owner'),(?,?,'member')",
+                [OWNER, householdId, MEMBER, householdId]);
+            const [b]: any = await conn.query(
+                "INSERT INTO Basket (userId, name, status, householdId) VALUES (?,?,'draft',?)",
+                [OWNER, 'shared', householdId]);
+            sharedBasketId = b.insertId;
+        } finally { conn.release(); }
+    });
+
+    afterAll(async () => {
+        const conn = await (pool as any).getConnection();
+        try {
+            await conn.query('DELETE FROM Basket WHERE householdId = ?', [householdId]);
+            await conn.query('DELETE FROM HouseholdMember WHERE householdId = ?', [householdId]);
+            await conn.query('DELETE FROM Household WHERE id = ?', [householdId]);
+        } finally { conn.release(); }
+    });
+
+    it('a household MEMBER can list the shared basket items (200)', async () => {
+        const res = await asUser(app, MEMBER).get(`/api/baskets/${sharedBasketId}/items`);
+        expect(res.status).toBe(200);
+    });
+
+    it('a household MEMBER can read the shared basket quantities (200)', async () => {
+        const res = await asUser(app, MEMBER).get(`/api/baskets/${sharedBasketId}/quantities`);
+        expect(res.status).toBe(200);
+    });
+
+    it('a NON-member cannot list the shared basket items (403)', async () => {
+        const res = await asUser(app, OUTSIDER).get(`/api/baskets/${sharedBasketId}/items`);
+        expect(res.status).toBe(403);
+    });
+
+    it('a PERSONAL basket stays owner-only — the widening must not leak (403)', async () => {
+        const conn = await (pool as any).getConnection();
+        let personalId: number;
+        try {
+            const [p]: any = await conn.query(
+                "INSERT INTO Basket (userId, name, status, householdId) VALUES (?,?,'draft',NULL)",
+                [OWNER, 'personal']);
+            personalId = p.insertId;
+        } finally { conn.release(); }
+        // MEMBER shares a household with OWNER, but this basket is NOT the
+        // household's — householdId IS NULL, so the member rule must not apply.
+        const res = await asUser(app, MEMBER).get(`/api/baskets/${personalId}/items`);
+        expect(res.status).toBe(403);
+    });
+});
+
+/**
+ * §6 step 1→2: a household MEMBER (not the founder) must be able to start — and
+ * unwind — a family shop from the shared basket.
+ *
+ * `Basket.userId` on the shared basket is the household FOUNDER, so a plain
+ * owner check made them the only person who could ever mint the family trip;
+ * every other member got 403 walking the spec's own happy path. Both the create
+ * and the teardown now use `basketWritableBy`.
+ */
+describe('shared basket — shopping-list creation by a member', () => {
+    const FOUNDER = 'resauth-hh11-0000-0000-000000000011';
+    const MEMBER2 = 'resauth-hh12-0000-0000-000000000012';
+    const STRANGER = 'resauth-hh13-0000-0000-000000000013';
+    let hhId: number;
+    let sharedId: number;
+    let personalId: number;
+
+    beforeAll(async () => {
+        await primeTokens(FOUNDER, MEMBER2, STRANGER);
+        const conn = await (pool as any).getConnection();
+        try {
+            for (const u of [FOUNDER, MEMBER2, STRANGER]) {
+                await conn.query('INSERT INTO User (id, isAdmin, points) VALUES (?,0,0) ON DUPLICATE KEY UPDATE points=points', [u]);
+                await conn.query('DELETE FROM HouseholdMember WHERE userId = ?', [u]);
+            }
+            const [hh]: any = await conn.query('INSERT INTO Household (createdByUserId, name) VALUES (?,?)', [FOUNDER, 'authz-hh2']);
+            hhId = hh.insertId;
+            await conn.query("INSERT INTO HouseholdMember (userId, householdId, role) VALUES (?,?,'owner'),(?,?,'member')",
+                [FOUNDER, hhId, MEMBER2, hhId]);
+            const [b]: any = await conn.query(
+                "INSERT INTO Basket (userId, name, status, householdId) VALUES (?,?,'compared',?)", [FOUNDER, 'shared2', hhId]);
+            sharedId = b.insertId;
+            const [p]: any = await conn.query(
+                "INSERT INTO Basket (userId, name, status, householdId) VALUES (?,?,'compared',NULL)", [FOUNDER, 'personal2']);
+            personalId = p.insertId;
+        } finally { conn.release(); }
+    });
+
+    afterAll(async () => {
+        const conn = await (pool as any).getConnection();
+        try {
+            await conn.query('DELETE FROM ShoppingList WHERE basketId IN (?,?)', [sharedId, personalId]);
+            await conn.query('DELETE FROM Basket WHERE id IN (?,?)', [sharedId, personalId]);
+            await conn.query('DELETE FROM HouseholdMember WHERE householdId = ?', [hhId]);
+            await conn.query('DELETE FROM Household WHERE id = ?', [hhId]);
+        } finally { conn.release(); }
+    });
+
+    it('a MEMBER can create a list from the shared basket (not 403)', async () => {
+        const res = await asUser(app, MEMBER2).post('/api/shopping-lists')
+            .send({ userId: MEMBER2, storeId: STORE_ID, basketId: sharedId });
+        expect(res.status).not.toBe(403);
+    });
+
+    it('a STRANGER cannot create a list from the shared basket (403)', async () => {
+        const res = await asUser(app, STRANGER).post('/api/shopping-lists')
+            .send({ userId: STRANGER, storeId: STORE_ID, basketId: sharedId });
+        expect(res.status).toBe(403);
+    });
+
+    it("a member cannot use the founder's PERSONAL basket (403)", async () => {
+        const res = await asUser(app, MEMBER2).post('/api/shopping-lists')
+            .send({ userId: MEMBER2, storeId: STORE_ID, basketId: personalId });
+        expect(res.status).toBe(403);
+    });
+
+    it('a MEMBER can unwind the family shop they started (not 403)', async () => {
+        const res = await asUser(app, MEMBER2).delete(`/api/shopping-lists/by-basket/${sharedId}`);
+        expect(res.status).not.toBe(403);
+    });
+});

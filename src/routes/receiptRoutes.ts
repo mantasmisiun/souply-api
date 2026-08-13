@@ -28,6 +28,10 @@ import {
 } from '../controllers/receiptController.js';
 import { getFlaggedReceiptCrop } from '../controllers/adminReceiptCropController.js';
 import {
+    fetchFamilyReceipt,
+    patchReceiptItemScope,
+} from '../controllers/receiptFamilyController.js';
+import {
     logBatchReceipt,
     finalizeBatchReport,
 } from '../controllers/receiptBatchLogController.js';
@@ -81,6 +85,16 @@ router.patch('/receipts/:id/regions', requireUser, owns, updateReceiptRegions);
 router.post('/receipts/upload-url', requireUser, getReceiptUploadUrl);
 router.patch('/receipts/:id/file-path', requireUser, owns, setReceiptFilePath);
 router.post('/receipts/pdf-to-image', pdfConvertLimiter, requireUser, convertPdfToImage);
+
+// FAMILY SHOPPING §4 — the ONLY two /receipts/:id routes that are not bound to
+// `owns`, deliberately: §4.5 exists precisely so a household member who did not
+// upload the receipt can see its FAMILY section. Both authorize on household
+// membership inside the service (see receiptFamilyController), and the read is
+// built as an allowlist that carries no grand total and no image. Everything
+// else about a receipt — the photo, the comparison basket, the raw parsedData
+// with `footer.total` in it — stays owner-only on the routes below.
+router.get('/receipts/:id/family', requireUser, fetchFamilyReceipt);
+router.patch('/receipts/:id/family/scope', requireUser, patchReceiptItemScope);
 
 router.get('/users/:userId/receipts', requireUser, requireSelfUserParam, fetchReceiptsByUserId);
 router.get('/receipts/:id', requireUser, owns, fetchReceiptById);

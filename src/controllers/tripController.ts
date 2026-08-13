@@ -10,6 +10,10 @@ import { getTripComparison } from '../services/tripComparisonService.js';
 import { attachReceiptToTrip } from '../services/tripLinkService.js';
 import { readTripBasketComparison, snapshotTripComparison } from '../services/tripBasketComparison.js';
 import { getReceiptOwnerId } from '../models/receiptModel.js';
+import { convertTripToFamily } from '../services/tripFamilyConversion.js';
+import { HouseholdActionError } from '../services/householdMembership.js';
+import { LedgerError } from '../services/householdLedger.js';
+import { isReceiptRecorded } from '../models/householdLedgerModel.js';
 
 export const listTrips = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -330,6 +334,42 @@ export const attachTripReceipt = async (req: Request, res: Response, next: NextF
 };
 
 /**
+ * POST /api/trips/:id/convert-to-family — family spec §7.
+ *
+ * Turns an existing PERSONAL trip into a family one: `Trip.householdId` is set
+ * and every receipt already on it enters the household ledger at its FAMILY
+ * subtotal (§4.3). One-way — see tripFamilyConversion for why there is no
+ * inverse, and for the participant-set choice.
+ *
+ * The membership probe defense is layered exactly like the rest of this file:
+ * a non-member of the TRIP gets 404 (a bare trip id must not be probeable),
+ * and only past that gate does the service answer 403 for "your trip? no" /
+ * "your household? no". Everything else the service decides, because the rules
+ * are ledger rules and belong next to the ledger.
+ */
+export const postConvertTripToFamily = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const tripId = Number(req.params.id);
+        if (!Number.isFinite(tripId)) { res.status(400).json({ error: 'bad id' }); return; }
+        const viewer = req.authUserId!;
+        if (!(await isTripMember(tripId, viewer))) { res.status(404).json({ error: 'not found' }); return; }
+        res.json(await convertTripToFamily(tripId, viewer));
+    } catch (error) {
+        if (error instanceof HouseholdActionError) {
+            res.status(error.status).json({ error: error.code });
+            return;
+        }
+        // A ledger invariant refusing the request is a 409, not a 500 — same
+        // mapping receiptFamilyController uses for the §4.4 path.
+        if (error instanceof LedgerError) {
+            res.status(409).json({ error: 'ledger-conflict', message: error.message });
+            return;
+        }
+        next(error);
+    }
+};
+
+/**
  * "Wrong receipt": DETACH a receipt from the trip (tripId → NULL — the receipt
  * itself survives in the uploader's history; the slot reopens and the derived
  * stage falls back). Detach ONLY unlinks; it never deletes the receipt/items/
@@ -350,7 +390,7 @@ export const detachTripReceipt = async (req: Request, res: Response, next: NextF
         const viewer = req.authUserId!;
         // 404-over-403 probe defense: non-members learn nothing about the trip.
         if (!(await isTripMember(tripId, viewer))) { res.status(404).json({ error: 'not found' }); return; }
-        const [[trip]] = await pool.query('SELECT createdByUserId, createdAt FROM Trip WHERE id = ?', [tripId]) as any;
+        const [[trip]] = await pool.query('SELECT createdByUserId, createdAt, householdId FROM Trip WHERE id = ?', [tripId]) as any;
         if (!trip) { res.status(404).json({ error: 'not found' }); return; }
         // The receipt must actually belong to this trip.
         const [[rcpt]] = await pool.query(
@@ -361,6 +401,24 @@ export const detachTripReceipt = async (req: Request, res: Response, next: NextF
         const isOwner = trip.createdByUserId === viewer;
         const isUploader = rcpt.uploaderId === viewer;
         if (!isOwner && !isUploader) { res.status(403).json({ error: 'forbidden' }); return; }
+        /**
+         * §8 — A RECEIPT COUNTED INTO THE LEDGER CANNOT LEAVE ITS FAMILY TRIP.
+         *
+         * `assertReceiptDeletable` already blocks DELETE for such a receipt,
+         * but it decides on Receipt.tripId → Trip.householdId — so detaching
+         * first sets householdId out of reach and the delete then sails
+         * through. Detach → delete was a two-step way to remove a receipt the
+         * ledger still has a `receipt_recorded` for, which is precisely the
+         * stranded-shares outcome §8 exists to prevent. It is only reachable at
+         * all now that §7's conversion actually writes into the ledger.
+         *
+         * 423 Locked, matching the delete gate's own answer. §4.4's adjustment
+         * path remains the sanctioned correction: toggle the items to personal
+         * and the receipt's family subtotal drains to zero, visibly.
+         */
+        if (trip.householdId != null && await isReceiptRecorded(Number(trip.householdId), receiptId)) {
+            res.status(423).json({ error: 'receipt-counted-in-ledger' }); return;
+        }
         // Only the uploader path is window-gated; the owner moderates freely.
         if (!isOwner) {
             const ageMs = Date.now() - new Date(trip.createdAt).getTime();

@@ -40,6 +40,27 @@ export interface TripSummary {
     /** Trip owner/creator user id — the client uses it to decide who may
      *  moderate (detach any member's receipt). Sourced from Trip.createdByUserId. */
     ownerUserId: string;
+    /**
+     * The household this trip belongs to, or null for a personal trip
+     * (Trip.householdId, sql/trip_foundation.sql).
+     *
+     * Surfaced because "is this a family trip?" is a property OF THE TRIP and
+     * the client had no way to read it: it was inferring family-ness from
+     * `basket?.id === household.sharedBasketId`, which is wrong the moment a
+     * trip's basket changes (a receipt re-pointed at another trip, a list
+     * rebuilt) and silently wrong — the card would just stop being a family
+     * card. This is the same value the server itself decides on
+     * (receiptFamilyScope resolves Receipt.tripId → Trip.householdId), so the
+     * client now branches on exactly what the server branches on.
+     *
+     * It is an OPAQUE ID, and deliberately nothing more. No name, no member
+     * list, no balance: those come from `/households/mine`, which is scoped to
+     * the caller's own membership. Trip membership is open (§QR invites), so a
+     * trip member who is not in the household learns only that the trip belongs
+     * to some household — which is what makes their own "family" affordances
+     * correctly stay off.
+     */
+    householdId: number | null;
     name: string | null;
     isAdHoc: boolean;
     scoreExempt: boolean;
@@ -309,6 +330,7 @@ export const listTripsForUser = async (userId: string, locale: Locale = 'lt', li
         return {
             id: t.id,
             ownerUserId: t.createdByUserId,
+            householdId: t.householdId == null ? null : Number(t.householdId),
             name: t.name ?? null,
             isAdHoc: !!t.isAdHoc,
             scoreExempt: !!t.scoreExempt,

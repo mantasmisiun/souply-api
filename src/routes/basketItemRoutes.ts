@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { addBasketItem, fetchBasketItemsByBasketId, fetchBasketQuantities, putBasketItemByProduct, updateBasketItem, removeBasketItem, convertBasketMode } from '../controllers/basketItemController.js';
 import { requireUser } from '../middleware/sessionAuth.js';
-import { requireBasketOwner, requireBasketOwnerFromBody, requireBasketItemWritable } from '../middleware/resourceAuth.js';
+import { requireBasketOwner, requireBasketOwnerFromBody, requireBasketItemWritable, requireBasketWritable } from '../middleware/resourceAuth.js';
 
 const router = Router();
 
@@ -59,7 +59,7 @@ router.post('/basket-items', requireUser, requireBasketOwnerFromBody('basketId')
  *         description: A list of items in the basket
  */
 // GET /api/baskets/:basketId/items - Get all items in a basket
-router.get('/baskets/:basketId/items', requireUser, requireBasketOwner('basketId'), fetchBasketItemsByBasketId);
+router.get('/baskets/:basketId/items', requireUser, requireBasketWritable('basketId'), fetchBasketItemsByBasketId);
 
 /**
  * @swagger
@@ -73,7 +73,7 @@ router.get('/baskets/:basketId/items', requireUser, requireBasketOwner('basketId
  */
 // The catalog surfaces' cheap read — see fetchBasketQuantities. /items stays for
 // the basket screen, which needs names, images and canonical units.
-router.get('/baskets/:basketId/quantities', requireUser, requireBasketOwner('basketId'), fetchBasketQuantities);
+router.get('/baskets/:basketId/quantities', requireUser, requireBasketWritable('basketId'), fetchBasketQuantities);
 
 /**
  * @swagger
@@ -97,11 +97,11 @@ router.get('/baskets/:basketId/quantities', requireUser, requireBasketOwner('bas
  */
 // The stepper's write: ONE round trip, addressed by product. Owner-gated on the
 // parent basket exactly like the other item routes.
-router.put('/baskets/:basketId/items/by-product/:productId', requireUser, requireBasketOwner('basketId'), putBasketItemByProduct);
+router.put('/baskets/:basketId/items/by-product/:productId', requireUser, requireBasketWritable('basketId'), putBasketItemByProduct);
 
 // POST /api/baskets/:basketId/convert-mode - flip all items in a basket
 // between 'sku' and 'base'. Sums quantities on sku→base cluster collisions.
-router.post('/baskets/:basketId/convert-mode', requireUser, requireBasketOwner('basketId'), convertBasketMode);
+router.post('/baskets/:basketId/convert-mode', requireUser, requireBasketWritable('basketId'), convertBasketMode);
 
 /**
  * @swagger

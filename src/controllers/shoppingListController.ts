@@ -28,7 +28,7 @@ import {
     getShareTokenByToken,
     markShareTokenClaimed,
 } from '../models/shoppingListShareTokenModel.js';
-import { getBasketOwnerId } from '../models/basketModel.js';
+import { basketWritableBy } from '../middleware/resourceAuth.js';
 import { getReceiptOwnerId } from '../models/receiptModel.js';
 
 /**
@@ -60,12 +60,19 @@ export const addShoppingList = async (req: Request, res: Response, next: NextFun
             res.status(400).json({ error: 'items must be an array' });
             return;
         }
-        // When creating a list FROM a basket, the caller must own that basket — otherwise
-        // supplying someone else's basketId flips their basket to 'inProgress' and reads
-        // its template. (The list routes have no basket-owner middleware; check inline.)
+        // When creating a list FROM a basket, the caller must be able to WRITE that
+        // basket — otherwise supplying someone else's basketId flips their basket to
+        // 'inProgress' and reads its template. (The list routes have no basket
+        // middleware; check inline.)
+        //
+        // `basketWritableBy`, not a raw owner check: a household's SHARED basket is
+        // writable by every member (Basket.householdId set). A plain owner check made
+        // `Basket.userId` — the household FOUNDER — the only person who could start a
+        // family shop, so every other member got a 403 walking §6 step 1→2. Personal
+        // baskets are untouched: the rule only widens when householdId IS NOT NULL.
         if (basketId) {
-            const basketOwner = await getBasketOwnerId(Number(basketId));
-            if (basketOwner !== null && basketOwner !== userId) {
+            const verdict = await basketWritableBy(Number(basketId), userId);
+            if (verdict === 'forbidden') {
                 res.status(403).json({ error: 'forbidden' });
                 return;
             }
@@ -295,8 +302,11 @@ export const removeShoppingListsByBasket = async (req: Request, res: Response, n
         if (isNaN(basketId)) { res.status(400).json({ error: 'Invalid basket ID' }); return; }
         const userId = req.authUserId;
         if (!userId) { res.status(401).json({ error: 'auth-required' }); return; }
-        const owner = await getBasketOwnerId(basketId);
-        if (owner !== null && owner !== userId) { res.status(403).json({ error: 'forbidden' }); return; }
+        // Same rule as creation above: a household member who can START a family
+        // shop must be able to unwind it, or they strand lists only the founder
+        // could clear. Personal baskets stay owner-only.
+        const verdict = await basketWritableBy(basketId, userId);
+        if (verdict === 'forbidden') { res.status(403).json({ error: 'forbidden' }); return; }
         await deleteShoppingListsByBasketId(basketId);
         // The basket returns to 'compared' — its lists (the in-progress state)
         // are gone; a re-create will move it forward again.

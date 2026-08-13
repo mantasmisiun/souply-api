@@ -57,6 +57,23 @@ export default async function globalSetup() {
             console.log(`[testdb] bootstrapped ${dbName}: ${after.length} tables`);
         }
 
+        // Migrations newer than tests/schema/schema.sql. That dump is only
+        // loaded into a COMPLETELY EMPTY database, so an already-bootstrapped
+        // souply_test_ci would otherwise never gain these tables/columns. Both
+        // are idempotent (CREATE TABLE IF NOT EXISTS / ADD COLUMN IF NOT
+        // EXISTS), so re-running them every boot costs nothing.
+        for (const file of [
+            'sql/household_ledger.sql',
+            'sql/household_member_leaving.sql',
+            'sql/receipt_item_family_scope.sql',
+        ]) {
+            const sql = readFileSync(resolve(process.cwd(), file), 'utf8')
+                .split('\n').filter(l => !l.trimStart().startsWith('--')).join('\n');
+            for (const stmt of sql.split(';').map(s => s.trim()).filter(Boolean)) {
+                await conn.query(stmt);
+            }
+        }
+
         // Reference rows that tests assume exist. The "Nepriskirta"
         // (unassigned) default category id 688 is a Product FK parent in
         // adminReceipts.test.ts AND the catch-all the matcher looks up by

@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { requireUser } from '../middleware/sessionAuth.js';
-import { listTrips, archiveTripById, unarchiveTripById, fetchTripStats, fetchTripScore, putTripLineLink, fetchMonthlyPlanningScore, fetchMonthlyTripSpend, fetchTripReceipts, detachTripReceipt, attachTripReceipt, fetchTripBasketComparison, fetchTripComparison } from '../controllers/tripController.js';
+import { listTrips, archiveTripById, unarchiveTripById, fetchTripStats, fetchTripScore, putTripLineLink, fetchMonthlyPlanningScore, fetchMonthlyTripSpend, fetchTripReceipts, detachTripReceipt, attachTripReceipt, fetchTripBasketComparison, fetchTripComparison, postConvertTripToFamily } from '../controllers/tripController.js';
 
 /**
  * Souply 2.0 Phase 4 — the Apsipirkimai tab's trip API. Self-scoped via
@@ -18,6 +18,9 @@ router.get('/trips/:id/receipts', requireUser, fetchTripReceipts);
 router.get('/trips/:id/basket-comparison', requireUser, fetchTripBasketComparison);
 router.post('/trips/:id/attach-receipt', requireUser, attachTripReceipt);
 router.delete('/trips/:id/receipts/:receiptId', requireUser, detachTripReceipt);
+// Family spec §7 "Convert to family shopping" — ONE-WAY (no inverse route
+// exists, deliberately: see services/tripFamilyConversion).
+router.post('/trips/:id/convert-to-family', requireUser, postConvertTripToFamily);
 router.get('/trips/:id/score', requireUser, fetchTripScore);
 router.get('/trips/:id/comparison', requireUser, fetchTripComparison);
 router.post('/trips/:id/line-links', requireUser, putTripLineLink);

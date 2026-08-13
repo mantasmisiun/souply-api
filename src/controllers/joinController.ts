@@ -6,8 +6,9 @@ import { notifyUser } from '../services/notificationService.js';
 import { getTripMemberIds } from '../models/tripModel.js';
 import {
     createHousehold, getHouseholdForUser, getHouseholdMembers, isHouseholdMember,
-    joinHousehold, leaveHousehold, removeMemberFromHousehold,
+    joinHousehold,
 } from '../models/householdModel.js';
+import { requestLeaveHousehold, requestRemoveMember } from '../services/householdMembership.js';
 
 /**
  * Souply 2.0 Phase 1c — households + the /join/:code preview→claim flow.
@@ -62,6 +63,8 @@ export const getOwnHousehold = async (req: Request, res: Response, next: NextFun
                 userId: m.userId,
                 role: m.role,
                 joinedAt: m.joinedAt,
+                // §3.2.2 — "leaving" is visible to EVERYONE, not just the leaver.
+                leaving: m.leavingRequestedAt != null,
                 label: u?.displayName ?? (u?.username ? `@${u.username}` : null)
                     ?? u?.firstName ?? (m.userId === userId && u?.email ? String(u.email).split('@')[0] : null) ?? null,
                 avatarColor: u?.avatarColor ?? null,
@@ -71,20 +74,39 @@ export const getOwnHousehold = async (req: Request, res: Response, next: NextFun
     } catch (error) { next(error); }
 };
 
+/**
+ * Two outcomes now, because of §3.1's balance gate:
+ *   204  gone — balance was zero (or the owner closed a settled household).
+ *   200  ACCEPTED but not complete: the member is in the "leaving" state
+ *        (§3.2.2), already excluded from new trips, and the body carries the
+ *        transfers that will clear them. Not a 409: the request was not
+ *        refused, it is in progress, and the client renders the settle dialog
+ *        from exactly this payload.
+ */
+const respondToDeparture = (res: Response, outcome: Awaited<ReturnType<typeof requestLeaveHousehold>>): void => {
+    if (!outcome) { res.status(404).json({ error: 'not found' }); return; }
+    if (outcome.status === 'leaving') {
+        res.status(200).json({
+            status: 'leaving',
+            balanceCents: outcome.balanceCents,
+            transfers: outcome.transfers,
+            blockedBy: outcome.blockedBy,
+        });
+        return;
+    }
+    res.status(204).send();
+};
+
 export const leaveOwnHousehold = async (req: Request, res: Response, next: NextFunction) => {
     try {
-        const left = await leaveHousehold(req.authUserId!);
-        if (!left) { res.status(404).json({ error: 'not found' }); return; }
-        res.status(204).send();
+        respondToDeparture(res, await requestLeaveHousehold(req.authUserId!));
     } catch (error) { next(error); }
 };
 
 
 export const removeHouseholdMemberCtl = async (req: Request, res: Response, next: NextFunction) => {
     try {
-        const removed = await removeMemberFromHousehold(req.authUserId!, String(req.params.memberId));
-        if (!removed) { res.status(404).json({ error: 'not found' }); return; }
-        res.status(204).send();
+        respondToDeparture(res, await requestRemoveMember(req.authUserId!, String(req.params.memberId)));
     } catch (error) { next(error); }
 };
 
