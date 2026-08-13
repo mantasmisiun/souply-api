@@ -31,3 +31,12 @@ receipts/iki/
 !.env.production.example
 receipts/_recipes/slices_*/
 receipts/_recipes/verdicts_*/
+
+# Raw receipt fixtures (PII) — untracked 2026-08-13
+receipts/receipt pdf/
+receipts/receipt images/
+receipts/base64/
+receipts/parsed json/
+receipts/request json/
+receipts/*.xlsx
+.env.bak*
