@@ -2,6 +2,7 @@ import pool from '../config/db.js';
 import { nameSimilarity } from '../utils/productNameNormalize.js';
 import type { RawSlot2Row } from '../services/slot2QueueBuilder.js';
 import type { Locale } from '../middleware/locale.js';
+import { localizedSpNameSql } from '../middleware/locale.js';
 
 /**
  * Slot 2 candidate minimum similarity (cross-chain name match).
@@ -83,7 +84,7 @@ async function fetchSlot2aRows(
              osc.rankPos                               AS rankPos,
              (osp.chainId = csp.chainId)              AS sameChain,
              op.id                                     AS orphanProductId,
-             COALESCE(osp.storeProductName, op.name)   AS orphanName,
+             ${localizedSpNameSql(locale, 'osp', 'COALESCE(osp.storeProductName, op.name)')}   AS orphanName,
              osp.brandName                             AS orphanBrandName,
              osp.imageUrl                              AS orphanImageUrl,
              osp.unit                                  AS orphanUnit,
@@ -93,7 +94,7 @@ async function fetchSlot2aRows(
              op.categoryId                             AS orphanCategoryId,
              COALESCE(oct.name, oc.name)               AS orphanCategoryName,
              cp.id                                     AS candidateProductId,
-             COALESCE(csp.storeProductName, cp.name)   AS candidateName,
+             ${localizedSpNameSql(locale, 'csp', 'COALESCE(csp.storeProductName, cp.name)')}   AS candidateName,
              csp.brandName                             AS candidateBrandName,
              csp.imageUrl                              AS candidateImageUrl,
              csp.unit                                  AS candidateUnit,
@@ -211,7 +212,7 @@ async function fetchSlot2bRows(userId: string, priorityReceiptId?: number, local
         `SELECT DISTINCT
              rsc.storeProductId                        AS anchorSpId,
              sp.chainId                                AS chainId,
-             COALESCE(sp.storeProductName, p.name)     AS anchorName,
+             ${localizedSpNameSql(locale, 'sp', 'COALESCE(sp.storeProductName, p.name)')}     AS anchorName,
              sp.brandName                              AS anchorBrandName,
              sp.imageUrl                               AS anchorImageUrl,
              sp.unit                                   AS anchorUnit,
@@ -262,7 +263,7 @@ async function fetchSlot2bRows(userId: string, priorityReceiptId?: number, local
         `SELECT DISTINCT
              sp.id                                    AS orphanSpId,
              sp.chainId,
-             COALESCE(sp.storeProductName, p.name)    AS orphanName,
+             ${localizedSpNameSql(locale, 'sp', 'COALESCE(sp.storeProductName, p.name)')}    AS orphanName,
              sp.brandName                             AS orphanBrandName,
              sp.imageUrl                              AS orphanImageUrl,
              sp.unit                                  AS orphanUnit,
@@ -293,7 +294,7 @@ async function fetchSlot2bRows(userId: string, priorityReceiptId?: number, local
         `SELECT
              sp.id                                    AS orphanSpId,
              sp.chainId,
-             COALESCE(sp.storeProductName, p.name)    AS orphanName,
+             ${localizedSpNameSql(locale, 'sp', 'COALESCE(sp.storeProductName, p.name)')}    AS orphanName,
              sp.brandName                             AS orphanBrandName,
              sp.imageUrl                              AS orphanImageUrl,
              sp.unit                                  AS orphanUnit,

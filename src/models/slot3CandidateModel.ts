@@ -3,6 +3,7 @@ import { nameSimilarity } from '../utils/productNameNormalize.js';
 import type { RawSlot3Row } from '../services/slot3QueueBuilder.js';
 import { swipeLog } from '../utils/swipeLogger.js';
 import type { Locale } from '../middleware/locale.js';
+import { localizedSpNameSql } from '../middleware/locale.js';
 
 const SLOT3_MIN_SCORE = 0.75;
 
@@ -38,7 +39,7 @@ async function fetchSlot3ReceiptRows(userId: string, receiptId?: number, locale:
              p.id                                     AS productId,
              p.name                                   AS productName,
              p.categoryId,
-             COALESCE(sp.storeProductName, p.name)    AS displayName,
+             ${localizedSpNameSql(locale, 'sp', 'COALESCE(sp.storeProductName, p.name)')}    AS displayName,
              sp.brandName, sp.imageUrl,
              sc.name                                  AS chainName,
              sc.logoUrl                               AS chainLogoUrl,
@@ -76,7 +77,7 @@ async function fetchSlot3ReceiptRows(userId: string, receiptId?: number, locale:
                    sp.chainId,
                    p.id                                    AS productId,
                    p.name                                  AS productName,
-                   COALESCE(sp.storeProductName, p.name)   AS displayName,
+                   ${localizedSpNameSql(locale, 'sp', 'COALESCE(sp.storeProductName, p.name)')}   AS displayName,
                    sp.brandName, sp.imageUrl, p.categoryId,
                    ROW_NUMBER() OVER (
                        PARTITION BY sp.chainId, p.categoryId ORDER BY p.id
@@ -202,7 +203,7 @@ async function fetchSlot3GlobalRows(chainIds: number[], locale: Locale = 'lt', c
                    p.id                                  AS productId,
                    p.name                                AS productName,
                    sp.id                                 AS spId,
-                   COALESCE(sp.storeProductName, p.name) AS displayName,
+                   ${localizedSpNameSql(locale, 'sp', 'COALESCE(sp.storeProductName, p.name)')} AS displayName,
                    sp.brandName,
                    sp.imageUrl,
                    sc.name                               AS chainName,
@@ -329,7 +330,7 @@ export async function fetchSlot3UncategorisedRows(chainIds: number[], locale: Lo
         `SELECT spId, chainId, productId, productName, displayName, brandName, imageUrl
            FROM (
                SELECT sp.id AS spId, sp.chainId, p.id AS productId, p.name AS productName,
-                      COALESCE(sp.storeProductName, p.name) AS displayName, sp.brandName, sp.imageUrl,
+                      ${localizedSpNameSql(locale, 'sp', 'COALESCE(sp.storeProductName, p.name)')} AS displayName, sp.brandName, sp.imageUrl,
                       ROW_NUMBER() OVER (PARTITION BY sp.chainId ORDER BY p.id DESC) AS rn
                  FROM StoreProduct sp
                  JOIN Product p ON p.id = sp.productId AND p.mergedIntoId IS NULL AND p.categoryId = 688
@@ -346,7 +347,7 @@ export async function fetchSlot3UncategorisedRows(chainIds: number[], locale: Lo
                 categoryId, chainName, chainLogoUrl, categoryName
            FROM (
                SELECT sp.id AS spId, sp.chainId, p.id AS productId, p.name AS productName,
-                      COALESCE(sp.storeProductName, p.name) AS displayName, sp.brandName, sp.imageUrl,
+                      ${localizedSpNameSql(locale, 'sp', 'COALESCE(sp.storeProductName, p.name)')} AS displayName, sp.brandName, sp.imageUrl,
                       p.categoryId, sc.name AS chainName, sc.logoUrl AS chainLogoUrl,
                       COALESCE(ct.name, c.name) AS categoryName,
                       ROW_NUMBER() OVER (PARTITION BY sp.chainId, p.categoryId ORDER BY p.id) AS rn

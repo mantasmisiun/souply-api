@@ -2,6 +2,7 @@ import pool from '../config/db.js';
 import { crossChainNameSimilarity } from '../utils/productNameNormalize.js';
 import { swipeLog } from '../utils/swipeLogger.js';
 import type { Locale } from '../middleware/locale.js';
+import { localizedSpNameSql } from '../middleware/locale.js';
 import { RECOGNITION } from '../../../shared/recognitionConfig.js';
 import { fetchCanonicalAliasesForSps } from './storeProductAliasModel.js';
 
@@ -123,7 +124,7 @@ export async function fetchSlot1Rows(userId: string, priorityReceiptId?: number,
              p.id                                       AS anchorProductId,
              p.categoryId                               AS anchorCategoryId,
              p.name                                     AS anchorProductName,
-             COALESCE(sp.storeProductName, p.name)      AS anchorDisplayName,
+             ${localizedSpNameSql(locale, 'sp', 'COALESCE(sp.storeProductName, p.name)')}      AS anchorDisplayName,
              sp.brandName                               AS anchorBrandName,
              sp.imageUrl                                AS anchorImageUrl,
              sc.name                                    AS anchorChainName,
@@ -167,7 +168,7 @@ export async function fetchSlot1Rows(userId: string, priorityReceiptId?: number,
                    p.id                                    AS productId,
                    p.categoryId,
                    p.name                                  AS productName,
-                   COALESCE(sp.storeProductName, p.name)   AS displayName,
+                   ${localizedSpNameSql(locale, 'sp', 'COALESCE(sp.storeProductName, p.name)')}   AS displayName,
                    sp.brandName,
                    sp.imageUrl,
                    sc.name                                 AS chainName,

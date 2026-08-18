@@ -159,3 +159,32 @@ export function localizedProductNameSql(
             `WHERE spi.productId = ${id} AND spi.imageUrl IS NOT NULL)`,
     };
 }
+
+/**
+ * Localized display name for ONE SPECIFIC StoreProduct.
+ *
+ * Distinct from `localizedProductNameSql`, which resolves a *product's* English
+ * name by picking a donor translation from any of its store products. That is
+ * wrong for the swipe queue: its whole purpose is comparing two store products
+ * that may not share a product yet — often one has no product at all — so the
+ * name shown must belong to the SP on the card, not to a group it isn't in.
+ *
+ * Returns a bare SQL expression with **no placeholder**, so it can be dropped
+ * into an existing query without disturbing positional parameters. Safe because
+ * `locale` is a typed union and the alias is caller-supplied, never user input.
+ *
+ * Shortest translation wins, matching the donor-pick convention above — chain
+ * names run long and the swipe card has two of them stacked.
+ */
+export function localizedSpNameSql(
+    locale: Locale,
+    spAlias: string,
+    fallbackExpr: string,
+): string {
+    if (locale !== 'en') return fallbackExpr;
+    return (
+        `COALESCE((SELECT spt.text FROM StoreProductTranslation spt ` +
+        `WHERE spt.storeProductId = ${spAlias}.id AND spt.lang = 'en' ` +
+        `ORDER BY CHAR_LENGTH(spt.text), spt.id LIMIT 1), ${fallbackExpr})`
+    );
+}
