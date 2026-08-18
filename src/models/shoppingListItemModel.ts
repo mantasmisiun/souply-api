@@ -1,6 +1,6 @@
 import pool from '../config/db.js';
 import type { Connection } from 'mysql2/promise';
-import { localizedProductNameSql, type Locale } from '../middleware/locale.js';
+import { localizedProductNameSql, localizedCategoryNameSql, type Locale } from '../middleware/locale.js';
 
 export const createListItem = async (
     listId: number,
@@ -61,6 +61,13 @@ export const getListItemsByShoppingListId = async (listId: number, locale: Local
         idExpr: 'COALESCE(sp.productId, sli.productId, p.id)',
         nameExpr: 'COALESCE(sp.storeProductName, p.name, sli.customName)',
     });
+    // The list groups by aisle, and those headers are APP taxonomy — they must
+    // follow the request locale like every other category surface. Without this
+    // the shopping list showed raw `Category.name` (LT) under an EN interface.
+    // Same helper the catalog uses; LEFT JOIN so a missing translation falls
+    // back to the LT original rather than blanking the header.
+    const trCat3 = localizedCategoryNameSql(locale, { categoryAlias: 'c3', translationAlias: 'ct3' });
+    const trCat2 = localizedCategoryNameSql(locale, { categoryAlias: 'c2', translationAlias: 'ct2' });
     // Ordering:
     //   1. unchecked first (isChecked ASC)
     //   2. alphabetically by resolved name within each bucket — stable
@@ -88,10 +95,12 @@ export const getListItemsByShoppingListId = async (listId: number, locale: Local
                     NULLIF(sli.isWeighable, 0),
                     0
                 ) AS isWeighable,
-                c3.id   AS l3CategoryId,
-                c3.name AS l3CategoryName,
-                c2.id   AS l2CategoryId,
-                c2.name AS l2CategoryName,
+                c3.id            AS l3CategoryId,
+                ${trCat3.nameSql} AS l3CategoryName,
+                c3.name          AS l3CategoryNameKey,
+                c2.id            AS l2CategoryId,
+                ${trCat2.nameSql} AS l2CategoryName,
+                c2.name          AS l2CategoryNameKey,
                 c1.id   AS l1CategoryId,
                 (SELECT CONCAT('-', ROUND((1 - pr.promoPrice / pr.price) * 100), '%')
                  FROM Price pr
@@ -108,14 +117,16 @@ export const getListItemsByShoppingListId = async (listId: number, locale: Local
          LEFT JOIN Product p ON sli.productId = p.id
          LEFT JOIN StoreProduct sp ON sli.storeProductId = sp.id
          LEFT JOIN Category c3 ON p.categoryId = c3.id
+         ${trCat3.joinSql}
          LEFT JOIN Category c2 ON c3.parentCategoryId = c2.id
+         ${trCat2.joinSql}
          LEFT JOIN Category c1 ON c2.parentCategoryId = c1.id
          LEFT JOIN User cb ON cb.id = sli.checkedBy
          WHERE sli.listId = ?
          ORDER BY sli.isChecked ASC,
                   COALESCE(sp.storeProductName, p.name, sli.customName, '') ASC,
                   sli.id ASC`,
-        [listId]
+        [trCat3.localeParam, trCat2.localeParam, listId],
     );
     return rows.map((row: any) => ({
         ...row,
