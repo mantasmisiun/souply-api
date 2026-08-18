@@ -15,7 +15,7 @@ import { joinBrand } from '../scrapers/shared/net.js';
 
 const chain = process.argv[2];
 const maxPages = process.argv[3] ? Number(process.argv[3]) : undefined;
-const OUT = `/home/mantas/Documents/Projects/scraper_dry_${chain}.csv`;
+const OUT = `/home/mantas/Documents/Projects/docs/recon/dry_${chain}.csv`;
 const cell = (v: unknown) => { const s = v == null ? '' : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
 const d = (x: Date | null | undefined) => (x ? x.toISOString().slice(0, 10) : '');
 
@@ -23,6 +23,43 @@ interface Row {
     rawName: string; finalName: string; amount: number | null; unit: string | null;
     isWeighable: boolean; regular: number; promo: number | null;
     start: Date | null; end: Date | null; siteCategory: string | null; sizeSource: string;
+    /** Verbatim offer badge — the CONDITION. Empty for chains that publish none. */
+    offerText?: string | null;
+    /** Chain's own percentage figure, not derived. */
+    offerPct?: number | null;
+    /** Loyalty card required for this price. */
+    card?: boolean;
+}
+
+/** Classify by SHOPPER ACTION, not by badge text.
+ *  A kind exists only if it changes what you must DO to get the price.
+ *  Percentages are derivable from regular vs promo; "Super kaina" / "SUMAŽINTA"
+ *  are marketing. Both stay in offerText and neither is a kind. */
+function classify(r: Row): { kind: string; minQty: number | null } {
+    const t = (r.offerText ?? '').trim();
+    const mq = t.match(/^(\d+)\s*u\u017e/i);              // "3 už", "5 už" — must buy N
+    if (mq) return { kind: 'multibuy', minQty: Number(mq[1]) };
+    if (/kupon/i.test(t)) return { kind: 'coupon', minQty: null };   // must activate
+    if (r.card) return { kind: 'card', minQty: null };                // must carry the card
+    if (r.promo != null) return { kind: 'simple', minQty: null };
+    return { kind: 'none', minQty: null };                            // price observation only
+}
+
+/** Chain's own percentage vs the one implied by the prices. A mismatch is a
+ *  data-quality signal, not a discount type — surfaced so it can be eyeballed. */
+function pctCheck(r: Row): string {
+    if (r.offerPct == null || r.promo == null || !r.regular) return '';
+    const computed = Math.round((1 - r.promo / r.regular) * 100);
+    return Math.abs(computed - r.offerPct) > 1 ? `stated ${r.offerPct} vs computed ${computed}` : '';
+}
+
+/** €/kg or €/l for the effective price — the number that makes rows comparable. */
+function perUnit(r: Row): string {
+    const price = r.promo ?? r.regular;
+    if (!r.amount || !r.unit || !price) return '';
+    const kg = r.unit === 'g' ? r.amount / 1000 : r.unit === 'kg' ? r.amount
+        : r.unit === 'ml' ? r.amount / 1000 : r.unit === 'l' ? r.amount : null;
+    return kg ? (price / kg).toFixed(2) : '';
 }
 
 async function collect(): Promise<Row[]> {
@@ -68,6 +105,37 @@ async function collect(): Promise<Row[]> {
                 siteCategory: null, sizeSource: src };
         });
     }
+    if (chain === 'lidl') {
+        const { fetchAllProducts } = await import('../scrapers/lidl/index.js');
+        const { extractLidlSizes } = await import('../scrapers/lidl/parseLidlProduct.js');
+        const all = await fetchAllProducts(maxPages ? { limitCategories: maxPages } : {});
+        // Replicate the persist loop exactly: directSize wins, else derive from
+        // basePriceText, and emit ONE ROW PER SIZE (the loop upserts per size).
+        const out: Row[] = [];
+        for (const it of all) {
+            const sizes = it.directSize
+                ? [it.directSize]
+                : extractLidlSizes(it.basePriceText, {
+                    promoPrice: it.promoPrice, regularPrice: it.regularPrice,
+                });
+            const p = parseSize(it.name);
+            const list = sizes.length ? sizes : [{ amount: p.amount, unit: p.unit, isWeighable: p.isWeighable }];
+            for (const sz of list) {
+                out.push({
+                    rawName: `${it.name}${it.itemCode ? ` [#${it.itemCode}]` : ''}`,
+                    finalName: p.storeProductName,
+                    amount: sz.amount, unit: sz.unit, isWeighable: sz.isWeighable,
+                    regular: it.regularPrice, promo: it.promoPrice,
+                    start: it.promoStart, end: it.promoEnd,
+                    siteCategory: it.basePriceText || null,
+                    sizeSource: it.directSize ? 'directSize' : sizes.length ? 'basePrice' : 'name',
+                    offerText: it.offerText ?? null, offerPct: it.offerPct ?? null,
+                    card: !!it.isLidlPlus,
+                });
+            }
+        }
+        return out;
+    }
     if (chain === 'lidl-leaflet') {
         const { collectLeafletProducts } = await import('../scrapers/lidl/leaflet.js');
         return (await collectLeafletProducts({ maxFlyers: maxPages })).map(it => ({
@@ -77,14 +145,21 @@ async function collect(): Promise<Row[]> {
             start: it.promoStart, end: it.promoEnd, siteCategory: `${it.flyer} p${it.page}`, sizeSource: 'leaflet',
         }));
     }
-    throw new Error(`unknown chain "${chain}" — use rimi|barbora|norfa|iki|lidl-leaflet`);
+    throw new Error(`unknown chain "${chain}" — use rimi|barbora|norfa|iki|lidl|lidl-leaflet`);
 }
 
 async function main() {
+    fs.mkdirSync('/home/mantas/Documents/Projects/docs/recon', { recursive: true });
     const rows = await collect();
-    const header = ['rawName', 'finalName', 'amount', 'unit', 'weighable', 'regular', 'promo', 'start', 'end', 'sizeSource', 'siteCategory'];
-    const csv = [header.join(',')].concat(rows.map(r =>
-        [r.rawName, r.finalName, r.amount, r.unit, r.isWeighable ? 1 : 0, r.regular, r.promo ?? '', d(r.start), d(r.end), r.sizeSource, r.siteCategory].map(cell).join(',')));
+    const header = ['rawName', 'finalName', 'amount', 'unit', 'weighable', 'regular', 'promo',
+        'perUnit', 'kind', 'minQty', 'offerText', 'pctCheck', 'card',
+        'start', 'end', 'sizeSource', 'siteCategory'];
+    const csv = [header.join(',')].concat(rows.map(r => {
+        const { kind, minQty } = classify(r);
+        return [r.rawName, r.finalName, r.amount, r.unit, r.isWeighable ? 1 : 0, r.regular, r.promo ?? '',
+            perUnit(r), kind, minQty ?? '', r.offerText ?? '', pctCheck(r), r.card ? 1 : '',
+            d(r.start), d(r.end), r.sizeSource, r.siteCategory].map(cell).join(',');
+    }));
     fs.writeFileSync(OUT, csv.join('\n'), 'utf8');
 
     // Random verification sample, sized to the run (≥15, ≤40, ~5%).
