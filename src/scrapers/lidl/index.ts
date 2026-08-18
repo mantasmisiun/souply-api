@@ -43,6 +43,32 @@ interface LidlProduct {
     itemCode?: string | null;
     /** Website names are authoritative (leaflet typos self-heal against them). */
     nameAuthority?: boolean;
+    /**
+     * Verbatim offer badge from `price.discount.discountText` — the CONDITION,
+     * which nothing else carries. Observed values (2026-08-17, 210 tiles):
+     * multi-buy "3 už" / "5 už", percentages "-33%", labels "Super kaina" /
+     * "SUMAŽINTA", and occasionally size text that leaks into the same field.
+     *
+     * A multi-buy tile prices the WHOLE BUNDLE: "3 už" + price 2.00 +
+     * basePrice "3 x 95 g / 1 kg = 7,05 €" means three croissants for €2, and
+     * extractLidlSizes correctly derives 285 g so €/kg stays right. What the
+     * shopper still needs is that buying ONE does not get this price.
+     */
+    offerText?: string | null;
+    /** `price.discount.percentageDiscount` — Lidl's own figure, not derived. */
+    offerPct?: number | null;
+    /** True when the price came from the Lidl Plus branch (card required). */
+    isLidlPlus?: boolean;
+}
+
+/** Offer badge, preferring the branch the price was actually read from. */
+function offerTextOf(node: any): string | null {
+    const t = node?.discount?.discountText ?? node?.price?.discount?.discountText;
+    return typeof t === 'string' && t.trim() ? t.trim().replace(/\s+/g, ' ') : null;
+}
+function offerPctOf(node: any): number | null {
+    const n = node?.discount?.percentageDiscount ?? node?.price?.discount?.percentageDiscount;
+    return typeof n === 'number' && n > 0 ? n : null;
 }
 
 /** Prepend the chain-declared brand to the title unless it's already there. The
@@ -86,6 +112,7 @@ function parseGridData(raw: any): LidlProduct | null {
             promoPrice: p.price,
             requiresCoupon: false,
             basePriceText: p.basePrice?.text ?? '',
+            offerText: offerTextOf(p), offerPct: offerPctOf(p), isLidlPlus: false,
         };
     }
 
@@ -99,6 +126,9 @@ function parseGridData(raw: any): LidlProduct | null {
             promoPrice: lp.price.price,
             requiresCoupon: isLidlPlusCoupon(lp),
             basePriceText: lp.price.basePrice?.text ?? p?.basePrice?.text ?? '',
+            offerText: offerTextOf(lp.price) ?? offerTextOf(p),
+            offerPct: offerPctOf(lp.price) ?? offerPctOf(p),
+            isLidlPlus: true,
         };
     }
 
@@ -112,6 +142,7 @@ function parseGridData(raw: any): LidlProduct | null {
             promoPrice: null,
             requiresCoupon: false,
             basePriceText: p.basePrice?.text ?? '',
+            offerText: offerTextOf(p), offerPct: offerPctOf(p), isLidlPlus: false,
         };
     }
 
