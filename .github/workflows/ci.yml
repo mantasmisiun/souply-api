@@ -28,7 +28,7 @@ jobs:
           # the promotion target via base_ref; pushes = the pushed branch).
           # Default was souply-shared's main — stale under new code.
           ref: ${{ github.base_ref || github.ref_name }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: "22"
           cache: npm
@@ -86,7 +86,7 @@ jobs:
           # the promotion target via base_ref; pushes = the pushed branch).
           # Default was souply-shared's main — stale under new code.
           ref: ${{ github.base_ref || github.ref_name }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: "22"
           cache: npm
