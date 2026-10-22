@@ -102,7 +102,15 @@ async function mirror(sourceFile: string) {
         await ensureBucket(dst, isPublic);
         // No bucketExists probe on the source: bucket-scoped read-only tokens
         // (R2 "Object Read") may not allow HeadBucket. Listing is the real test.
-        const [srcItems, dstItems] = await Promise.all([listAll(source, src), listAll(target, dst)]);
+        let srcItems: Minio.BucketItem[];
+        try {
+            srcItems = await listAll(source, src);
+        } catch (err: any) {
+            failed++;
+            console.warn(`[mirror] ${src}: can't list (${err?.code ?? err?.message}) — skipped`);
+            continue;
+        }
+        const dstItems = await listAll(target, dst);
         const have = new Map(dstItems.map(o => [o.name, o.size]));
         const todo = srcItems.filter(o => have.get(o.name!) !== o.size);
         console.log(`[mirror] ${src} → ${dst}: ${srcItems.length} on source, ${todo.length} to copy`);
@@ -119,7 +127,7 @@ async function mirror(sourceFile: string) {
             if (++done % 200 === 0) console.log(`[mirror] ${src}: ${done}/${todo.length}`);
         }
     }
-    console.log(`[mirror] done${failed ? ` — ${failed} objects failed (re-run to retry)` : ''}`);
+    console.log(`[mirror] done${failed ? ` — ${failed} failure(s), see warnings above (re-run to retry)` : ''}`);
     if (failed) process.exitCode = 1;
 }
 
