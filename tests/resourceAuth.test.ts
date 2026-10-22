@@ -173,13 +173,46 @@ describe('shopping lists — trip-derived membership', () => {
     });
 });
 
-describe('non-prod dev-header shim (x-user-id) works when NODE_ENV!=production', () => {
-    it('accepts X-User-Id as identity in test env', async () => {
-        // The shim lets dev/staging web (no cookie) authenticate; prod ignores it.
+/**
+ * The dev-header shim is gated on the explicit ALLOW_DEV_AUTH_HEADER flag, NOT
+ * on NODE_ENV. That is what makes staging auth-identical to production.
+ *
+ * The default-OFF case is the regression guard. Under the old NODE_ENV gate the
+ * shim was open everywhere except prod, so a stale/invalid token could only ever
+ * 401 in prod — which is exactly how the basket broke for real users on
+ * 2026-08-28 while staging looked healthy.
+ */
+describe('dev-header shim (x-user-id) is gated on ALLOW_DEV_AUTH_HEADER', () => {
+    const original = process.env.ALLOW_DEV_AUTH_HEADER;
+    afterEach(() => {
+        if (original === undefined) delete process.env.ALLOW_DEV_AUTH_HEADER;
+        else process.env.ALLOW_DEV_AUTH_HEADER = original;
+    });
+
+    it('is OFF by default — X-User-Id alone gets 401, exactly as in production', async () => {
+        delete process.env.ALLOW_DEV_AUTH_HEADER;
+        const res = await request(app).get(`/api/baskets/user/${USER_A}`).set('X-User-Id', USER_A);
+        expect(res.status).toBe(401);
+        expect(res.body).toEqual({ error: 'auth-required' });
+    });
+
+    it('an invalid Bearer token gets 401 rather than falling back to the header', async () => {
+        delete process.env.ALLOW_DEV_AUTH_HEADER;
+        const res = await request(app)
+            .get(`/api/baskets/user/${USER_A}`)
+            .set('Authorization', 'Bearer not-a-jwt')
+            .set('X-User-Id', USER_A);
+        expect(res.status).toBe(401);
+    });
+
+    it('accepts X-User-Id as identity when the flag is explicitly set', async () => {
+        process.env.ALLOW_DEV_AUTH_HEADER = '1';
         const res = await request(app).get(`/api/baskets/user/${USER_A}`).set('X-User-Id', USER_A);
         expect(res.status).toBe(200);
     });
+
     it('X-User-Id for a DIFFERENT user is still ownership-checked (403)', async () => {
+        process.env.ALLOW_DEV_AUTH_HEADER = '1';
         const res = await request(app).get(`/api/baskets/${basketId}`).set('X-User-Id', USER_B);
         expect(res.status).toBe(403);
     });

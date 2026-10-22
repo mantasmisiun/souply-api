@@ -29,6 +29,19 @@ declare global {
 /** Name of the web httpOnly session cookie (mobile uses the Bearer header). */
 export const SESSION_COOKIE = 'souply_session';
 
+/**
+ * LOCAL-DEV ONLY: `ALLOW_DEV_AUTH_HEADER=1` in .env lets `X-User-Id` stand in
+ * for a session token, so souply-web's local build works without OAuth.
+ *
+ * NEVER set this on staging or production — it accepts a spoofable identity
+ * header and re-opens the IDOR the token requirement closed. Explicit opt-in
+ * (not NODE_ENV-based) so a misconfigured NODE_ENV cannot enable it by
+ * accident, and so staging is auth-identical to production by default.
+ */
+export function devAuthHeaderAllowed(): boolean {
+    return process.env.ALLOW_DEV_AUTH_HEADER === '1';
+}
+
 /** Pull the session JWT from the Bearer header (mobile) or the httpOnly cookie (web). */
 export function getSessionToken(req: Request): string | null {
     const header = req.header('authorization');
@@ -59,12 +72,18 @@ export async function requireUser(req: Request, res: Response, next: NextFunctio
                 return;
             }
         }
-        // NON-PROD dev-auth shim: souply-web's dev/staging build has no OAuth cookie and
-        // authenticates by sending `X-User-Id: <devUserId>`. Honor it ONLY outside
-        // production so those builds keep working, while PROD strictly requires a real
-        // token/cookie (in prod this header is ignored — the IDOR it used to enable is
-        // closed). Same NODE_ENV convention the dev-only receipt purge uses.
-        if (process.env.NODE_ENV !== 'production') {
+        // LOCAL-DEV ONLY shim: souply-web's local build has no OAuth cookie and
+        // authenticates by sending `X-User-Id: <devUserId>`.
+        //
+        // Explicit opt-in flag rather than `NODE_ENV !== 'production'`, matching
+        // ADMIN_OPEN_ACCESS. Two reasons:
+        //   1. A misconfigured NODE_ENV can no longer silently accept a spoofable
+        //      identity header — the failure mode is "dev breaks", not "prod opens".
+        //   2. Staging now behaves EXACTLY like production for auth, so a stale or
+        //      invalid token 401s there too. Under the old gate this class of bug
+        //      could only ever surface in prod, which is how a stale token left the
+        //      basket dead for real users on 2026-08-28 with staging green.
+        if (devAuthHeaderAllowed()) {
             const h = req.headers['x-user-id'];
             if (typeof h === 'string' && h.length > 0) {
                 req.authUserId = h;
