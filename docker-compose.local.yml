@@ -14,10 +14,12 @@
 #        docker compose -f docker-compose.local.yml --profile full up -d --build
 #      api → :3000, web → :5174. Stop `npm run dev:local` first — same port.
 #
-# Credentials here are local-only; MariaDB and MinIO bind to 127.0.0.1 so they
-# aren't reachable off this machine (api/web listen like `npm run dev` does).
-# Phone testing goes over USB:
-#   adb reverse tcp:3000 tcp:3000 && adb reverse tcp:9000 tcp:9000
+# Credentials here are local-only. MariaDB binds to 127.0.0.1; MinIO and api/web
+# listen on the host and stay behind ufw (default DROP), which only opens
+# 3000/9000 on the NetBird interface (wt0). Phone testing: USB
+# (`adb reverse tcp:3000 tcp:3000 && adb reverse tcp:9000 tcp:9000`) or NetBird —
+# then MINIO_PUBLIC_URL in .env.local is this PC's NetBird IP, so stored image
+# URLs open on the phone too.
 #
 # api/web use host networking so MINIO_PUBLIC_URL=http://localhost:9000 means
 # the same thing to the API, the browser and the phone (storageService signs
@@ -60,13 +62,14 @@ services:
     restart: unless-stopped
     # Image runs as uid 65532 but a fresh named volume is root-owned.
     user: "0:0"
-    command: ["server", "/data", "--console-address", ":9001"]
+    # Host networking, not published ports: docker's port publishing bypasses
+    # ufw, while a host-network listener stays behind it. The phone reaches
+    # :9000 over NetBird only because ufw allows it on wt0.
+    network_mode: host
+    command: ["server", "/data", "--address", ":9000", "--console-address", ":9001"]
     environment:
       MINIO_ROOT_USER: souply_local
       MINIO_ROOT_PASSWORD: souply_local_minio
-    ports:
-      - "127.0.0.1:9000:9000"      # S3 API
-      - "127.0.0.1:9001:9001"      # web console
     volumes:
       - minio_data:/data
 
@@ -77,6 +80,7 @@ services:
       dockerfile: souply-api/Dockerfile
     image: souply-api:local
     container_name: souply-local-api
+    restart: unless-stopped        # the phone build expects it up whenever the PC is
     network_mode: host             # PORT=3000 from .env.local
     env_file:
       - .env.local
@@ -108,6 +112,7 @@ services:
         VITE_DEV_USER_HANDLE: localdev
     image: souply-web:local
     container_name: souply-local-web
+    restart: unless-stopped
     network_mode: host
     environment:
       PORT: "5174"                 # in the API's built-in CORS allow-list

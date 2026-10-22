@@ -16,11 +16,16 @@ cd "$(dirname "$0")/../.."
 
 CONTAINER=souply-local-mariadb
 LOCAL_DB=souply_local
-LOCAL_MINIO=http://localhost:9000
 DUMP_DIR=.local/dumps
 
 # Value of KEY in an env file, quotes stripped. Never echoed.
-envval() { grep -m1 "^$2=" "$1" | cut -d= -f2- | tr -d '"' || true; }
+envval() { [[ -f "$1" ]] && grep -m1 "^$2=" "$1" | cut -d= -f2- | tr -d '"' || true; }
+
+# Where stored URLs should point: the local MinIO as clients reach it
+# (localhost, or the NetBird IP when testing on the phone).
+LOCAL_MINIO=$(envval .env.local MINIO_PUBLIC_URL)
+LOCAL_MINIO=${LOCAL_MINIO:-http://localhost:9000}
+LOCAL_MINIO=${LOCAL_MINIO%/}
 
 # mariadb client inside the local container, as root (password from the
 # container's own env, so it never appears on this command line).
@@ -73,6 +78,8 @@ rewrite_urls() {
         host=$(envval .env MINIO_ENDPOINT); port=$(envval .env MINIO_PORT); pub=$(envval .env MINIO_PUBLIC_URL)
         [[ -n "$host" ]] && prefixes+=("http://$host:${port:-9000}")
         [[ -n "$pub" ]] && prefixes+=("${pub%/}")
+        # Rows written by the local stack itself before MINIO_PUBLIC_URL changed.
+        prefixes+=("http://localhost:9000")
     fi
     [[ ${#prefixes[@]} -gt 0 ]] || { echo "[urls] no source prefixes (pass them as arguments)"; return; }
     for old in "${prefixes[@]}"; do
