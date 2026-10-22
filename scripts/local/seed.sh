@@ -20,6 +20,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
+# One run at a time: a second run's DROP DATABASE under a load still in
+# progress breaks the first one mid-table (ERROR 1100 ... not locked).
+mkdir -p .local
+exec 9>.local/seed.lock
+flock -n 9 || { echo "[seed] another seed run is in progress — wait for it to finish" >&2; exit 1; }
+
 CONTAINER=souply-local-mariadb
 LOCAL_DB=souply_local
 DUMP_DIR=.local/dumps
