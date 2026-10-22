@@ -1,5 +1,6 @@
 import type { Request, Response, NextFunction } from 'express';
 import { verifySessionToken } from '../services/authService.js';
+import { sessionUserExists } from '../services/sessionUserCache.js';
 
 /**
  * Session identity for ANY logged-in user — anonymous or OAuth-verified.
@@ -57,9 +58,10 @@ export function getSessionToken(req: Request): string | null {
 }
 
 /**
- * Require a valid session token (anonymous OR verified). Sets req.authUserId.
- * 401 when absent/invalid. Never trust a userId in the body/params for identity —
- * this is the only trustworthy source.
+ * Require a valid session token (anonymous OR verified) whose user still exists
+ * (see sessionUserCache — an orphaned token 401s so the app can re-register).
+ * Sets req.authUserId. 401 when absent/invalid/orphaned. Never trust a userId in
+ * the body/params for identity — this is the only trustworthy source.
  */
 export async function requireUser(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
@@ -67,6 +69,10 @@ export async function requireUser(req: Request, res: Response, next: NextFunctio
         if (token) {
             const { userId } = await verifySessionToken(token);
             if (userId) {
+                if (!(await sessionUserExists(userId))) {
+                    res.status(401).json({ error: 'session-user-missing' });
+                    return;
+                }
                 req.authUserId = userId;
                 next();
                 return;

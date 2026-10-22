@@ -3,6 +3,7 @@ import { applyAggregateDelta, getMatchAggregate } from '../models/storeProductMa
 import { reevaluateMerge } from './swipeVoteService.js';
 import { deleteReceiptImage } from './storageService.js';
 import { stripReceiptPII } from '../util/receiptPII.js';
+import { forgetSessionUser } from './sessionUserCache.js';
 
 export type DeletionMode = 'anonymize' | 'purge';
 
@@ -100,6 +101,7 @@ export const deleteUser = async (
         await sanitizeReceiptParsedData(targetUserId);
         await deleteUserReceiptImages(targetUserId);
         await pool.query(`DELETE FROM User WHERE id = ?`, [targetUserId]);
+        forgetSessionUser(targetUserId);
         return { deleted: true, votesHandled: 0, mergesRevaluated: 0 };
     }
 
@@ -145,6 +147,7 @@ export const deleteUser = async (
         await connection.query(`DELETE FROM User WHERE id = ?`, [targetUserId]);
 
         await connection.commit();
+        forgetSessionUser(targetUserId);
         return { deleted: true, votesHandled: votes.length, mergesRevaluated };
     } catch (e) {
         await connection.rollback();

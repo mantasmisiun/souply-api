@@ -16,6 +16,12 @@ export const getUserById = async (id: string) => {
     return rows[0] || null;
 };
 
+/** PK-only existence probe — what the session middleware needs, without SELECT *. */
+export const userExists = async (id: string): Promise<boolean> => {
+    const [rows]: any = await pool.query('SELECT 1 FROM User WHERE id = ? LIMIT 1', [id]);
+    return rows.length > 0;
+};
+
 /**
  * Throttled "last seen" stamp. The `WHERE … AND lastActiveAt < NOW() - INTERVAL 5 MINUTE`
  * clause makes the UPDATE match-but-no-op for the typical case (active

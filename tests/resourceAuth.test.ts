@@ -169,7 +169,13 @@ describe('shopping lists — trip-derived membership', () => {
     it('a NON-trip-member still cannot toggle (403)', async () => {
         const STRANGER = 'resauth-cccc-cccc-cccc-cccccccccccc';
         await primeTokens(STRANGER);
-        expect((await asUser(app, STRANGER).patch(`/api/list-items/${tripItemId}/toggle`).send({ isChecked: true })).status).toBe(403);
+        // A real account that just isn't in the trip — a token with no User row 401s first.
+        await pool.query('INSERT INTO User (id, isAdmin, points) VALUES (?,0,0) ON DUPLICATE KEY UPDATE points=0', [STRANGER]);
+        try {
+            expect((await asUser(app, STRANGER).patch(`/api/list-items/${tripItemId}/toggle`).send({ isChecked: true })).status).toBe(403);
+        } finally {
+            await pool.query('DELETE FROM User WHERE id = ?', [STRANGER]);
+        }
     });
 });
 
@@ -365,5 +371,35 @@ describe('shared basket — shopping-list creation by a member', () => {
     it('a MEMBER can unwind the family shop they started (not 403)', async () => {
         const res = await asUser(app, MEMBER2).delete(`/api/shopping-lists/by-basket/${sharedId}`);
         expect(res.status).not.toBe(403);
+    });
+});
+
+// A validly signed token whose User row is gone (deleted on another device, a DB
+// restore) must 401 so the app's interceptor re-registers the device id and replays,
+// instead of 500-ing on the first FK it touches (Basket.userId → User).
+describe('orphaned session token — user row no longer exists', () => {
+    const GHOST = 'resauth-dddd-dddd-dddd-dddddddddddd';
+    const DOOMED = 'resauth-eeee-eeee-eeee-eeeeeeeeeeee';
+
+    beforeAll(async () => {
+        await primeTokens(GHOST, DOOMED);
+        await pool.query('DELETE FROM User WHERE id IN (?, ?)', [GHOST, DOOMED]);
+        await pool.query('INSERT INTO User (id, isAdmin, points) VALUES (?,0,0)', [DOOMED]);
+    });
+    afterAll(async () => {
+        await pool.query('DELETE FROM Basket WHERE userId IN (?, ?)', [GHOST, DOOMED]);
+        await pool.query('DELETE FROM User WHERE id IN (?, ?)', [GHOST, DOOMED]);
+    });
+
+    it('a token for a user that never existed → 401 session-user-missing, not a 500', async () => {
+        const res = await asUser(app, GHOST).post('/api/baskets').send({});
+        expect(res.status).toBe(401);
+        expect(res.body.error).toBe('session-user-missing');
+    });
+    it('after the user deletes their account, the same token 401s at once (cache evicted)', async () => {
+        expect((await asUser(app, DOOMED).get(`/api/users/${DOOMED}/profile`)).status).toBe(200); // now cached
+        expect((await asUser(app, DOOMED).delete(`/api/users/${DOOMED}`)).status).toBe(204);
+        const res = await asUser(app, DOOMED).post('/api/baskets').send({});
+        expect(res.status).toBe(401);
     });
 });

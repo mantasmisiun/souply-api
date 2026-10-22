@@ -81,7 +81,13 @@ describe('trip minting at persist time', () => {
         // A stranger cannot wipe the owner's lists.
         const STRANGER = 'trplk-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
         await primeTokens(STRANGER);
-        expect((await asUser(app, STRANGER).delete(`/api/baskets/${basketId}/shopping-lists`)).status).toBe(403);
+        // A real account that doesn't own the basket — a token with no User row 401s first.
+        await q('INSERT INTO User (id, isAdmin, points) VALUES (?,0,0) ON DUPLICATE KEY UPDATE points=0', [STRANGER]);
+        try {
+            expect((await asUser(app, STRANGER).delete(`/api/baskets/${basketId}/shopping-lists`)).status).toBe(403);
+        } finally {
+            await q('DELETE FROM User WHERE id = ?', [STRANGER]);
+        }
         expect(await q('SELECT id FROM ShoppingList WHERE basketId = ?', [basketId])).toHaveLength(2);
 
         // Owner replaces the selection: old lists gone, trip survives, re-create
