@@ -116,6 +116,13 @@ SQL
     echo "[scrub] users anonymised, push tokens + recovery attempts deleted"
 }
 
+# souply-web's local build signs in as this fixed id (VITE_DEV_USER_ID); a prod
+# copy doesn't contain it, so every write from the web would hit the User FK.
+ensure_dev_user() {
+    local_sql "$LOCAL_DB" -e "INSERT IGNORE INTO User (id, isAdmin, points) VALUES ('00000000-0000-0000-0000-000000000000', 0, 0)"
+    echo "[seed] dev user 00000000-… present"
+}
+
 has_table() {
     [[ "$(local_sql -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$LOCAL_DB' AND table_name='$1'")" == "1" ]]
 }
@@ -193,12 +200,14 @@ case "$cmd" in
         echo "[seed] saved $out ($(du -h "$out" | cut -f1))"
         load_dump "$out"
         scrub
+        ensure_dev_user
         rewrite_urls
         ;;
     file)
         require_container
         load_dump "${1:?usage: seed.sh file <dump.sql[.gz]>}"
         scrub
+        ensure_dev_user
         rewrite_urls
         ;;
     empty)
@@ -217,6 +226,7 @@ case "$cmd" in
     scrub)
         require_container
         scrub
+        ensure_dev_user
         ;;
     url-prefixes)
         require_container
