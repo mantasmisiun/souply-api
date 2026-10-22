@@ -124,6 +124,23 @@ CREATE TABLE `AdminReviewFlag` (
   CONSTRAINT `fk_arf_user` FOREIGN KEY (`flaggedBy`) REFERENCES `User` (`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
+DROP TABLE IF EXISTS `AdminScrapeVerification`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE `AdminScrapeVerification` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `chainId` int(11) NOT NULL,
+  `scrapeDate` date NOT NULL,
+  `productId` int(11) NOT NULL,
+  `status` enum('checked','flagged') NOT NULL,
+  `note` varchar(500) DEFAULT NULL,
+  `adminUserId` char(36) DEFAULT NULL,
+  `updatedAt` datetime NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_asv` (`chainId`,`scrapeDate`,`productId`),
+  KEY `idx_asv_day` (`chainId`,`scrapeDate`,`status`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
 DROP TABLE IF EXISTS `BaseProductLink`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!40101 SET character_set_client = utf8mb4 */;
@@ -211,6 +228,8 @@ CREATE TABLE `BasketTemplate` (
   `coverImage` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL CHECK (json_valid(`coverImage`)),
   `visitCount` int(11) NOT NULL DEFAULT 0,
   `editedAt` datetime DEFAULT NULL,
+  `sourceUrl` varchar(512) DEFAULT NULL,
+  `sourceSite` varchar(120) DEFAULT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `shareSlug` (`shareSlug`),
   KEY `idx_bt_user` (`userId`),
@@ -233,6 +252,7 @@ CREATE TABLE `BasketTemplateItem` (
   `snapAmount` decimal(10,3) DEFAULT NULL,
   `snapUnit` varchar(8) DEFAULT NULL,
   `snapImageUrl` varchar(512) DEFAULT NULL,
+  `isPantry` tinyint(1) NOT NULL DEFAULT 0,
   PRIMARY KEY (`id`),
   KEY `idx_bti_template_sort` (`templateId`,`sortOrder`),
   CONSTRAINT `fk_bti_template` FOREIGN KEY (`templateId`) REFERENCES `BasketTemplate` (`id`) ON DELETE CASCADE
@@ -248,6 +268,8 @@ CREATE TABLE `BetaSignup` (
   `platform` varchar(16) NOT NULL DEFAULT 'ios',
   `createdAt` datetime NOT NULL DEFAULT current_timestamp(),
   `invitedAt` datetime DEFAULT NULL,
+  `status` enum('pending','sent','failed') NOT NULL DEFAULT 'pending',
+  `error` text DEFAULT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_beta_email` (`email`)
 ) ENGINE=InnoDB AUTO_INCREMENT=4 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -288,7 +310,7 @@ CREATE TABLE `ClientVersionPolicy` (
   `message` varchar(512) DEFAULT NULL,
   `updatedAt` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
   PRIMARY KEY (`platform`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 DROP TABLE IF EXISTS `ClientVersionSighting`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
@@ -301,7 +323,7 @@ CREATE TABLE `ClientVersionSighting` (
   `updatedAt` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
   PRIMARY KEY (`platform`,`version`,`day`),
   KEY `idx_cvs_day` (`day`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 DROP TABLE IF EXISTS `DiscountedProductSummary`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
@@ -356,6 +378,52 @@ CREATE TABLE `FailedReceiptLog` (
   KEY `idx_frl_env` (`environment`,`createdAt`)
 ) ENGINE=InnoDB AUTO_INCREMENT=48 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
+DROP TABLE IF EXISTS `Household`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE `Household` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `createdByUserId` char(36) NOT NULL,
+  `name` varchar(255) DEFAULT NULL,
+  `createdAt` datetime NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+DROP TABLE IF EXISTS `HouseholdLedgerEvent`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE `HouseholdLedgerEvent` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `householdId` int(11) NOT NULL,
+  `type` enum('receipt_recorded','member_joined','member_left','settlement_proposed','settlement_confirmed','adjustment') NOT NULL,
+  `at` datetime(3) NOT NULL DEFAULT current_timestamp(3),
+  `receiptId` int(11) DEFAULT NULL,
+  `settlementId` varchar(64) DEFAULT NULL,
+  `actorUserId` char(36) DEFAULT NULL,
+  `payload` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL CHECK (json_valid(`payload`)),
+  `dedupeKey` varchar(191) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_hle_dedupe` (`householdId`,`dedupeKey`),
+  KEY `idx_hle_household` (`householdId`,`at`,`id`),
+  KEY `idx_hle_receipt` (`householdId`,`receiptId`),
+  KEY `idx_hle_settlement` (`householdId`,`settlementId`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+DROP TABLE IF EXISTS `HouseholdMember`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE `HouseholdMember` (
+  `userId` char(36) NOT NULL,
+  `householdId` int(11) NOT NULL,
+  `role` enum('owner','member') NOT NULL DEFAULT 'member',
+  `joinedAt` datetime NOT NULL DEFAULT current_timestamp(),
+  `leavingRequestedAt` datetime DEFAULT NULL,
+  `leavingRequestedBy` char(36) DEFAULT NULL,
+  PRIMARY KEY (`userId`),
+  KEY `idx_hm_household` (`householdId`),
+  KEY `idx_hm_leaving` (`householdId`,`leavingRequestedAt`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
 DROP TABLE IF EXISTS `ImagePropagationLog`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!40101 SET character_set_client = utf8mb4 */;
@@ -374,6 +442,47 @@ CREATE TABLE `ImagePropagationLog` (
   KEY `idx_actor` (`actor`,`createdAt`),
   CONSTRAINT `fk_ipl_sp` FOREIGN KEY (`spId`) REFERENCES `StoreProduct` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB AUTO_INCREMENT=1788 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+DROP TABLE IF EXISTS `InviteClaim`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE `InviteClaim` (
+  `tokenId` int(11) NOT NULL,
+  `userId` char(36) NOT NULL,
+  `claimedAt` datetime NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`tokenId`,`userId`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+DROP TABLE IF EXISTS `InviteToken`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE `InviteToken` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `code` char(12) NOT NULL,
+  `scope` enum('trip','household') NOT NULL,
+  `targetId` int(11) NOT NULL,
+  `createdByUserId` char(36) NOT NULL,
+  `revokedAt` datetime DEFAULT NULL,
+  `expiresAt` datetime DEFAULT NULL,
+  `createdAt` datetime NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_invite_code` (`code`),
+  KEY `idx_invite_target` (`scope`,`targetId`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+DROP TABLE IF EXISTS `Notification`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE `Notification` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `userId` char(36) NOT NULL,
+  `type` varchar(40) NOT NULL,
+  `payload` longtext DEFAULT NULL,
+  `readAt` datetime DEFAULT NULL,
+  `createdAt` datetime NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`id`),
+  KEY `idx_notification_user` (`userId`,`readAt`,`createdAt`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 DROP TABLE IF EXISTS `OrphanSwipeCandidate`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
@@ -432,6 +541,7 @@ CREATE TABLE `Price` (
   `price` decimal(10,2) NOT NULL,
   `promoPrice` decimal(10,2) DEFAULT NULL,
   `promoEnd` datetime DEFAULT NULL,
+  `validFrom` datetime DEFAULT NULL,
   `date` datetime DEFAULT current_timestamp(),
   `isFallback` tinyint(1) DEFAULT 0,
   `priceVerified` tinyint(1) DEFAULT 0,
@@ -447,6 +557,7 @@ CREATE TABLE `Price` (
   KEY `idx_price_receiptitem` (`receiptItemId`),
   KEY `idx_price_sp_date` (`storeProductId`,`date`),
   KEY `idx_price_value` (`price`,`date`),
+  KEY `idx_price_validfrom` (`validFrom`),
   CONSTRAINT `Price_ibfk_1` FOREIGN KEY (`storeProductId`) REFERENCES `StoreProduct` (`id`),
   CONSTRAINT `Price_ibfk_3` FOREIGN KEY (`storeId`) REFERENCES `Store` (`id`),
   CONSTRAINT `Price_ibfk_4` FOREIGN KEY (`receiptId`) REFERENCES `Receipt` (`id`),
@@ -463,11 +574,13 @@ CREATE TABLE `Product` (
   `mergedIntoId` int(11) DEFAULT NULL,
   `name` varchar(255) NOT NULL,
   `globalScore` decimal(10,4) NOT NULL DEFAULT 0.0000,
+  `categoryReviewPending` tinyint(1) NOT NULL DEFAULT 0,
   PRIMARY KEY (`id`),
   KEY `baseProductId` (`baseProductId`),
   KEY `idx_product_mergedIntoId` (`mergedIntoId`),
   KEY `idx_category_score` (`categoryId`,`globalScore` DESC),
   KEY `idx_global_score` (`globalScore` DESC),
+  KEY `idx_product_category_review` (`categoryReviewPending`),
   FULLTEXT KEY `idx_product_name_ft` (`name`),
   CONSTRAINT `Product_ibfk_1` FOREIGN KEY (`categoryId`) REFERENCES `Category` (`id`),
   CONSTRAINT `Product_ibfk_2` FOREIGN KEY (`baseProductId`) REFERENCES `Product` (`id`),
@@ -487,6 +600,21 @@ CREATE TABLE `ProductInteraction` (
   KEY `idx_pi_user_product` (`userId`,`productId`),
   KEY `idx_pi_product` (`productId`)
 ) ENGINE=InnoDB AUTO_INCREMENT=50 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+DROP TABLE IF EXISTS `PushToken`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE `PushToken` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `userId` char(36) NOT NULL,
+  `token` varchar(255) NOT NULL,
+  `platform` enum('ios','android') NOT NULL,
+  `createdAt` datetime NOT NULL DEFAULT current_timestamp(),
+  `updatedAt` datetime NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_pushtoken` (`token`),
+  KEY `idx_pushtoken_user` (`userId`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 DROP TABLE IF EXISTS `Receipt`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
@@ -522,6 +650,19 @@ CREATE TABLE `Receipt` (
   CONSTRAINT `Receipt_ibfk_2` FOREIGN KEY (`storeId`) REFERENCES `Store` (`id`),
   CONSTRAINT `fk_receipt_shoppinglist` FOREIGN KEY (`shoppingListId`) REFERENCES `ShoppingList` (`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB AUTO_INCREMENT=957 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+DROP TABLE IF EXISTS `ReceiptComparisonSnapshot`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE `ReceiptComparisonSnapshot` (
+  `receiptId` int(11) NOT NULL,
+  `paidTotal` decimal(10,2) NOT NULL,
+  `medianAltTotal` decimal(10,2) DEFAULT NULL,
+  `cheapestAltTotal` decimal(10,2) DEFAULT NULL,
+  `altCount` int(11) NOT NULL DEFAULT 0,
+  `computedAt` datetime NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`receiptId`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 DROP TABLE IF EXISTS `ReceiptItem`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
@@ -561,10 +702,12 @@ CREATE TABLE `ReceiptItem` (
   `extra` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL CHECK (json_valid(`extra`)),
   `createdAt` datetime NOT NULL DEFAULT current_timestamp(),
   `updatedAt` datetime NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  `isPersonal` tinyint(1) NOT NULL DEFAULT 0,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_receipt_line` (`receiptId`,`lineIdx`),
   KEY `idx_ri_receipt` (`receiptId`,`lineIdx`),
   KEY `idx_ri_sp` (`matchedSpId`),
+  KEY `idx_ri_scope` (`receiptId`,`isPersonal`),
   CONSTRAINT `fk_ri_receipt` FOREIGN KEY (`receiptId`) REFERENCES `Receipt` (`id`) ON DELETE CASCADE,
   CONSTRAINT `fk_ri_sp` FOREIGN KEY (`matchedSpId`) REFERENCES `StoreProduct` (`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB AUTO_INCREMENT=5137 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -754,6 +897,37 @@ CREATE TABLE `StoreProduct` (
   CONSTRAINT `StoreProduct_ibfk_2` FOREIGN KEY (`chainId`) REFERENCES `StoreChain` (`id`)
 ) ENGINE=InnoDB AUTO_INCREMENT=99076 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
+DROP TABLE IF EXISTS `StoreProductCode`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE `StoreProductCode` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `chainId` int(11) NOT NULL,
+  `code` varchar(16) NOT NULL,
+  `storeProductId` int(11) NOT NULL,
+  `updatedAt` datetime NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_spc_chain_code` (`chainId`,`code`),
+  KEY `idx_spc_sp` (`storeProductId`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+DROP TABLE IF EXISTS `StoreProductCodeEvidence`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE `StoreProductCodeEvidence` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `chainId` int(11) NOT NULL,
+  `code` varchar(16) NOT NULL,
+  `normalizedName` varchar(255) NOT NULL,
+  `printedName` varchar(255) NOT NULL,
+  `seenCount` int(11) NOT NULL DEFAULT 1,
+  `resolvedSpId` int(11) DEFAULT NULL,
+  `lastSeenAt` datetime NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_spce` (`chainId`,`code`,`normalizedName`),
+  KEY `idx_spce_code` (`chainId`,`code`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
 DROP TABLE IF EXISTS `StoreProductMatch`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!40101 SET character_set_client = utf8mb4 */;
@@ -840,6 +1014,23 @@ CREATE TABLE `StoreProductReceiptAliasVote` (
   CONSTRAINT `fk_aliasvote_alias` FOREIGN KEY (`aliasId`) REFERENCES `StoreProductReceiptAlias` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB AUTO_INCREMENT=133 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
+DROP TABLE IF EXISTS `StoreProductTranslation`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE `StoreProductTranslation` (
+  `id` int(10) unsigned NOT NULL AUTO_INCREMENT,
+  `storeProductId` int(11) NOT NULL,
+  `lang` char(2) NOT NULL,
+  `text` varchar(255) NOT NULL,
+  `normalized` varchar(255) NOT NULL,
+  `source` enum('machine','human') NOT NULL DEFAULT 'machine',
+  `createdAt` datetime NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_spt` (`storeProductId`,`lang`,`normalized`),
+  KEY `idx_spt_search` (`lang`,`normalized`),
+  KEY `idx_spt_sp` (`storeProductId`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
 DROP TABLE IF EXISTS `TemplateEngagementDay`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!40101 SET character_set_client = utf8mb4 */;
@@ -851,6 +1042,79 @@ CREATE TABLE `TemplateEngagementDay` (
   `createdAt` datetime NOT NULL DEFAULT current_timestamp(),
   PRIMARY KEY (`templateId`,`actorKey`,`kind`,`day`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+DROP TABLE IF EXISTS `Trip`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE `Trip` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `createdByUserId` char(36) NOT NULL,
+  `householdId` int(11) DEFAULT NULL,
+  `name` varchar(255) DEFAULT NULL,
+  `isAdHoc` tinyint(1) NOT NULL DEFAULT 0,
+  `scoreExempt` tinyint(1) NOT NULL DEFAULT 0,
+  `archivedAt` datetime DEFAULT NULL,
+  `createdAt` datetime NOT NULL DEFAULT current_timestamp(),
+  `updatedAt` datetime NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  PRIMARY KEY (`id`),
+  KEY `idx_trip_user` (`createdByUserId`,`archivedAt`),
+  KEY `idx_trip_household` (`householdId`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+DROP TABLE IF EXISTS `TripComparisonSnapshot`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE `TripComparisonSnapshot` (
+  `tripId` int(11) NOT NULL,
+  `paidTotal` decimal(10,2) NOT NULL,
+  `bestSingleTotal` decimal(10,2) DEFAULT NULL,
+  `bestStoreId` int(11) DEFAULT NULL,
+  `candidateCount` smallint(6) NOT NULL DEFAULT 0,
+  `unmatchedLines` smallint(6) NOT NULL DEFAULT 0,
+  `payload` longtext DEFAULT NULL,
+  `computedAt` datetime NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`tripId`),
+  CONSTRAINT `fk_tcs_trip` FOREIGN KEY (`tripId`) REFERENCES `Trip` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+DROP TABLE IF EXISTS `TripLineLink`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE `TripLineLink` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `tripId` int(11) NOT NULL,
+  `listItemId` int(11) NOT NULL,
+  `receiptItemId` int(11) NOT NULL,
+  `kind` enum('manual','suppressed') NOT NULL DEFAULT 'manual',
+  `createdByUserId` char(36) NOT NULL,
+  `createdAt` datetime NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_tll_pair` (`listItemId`,`receiptItemId`),
+  KEY `idx_tll_trip` (`tripId`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+DROP TABLE IF EXISTS `TripMember`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE `TripMember` (
+  `tripId` int(11) NOT NULL,
+  `userId` char(36) NOT NULL,
+  `role` enum('owner','member') NOT NULL DEFAULT 'member',
+  `joinedAt` datetime NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`tripId`,`userId`),
+  KEY `idx_tripmember_user` (`userId`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+DROP TABLE IF EXISTS `TripMemberBan`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE `TripMemberBan` (
+  `tripId` int(11) NOT NULL,
+  `userId` char(36) NOT NULL,
+  `bannedBy` char(36) DEFAULT NULL,
+  `bannedAt` datetime NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`tripId`,`userId`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 DROP TABLE IF EXISTS `User`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
@@ -930,182 +1194,3 @@ CREATE TABLE `UserStoreProductEquivalence` (
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*M!100616 SET NOTE_VERBOSITY=@OLD_NOTE_VERBOSITY */;
 
-
-
--- Souply 2.0 trip aggregate (sql/trip_foundation.sql)
-CREATE TABLE `Trip` (
-  `id` int(11) NOT NULL AUTO_INCREMENT,
-  `createdByUserId` char(36) NOT NULL,
-  `householdId` int(11) DEFAULT NULL,
-  `name` varchar(255) DEFAULT NULL,
-  `isAdHoc` tinyint(1) NOT NULL DEFAULT 0,
-  `scoreExempt` tinyint(1) NOT NULL DEFAULT 0,
-  `archivedAt` datetime DEFAULT NULL,
-  `createdAt` datetime NOT NULL DEFAULT current_timestamp(),
-  `updatedAt` datetime NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
-  PRIMARY KEY (`id`),
-  KEY `idx_trip_user` (`createdByUserId`,`archivedAt`),
-  KEY `idx_trip_household` (`householdId`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-CREATE TABLE `TripMember` (
-  `tripId` int(11) NOT NULL,
-  `userId` char(36) NOT NULL,
-  `role` enum('owner','member') NOT NULL DEFAULT 'member',
-  `joinedAt` datetime NOT NULL DEFAULT current_timestamp(),
-  PRIMARY KEY (`tripId`,`userId`),
-  KEY `idx_tripmember_user` (`userId`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-
--- Souply 2.0 search vocabulary (sql/storeproduct_translation.sql)
-CREATE TABLE `StoreProductTranslation` (
-  `id` int(10) unsigned NOT NULL AUTO_INCREMENT,
-  `storeProductId` int(11) NOT NULL,
-  `lang` char(2) NOT NULL,
-  `text` varchar(255) NOT NULL,
-  `normalized` varchar(255) NOT NULL,
-  `source` enum('machine','human') NOT NULL DEFAULT 'machine',
-  `createdAt` datetime NOT NULL DEFAULT current_timestamp(),
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uq_spt` (`storeProductId`,`lang`,`normalized`),
-  KEY `idx_spt_search` (`lang`,`normalized`),
-  KEY `idx_spt_sp` (`storeProductId`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-
--- Souply 2.0 households + invites (sql/household_invites.sql)
-CREATE TABLE `Household` (
-  `id` int(11) NOT NULL AUTO_INCREMENT,
-  `createdByUserId` char(36) NOT NULL,
-  `name` varchar(255) DEFAULT NULL,
-  `createdAt` datetime NOT NULL DEFAULT current_timestamp(),
-  PRIMARY KEY (`id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-CREATE TABLE `HouseholdMember` (
-  `userId` char(36) NOT NULL,
-  `householdId` int(11) NOT NULL,
-  `role` enum('owner','member') NOT NULL DEFAULT 'member',
-  `joinedAt` datetime NOT NULL DEFAULT current_timestamp(),
-  PRIMARY KEY (`userId`),
-  KEY `idx_hm_household` (`householdId`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-CREATE TABLE `InviteToken` (
-  `id` int(11) NOT NULL AUTO_INCREMENT,
-  `code` char(12) NOT NULL,
-  `scope` enum('trip','household') NOT NULL,
-  `targetId` int(11) NOT NULL,
-  `createdByUserId` char(36) NOT NULL,
-  `revokedAt` datetime DEFAULT NULL,
-  `expiresAt` datetime DEFAULT NULL,
-  `createdAt` datetime NOT NULL DEFAULT current_timestamp(),
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uq_invite_code` (`code`),
-  KEY `idx_invite_target` (`scope`,`targetId`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-CREATE TABLE `InviteClaim` (
-  `tokenId` int(11) NOT NULL,
-  `userId` char(36) NOT NULL,
-  `claimedAt` datetime NOT NULL DEFAULT current_timestamp(),
-  PRIMARY KEY (`tokenId`,`userId`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-DROP TABLE IF EXISTS `TripLineLink`;
-CREATE TABLE `TripLineLink` (
-  `id` int(11) NOT NULL AUTO_INCREMENT,
-  `tripId` int(11) NOT NULL,
-  `listItemId` int(11) NOT NULL,
-  `receiptItemId` int(11) NOT NULL,
-  `kind` enum('manual','suppressed') NOT NULL DEFAULT 'manual',
-  `createdByUserId` char(36) NOT NULL,
-  `createdAt` datetime NOT NULL DEFAULT current_timestamp(),
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uq_tll_pair` (`listItemId`,`receiptItemId`),
-  KEY `idx_tll_trip` (`tripId`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-DROP TABLE IF EXISTS `ReceiptComparisonSnapshot`;
-CREATE TABLE `ReceiptComparisonSnapshot` (
-  `receiptId` int(11) NOT NULL,
-  `paidTotal` decimal(10,2) NOT NULL,
-  `medianAltTotal` decimal(10,2) DEFAULT NULL,
-  `cheapestAltTotal` decimal(10,2) DEFAULT NULL,
-  `altCount` int(11) NOT NULL DEFAULT 0,
-  `computedAt` datetime NOT NULL DEFAULT current_timestamp(),
-  PRIMARY KEY (`receiptId`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-DROP TABLE IF EXISTS `PushToken`;
-CREATE TABLE `PushToken` (
-  `id` int(11) NOT NULL AUTO_INCREMENT,
-  `userId` char(36) NOT NULL,
-  `token` varchar(255) NOT NULL,
-  `platform` enum('ios','android') NOT NULL,
-  `createdAt` datetime NOT NULL DEFAULT current_timestamp(),
-  `updatedAt` datetime NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uq_pushtoken` (`token`),
-  KEY `idx_pushtoken_user` (`userId`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-DROP TABLE IF EXISTS `Notification`;
-CREATE TABLE `Notification` (
-  `id` int(11) NOT NULL AUTO_INCREMENT,
-  `userId` char(36) NOT NULL,
-  `type` varchar(40) NOT NULL,
-  `payload` longtext DEFAULT NULL,
-  `readAt` datetime DEFAULT NULL,
-  `createdAt` datetime NOT NULL DEFAULT current_timestamp(),
-  PRIMARY KEY (`id`),
-  KEY `idx_notification_user` (`userId`,`readAt`,`createdAt`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-CREATE TABLE `StoreProductCode` (
-  `id` int(11) NOT NULL AUTO_INCREMENT,
-  `chainId` int(11) NOT NULL,
-  `code` varchar(16) NOT NULL,
-  `storeProductId` int(11) NOT NULL,
-  `updatedAt` datetime NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uq_spc_chain_code` (`chainId`,`code`),
-  KEY `idx_spc_sp` (`storeProductId`)
-);
-
-CREATE TABLE `StoreProductCodeEvidence` (
-  `id` int(11) NOT NULL AUTO_INCREMENT,
-  `chainId` int(11) NOT NULL,
-  `code` varchar(16) NOT NULL,
-  `normalizedName` varchar(255) NOT NULL,
-  `printedName` varchar(255) NOT NULL,
-  `seenCount` int(11) NOT NULL DEFAULT 1,
-  `resolvedSpId` int(11) DEFAULT NULL,
-  `lastSeenAt` datetime NOT NULL DEFAULT current_timestamp(),
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uq_spce` (`chainId`,`code`,`normalizedName`),
-  KEY `idx_spce_code` (`chainId`,`code`)
-);
-
-CREATE TABLE `AdminScrapeVerification` (
-  `id` int(11) NOT NULL AUTO_INCREMENT,
-  `chainId` int(11) NOT NULL,
-  `scrapeDate` date NOT NULL,
-  `productId` int(11) NOT NULL,
-  `status` enum('checked','flagged') NOT NULL,
-  `note` varchar(500) DEFAULT NULL,
-  `adminUserId` char(36) DEFAULT NULL,
-  `updatedAt` datetime NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uq_asv` (`chainId`,`scrapeDate`,`productId`),
-  KEY `idx_asv_day` (`chainId`,`scrapeDate`,`status`)
-);
-
-CREATE TABLE `TripMemberBan` (
-  `tripId` int(11) NOT NULL,
-  `userId` char(36) NOT NULL,
-  `bannedBy` char(36) DEFAULT NULL,
-  `bannedAt` datetime NOT NULL DEFAULT current_timestamp(),
-  PRIMARY KEY (`tripId`,`userId`)
-);
