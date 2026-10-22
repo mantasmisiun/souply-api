@@ -106,11 +106,18 @@ UPDATE AdminInvite SET
     lastName  = IF(lastName IS NULL, NULL, 'Admin'),
     notes     = NULL,
     createdBy = 'local';
-UPDATE Household SET name = IF(name IS NULL, NULL, CONCAT('Household ', id));
-DELETE FROM PushToken;
-DELETE FROM AccountRecoveryAttempt;
 SQL
+    # Tables a prod dump may not have yet (it can lag dev's migrations).
+    if has_table Household; then
+        local_sql "$LOCAL_DB" -e "UPDATE Household SET name = IF(name IS NULL, NULL, CONCAT('Household ', id))"
+    fi
+    if has_table PushToken; then local_sql "$LOCAL_DB" -e "DELETE FROM PushToken"; fi
+    if has_table AccountRecoveryAttempt; then local_sql "$LOCAL_DB" -e "DELETE FROM AccountRecoveryAttempt"; fi
     echo "[scrub] users anonymised, push tokens + recovery attempts deleted"
+}
+
+has_table() {
+    [[ "$(local_sql -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$LOCAL_DB' AND table_name='$1'")" == "1" ]]
 }
 
 url_columns_sql() {
@@ -146,8 +153,12 @@ rewrite_urls() {
         local cfg
         cfg=$(envval .env.r2 URL_REWRITES)
         IFS=',' read -r -a pairs <<< "${cfg//\{local\}/$LOCAL_MINIO}"
-        # Rows written by the local stack itself before MINIO_PUBLIC_URL changed.
-        pairs+=("http://localhost:9000=$LOCAL_MINIO")
+        # Rows written by the local stack itself before MINIO_PUBLIC_URL changed,
+        # and receipts uploaded while prod still ran on OMV's MinIO (their
+        # objects were carried into R2 under the same keys).
+        pairs+=("http://localhost:9000=$LOCAL_MINIO"
+                "https://minio.manofoto.dpdns.org=$LOCAL_MINIO"
+                "http://192.168.1.212:9000=$LOCAL_MINIO")
     fi
     for pair in "${pairs[@]}"; do
         [[ -z "$pair" ]] && continue
