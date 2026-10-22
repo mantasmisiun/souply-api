@@ -29,6 +29,10 @@ receipts/iki/
 .env*
 !.env.example
 !.env.production.example
+!.env.local.example
+!.env.test.local.example
+# Local stack DB dumps (scripts/local/seed.sh) — real dev data
+.local/
 receipts/_recipes/slices_*/
 receipts/_recipes/verdicts_*/
 

@@ -5,6 +5,7 @@
   "main": "index.js",
   "scripts": {
     "dev": "nodemon --exec tsx src/index.ts --ignore receipts/",
+    "dev:local": "DOTENV_CONFIG_PATH=.env.local nodemon --exec tsx src/index.ts --ignore receipts/",
     "build": "tsc",
     "start": "node dist/souply-api/src/index.js",
     "receipts:batch": "tsx src/scripts/receiptBatch/importReceiptBatch.ts",
@@ -29,6 +30,9 @@
     "admin": "tsx src/scripts/adminCli.ts",
     "type": "module",
     "test": "NODE_ENV=test NODE_OPTIONS=--experimental-vm-modules jest --runInBand --forceExit",
+    "test:local": "DOTENV_CONFIG_PATH=.env.test.local NODE_ENV=test NODE_OPTIONS=--experimental-vm-modules jest --runInBand --forceExit",
+    "local:seed": "bash scripts/local/seed.sh",
+    "local:minio-init": "DOTENV_CONFIG_PATH=.env.local tsx src/scripts/localMinio.ts init",
     "prepare": "node .husky/install.mjs",
     "ocr:confusions": "tsx src/scripts/mineOcrConfusions.ts",
     "backfill:trips": "tsx src/scripts/backfillTrips.ts",
