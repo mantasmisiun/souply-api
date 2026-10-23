@@ -12,6 +12,7 @@ import {
 import { getVerifiedUser } from '../services/authService.js';
 import { uploadAvatar, avatarSignedUrl } from '../services/storageService.js';
 import { SESSION_COOKIE } from '../middleware/requireVerifiedUser.js';
+import { isValidAvatarColor, randomAvatarColor } from '../utils/avatarColor.js';
 
 const SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days, matches the JWT
 
@@ -125,6 +126,7 @@ export const oauthSignIn = async (req: Request, res: Response, next: NextFunctio
                 // raw value leaked to the web/app session and broke (gray /
                 // "not found" circle) once they rendered the login value.
                 avatarUrl: await avatarSignedUrl(user?.avatarUrl ?? null),
+                avatarColor: (user as any)?.avatarColor ?? null,
                 email: user?.email ?? null,
                 authProvider: user?.authProvider ?? null,
             },
@@ -157,6 +159,7 @@ export const fetchMe = async (req: Request, res: Response, next: NextFunction) =
             lastName: (user as any).lastName ?? null,
             bio: user.bio,
             avatarUrl: await avatarSignedUrl(user.avatarUrl),
+            avatarColor: (user as any).avatarColor ?? null,
             email: user.email,
             authProvider: user.authProvider,
         });
@@ -215,9 +218,12 @@ export const patchProfile = async (req: Request, res: Response, next: NextFuncti
             res.status(401).json({ error: 'auth-required' });
             return;
         }
-        const { displayName, bio, firstName, lastName } = req.body ?? {};
+        const { displayName, bio, firstName, lastName, avatarColor } = req.body ?? {};
         const updates: string[] = [];
         const args: any[] = [];
+        // Did this request give the user a (non-empty) name? Any of the name
+        // fields counts — used to auto-assign an avatar colour below.
+        let namedThisRequest = false;
         for (const [field, value] of [['firstName', firstName], ['lastName', lastName]] as const) {
             if (value !== undefined) {
                 if (typeof value !== 'string' || value.length > 100) {
@@ -226,6 +232,7 @@ export const patchProfile = async (req: Request, res: Response, next: NextFuncti
                 }
                 updates.push(`${field} = ?`);
                 args.push(value.trim() || null);
+                if (field === 'firstName' && value.trim()) namedThisRequest = true;
             }
         }
         if (displayName !== undefined) {
@@ -235,6 +242,21 @@ export const patchProfile = async (req: Request, res: Response, next: NextFuncti
             }
             updates.push('displayName = ?');
             args.push(displayName.trim() || null);
+            if (displayName.trim()) namedThisRequest = true;
+        }
+        if (avatarColor !== undefined) {
+            if (avatarColor !== null && !isValidAvatarColor(avatarColor)) {
+                res.status(400).json({ error: 'bad-avatarColor' });
+                return;
+            }
+            updates.push('avatarColor = ?');
+            args.push(avatarColor);
+        } else if (namedThisRequest) {
+            // First time a user names themselves, give them a random avatar
+            // colour if they have none yet — so a circle appears immediately
+            // (they can recolour it any time). COALESCE keeps an existing pick.
+            updates.push('avatarColor = COALESCE(avatarColor, ?)');
+            args.push(randomAvatarColor());
         }
         if (bio !== undefined) {
             if (typeof bio !== 'string' || bio.length > BIO_MAX) {

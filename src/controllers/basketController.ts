@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import pool from '../config/db.js';
+import { ensureTripForBasket } from '../services/tripLinkService.js';
 import { createBasket, getBasketsByUserId, getBasketById, updateBasketUpdatedAt, updateBasketStatus, updateBasketSavedAmount, deleteBasket, updateBasketName, getUserDraftBasketId, markBasketCalculated, updateBasketCheapestTotal } from '../models/basketModel.js';
 import { copiedSourceTemplateId } from '../util/basketCopy.js';
 
@@ -32,6 +33,7 @@ export const copyBasket = async (req: Request, res: Response, next: NextFunction
         try {
             await conn.beginTransaction();
             const newId = await createBasket(userId, newSourceTemplateId, conn);
+            await ensureTripForBasket(newId, userId, conn);
             const [items]: any = await conn.query(
                 `SELECT productId, quantity, matchMode, anchorAmount, anchorUnit FROM BasketItem WHERE basketId = ?`,
                 [sourceId],
@@ -72,12 +74,23 @@ export const addBasket = async (req: Request, res: Response, next: NextFunction)
         // a create request before either has updated the client's cached
         // draftBasketId. The frontend still serializes creates via an
         // in-flight promise (basketUtils.ts), but this is the backstop.
-        const existing = await getUserDraftBasketId(userId);
-        if (existing !== null) {
-            res.status(200).json({ id: existing, userId, existing: true });
-            return;
+        //
+        // `forceNew` opts OUT of the idempotency: the user EXPLICITLY chose
+        // "new basket" in the chooser, so we mint a fresh draft even when one
+        // exists. The previous draft is kept (offered as its own chooser row
+        // until it ages out) — multiple concurrent personal drafts are allowed
+        // in the 2.0 chooser model.
+        const forceNew = req.body?.forceNew === true;
+        if (!forceNew) {
+            const existing = await getUserDraftBasketId(userId);
+            if (existing !== null) {
+                res.status(200).json({ id: existing, userId, existing: true });
+                return;
+            }
         }
         const id = await createBasket(userId);
+        // 2.0: every basket lives inside a trip from birth (idempotent).
+        await ensureTripForBasket(id, userId);
         res.status(201).json({ id, userId, existing: false });
     } catch (error) {
         next(error);
@@ -87,7 +100,7 @@ export const addBasket = async (req: Request, res: Response, next: NextFunction)
 export const fetchBasketsByUserId = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const userId = String(req.params.userId);
-        const baskets = await getBasketsByUserId(userId);
+        const baskets = await getBasketsByUserId(userId, req.locale);
         res.json(baskets);
     } catch (error) {
         next(error);
@@ -224,6 +237,11 @@ export const calculateBasket = async (req: Request, res: Response, next: NextFun
             storeIds: Array.isArray(rawStoreIds)
                 ? rawStoreIds.map(Number).filter((n: number) => n > 0 && Number.isFinite(n))
                 : undefined,
+            // Viewer → enables the PERSONAL merge tier. Falls back to the basket
+            // owner inside the service when absent (anon requests).
+            userId: req.authUserId,
+            // Saver mode: cheapest acceptable substitute over exact-product precision.
+            saver: req.body?.saver === true,
         };
 
         const { calculateBasketForStores } = await import('../services/basketCalculationService.js');
@@ -280,13 +298,14 @@ export const getBasketStorePrices = async (req: Request, res: Response, next: Ne
         const rawLng = Number(req.body?.lng);
         const lat = Number.isFinite(rawLat) ? rawLat : undefined;
         const lng = Number.isFinite(rawLng) ? rawLng : undefined;
+        const saver = req.body?.saver === true;
 
-        // Cache version: a basket edit (updatedAt) AND the user's location
-        // (rounded to ~100 m) both bust the cache — either can change a store's
-        // result (price / distance).
+        // Cache version: a basket edit (updatedAt), the user's location (rounded
+        // to ~100 m) AND the saver flag all bust the cache — each can change a
+        // store's result (price / distance / substitute).
         const ver = (basket as any).updatedAt ? new Date((basket as any).updatedAt).getTime() : 0;
         const locKey = `${lat != null ? lat.toFixed(3) : '_'}:${lng != null ? lng.toFixed(3) : '_'}`;
-        const keyOf = (sid: number) => `${id}:${ver}:${locKey}:${sid}`;
+        const keyOf = (sid: number) => `${id}:${ver}:${locKey}:${saver ? 's' : '_'}:${sid}`;
 
         const now = Date.now();
         const cached: any[] = [];
@@ -300,7 +319,7 @@ export const getBasketStorePrices = async (req: Request, res: Response, next: Ne
         let computed: any[] = [];
         if (toCompute.length) {
             const { calculateBasketForStores } = await import('../services/basketCalculationService.js');
-            computed = await calculateBasketForStores(id, { storeIds: toCompute, lat, lng }) as any[];
+            computed = await calculateBasketForStores(id, { storeIds: toCompute, lat, lng, userId: req.authUserId, saver }) as any[];
             for (const r of computed) {
                 const sid = Number(r?.storeId);
                 if (sid > 0) STORE_PRICE_CACHE.set(keyOf(sid), { ts: now, result: r });

@@ -1,0 +1,126 @@
+# LOCAL — the whole stack on the dev PC, no OMV/Oracle dependency.
+#
+# Two ways to run it:
+#
+#   1. Infra only (daily dev): MariaDB + MinIO in docker, api/web from npm with
+#      hot reload.
+#        docker compose -f docker-compose.local.yml up -d
+#        npm run local:minio-init           # once per fresh volume
+#        npm run local:seed -- dev          # or: file <dump.sql.gz> | empty
+#        npm run dev:local                  # api  → :3000 (reads .env.local)
+#        cd ../souply-web && npm run dev    # web  → :5173 (reads .env.local)
+#
+#   2. Full (prod-shaped images, what staging/prod run):
+#        docker compose -f docker-compose.local.yml --profile full up -d --build
+#      api → :3000, web → :5174. Stop `npm run dev:local` first — same port.
+#
+# Credentials here are local-only. MariaDB binds to 127.0.0.1; MinIO and api/web
+# listen on the host and stay behind ufw (default DROP), which only opens
+# 3000/9000 on the NetBird interface (wt0). Phone testing: USB
+# (`adb reverse tcp:3000 tcp:3000 && adb reverse tcp:9000 tcp:9000`) or NetBird —
+# then MINIO_PUBLIC_URL in .env.local is this PC's NetBird IP, so stored image
+# URLs open on the phone too.
+#
+# api/web use host networking so MINIO_PUBLIC_URL=http://localhost:9000 means
+# the same thing to the API, the browser and the phone (storageService signs
+# AND uploads against the public URL — a container-local hostname would break
+# the SigV4 signature for clients).
+name: souply-local
+services:
+  mariadb:
+    image: mariadb:11.4            # same major as prod (docker-compose.oracle.yml)
+    container_name: souply-local-mariadb
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --max-allowed-packet=256M   # receipt wordsDump rows in dev dumps are large
+    environment:
+      MARIADB_ROOT_PASSWORD: souply_local_root
+      MARIADB_DATABASE: souply_local
+      MARIADB_USER: souply_app
+      MARIADB_PASSWORD: souply_local
+    ports:
+      - "127.0.0.1:3306:3306"
+    volumes:
+      - mariadb_data:/var/lib/mysql
+      - ./scripts/local/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  minio:
+    # MinIO stopped publishing community images (docker.io/quay.io minio/minio
+    # are gone). Chainguard rebuilds it from source; their free tier is
+    # latest-only, so it's pinned by digest. If the pull ever 404s, take the
+    # current digest of cgr.dev/chainguard/minio:latest.
+    image: cgr.dev/chainguard/minio@sha256:d88920d6a50bd0b088223b688be3b76c63e6205dbe494437f67ba1240ea12880
+    container_name: souply-local-minio
+    restart: unless-stopped
+    # Image runs as uid 65532 but a fresh named volume is root-owned.
+    user: "0:0"
+    # Host networking, not published ports: docker's port publishing bypasses
+    # ufw, while a host-network listener stays behind it. The phone reaches
+    # :9000 over NetBird only because ufw allows it on wt0.
+    network_mode: host
+    command: ["server", "/data", "--address", ":9000", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: souply_local
+      MINIO_ROOT_PASSWORD: souply_local_minio
+    volumes:
+      - minio_data:/data
+
+  souply-api:
+    profiles: ["full"]
+    build:
+      context: ..                  # parent dir — includes the shared/ sibling
+      dockerfile: souply-api/Dockerfile
+    image: souply-api:local
+    container_name: souply-local-api
+    restart: unless-stopped        # the phone build expects it up whenever the PC is
+    network_mode: host             # PORT=3000 from .env.local
+    env_file:
+      - .env.local
+    environment:
+      NODE_ENV: production         # same as staging/prod; dev auth rides on ALLOW_DEV_AUTH_HEADER
+      # NODE_ENV=production switches Sentry on with the committed prod DSN — an
+      # empty DSN keeps local errors out of the real project (config/sentry.ts).
+      SENTRY_DSN: ""
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      minio:
+        condition: service_started
+
+  souply-web:
+    profiles: ["full"]
+    build:
+      context: ../souply-web
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: http://localhost:3000
+        VITE_GOOGLE_CLIENT_ID: 554949767682-oqvvbc2a3klc1tedqvbdotmg4uqkj5s3.apps.googleusercontent.com
+        VITE_APP_ENV: dev
+        # Google sign-in only allows localhost:5173 as an origin, so this
+        # build logs in through the dev bypass instead.
+        VITE_ENABLE_DEV_AUTH: "1"
+        VITE_DEV_USER_ID: 00000000-0000-0000-0000-000000000000
+        VITE_DEV_USER_NAME: Local Dev
+        VITE_DEV_USER_HANDLE: localdev
+    image: souply-web:local
+    container_name: souply-local-web
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      PORT: "5174"                 # in the API's built-in CORS allow-list
+      SSR_API_URL: http://localhost:3000
+      PUBLIC_ORIGIN: http://localhost:5174
+    depends_on:
+      - souply-api
+
+volumes:
+  mariadb_data:
+  minio_data:

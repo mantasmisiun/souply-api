@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { addPrice, fetchLatestPriceByStoreProduct, fetchLatestPricesAcrossStores, fetchActivePromoPrices, fetchPriceHistoryForStoreProduct, fetchPriceHistoryAllStores } from '../controllers/priceController.js';
+import { addPrice, fetchLatestPriceByStoreProduct, fetchLatestPricesAcrossStores, fetchActivePromoPrices, fetchPriceHistoryForStoreProduct, fetchPriceHistoryAllStores, fetchPriceHistoryBulk } from '../controllers/priceController.js';
 
 const router = Router();
 
@@ -139,6 +139,28 @@ router.get('/prices/promos', fetchActivePromoPrices);
 
 
 router.get('/prices/store-product/:storeProductId/history', fetchPriceHistoryAllStores);
+
+/**
+ * @swagger
+ * /api/prices/store-products/history:
+ *   get:
+ *     summary: Bulk price history for multiple store products (all stores, deduped)
+ *     tags: [Price]
+ *     parameters:
+ *       - in: query
+ *         name: spIds
+ *         schema:
+ *           type: string
+ *         required: true
+ *         description: Comma-separated store product ids (max 50)
+ *     responses:
+ *       200:
+ *         description: "`{ histories: { [storeProductId]: rows[] } }` — same row shape as the single-SP history endpoint"
+ *       400:
+ *         description: Missing/invalid spIds or more than 50 ids
+ */
+// GET /api/prices/store-products/history?spIds=1,2,3 — bulk variant (perf audit #13)
+router.get('/prices/store-products/history', fetchPriceHistoryBulk);
 
 // GET /api/prices/store-product/:storeProductId/store/:storeId/history
 router.get('/prices/store-product/:storeProductId/store/:storeId/history', fetchPriceHistoryForStoreProduct);

@@ -1,14 +1,18 @@
 import { Request, Response, NextFunction } from "express";
+import { ensureTripForReceipt, relinkReceiptToListTrip, notifyTripReceiptPublished } from '../services/tripLinkService.js';
 import sharp from "sharp";
 import pool from "../config/db.js";
-import { createReceipt, getReceiptsByUserId, getReceiptById, deleteReceipt, getReceiptItemsWithDetails, updateReceiptFilePath, getReceiptByReceiptNoAndUser, getReceiptByAnyReceiptNoAndUser, getReceiptByAnyReceiptNoStoreDate, completeMandatorySwipes } from "../models/receiptModel.js";
+import { isTripMember } from "../models/tripModel.js";
+import { createReceipt, getReceiptsByUserId, getReceiptById, deleteReceipt, getReceiptItemsWithDetails, updateReceiptFilePath, getReceiptByReceiptNoAndUser, getReceiptByAnyReceiptNoAndUser, getReceiptByAnyReceiptNoStoreDate, completeMandatorySwipes, userHideReceipt, reactivateHiddenReceipt, reassignAndReactivateReceipt } from "../models/receiptModel.js";
+import { linkReceiptToList } from "../models/shoppingListModel.js";
 import {
     getSwipeCandidatesWithDetails,
     getVerifiedStoreProductIdsForReceipt,
     getVotedPairKeysForUser,
 } from "../models/receiptSwipeCandidateModel.js";
 import { buildSwipeQueue } from "../services/swipeQueueService.js";
-import { getMandatoryQueue } from "../services/mandatoryQueueService.js";
+import { getMandatoryQueue, getServedResolveLineIdxs } from "../services/mandatoryQueueService.js";
+import { snapshotReceiptComparison } from "../services/comparisonSnapshotService.js";
 import { normalizeReceiptNo, normalizeReceiptNos } from "../utils/receiptMetadata.js";
 import { getReverificationPairKeysForReceipt } from "../models/userEquivalenceModel.js";
 import {
@@ -16,14 +20,22 @@ import {
     upsertReceiptLineIssue,
     type IssueFlags,
 } from "../models/receiptLineIssueModel.js";
-import { getPresignedUrl } from "../services/storageService.js";
+import { getPresignedUrl, deleteReceiptImage } from "../services/storageService.js";
 import { persistReceiptPrices, applyReceiptAutosave } from '../services/receiptSaveService.js';
+import { getReceiptItemLines, replaceReceiptItems } from '../models/receiptItemModel.js';
+import { getCachedChainCandidates, getCachedCrossChainCandidates } from '../models/storeProductModel.js';
+import { findBestProductMatches } from '../utils/productMatcher.js';
+import { computeItemConfidence } from '../services/itemConfidence.js';
+import { RECOGNITION } from '../../../shared/recognitionConfig.js';
+import { healReceipt as computeHealPlan, isSameReceipt, type HealLine } from '../services/receiptHealService.js';
 import { withDeadlockRetry } from '../utils/withDeadlockRetry.js';
 import { demoteReceiptLineDirect } from '../services/receiptLineDemotionService.js';
 import { buildReceiptResolveCards, markServedResolveLinesAsked } from '../services/receiptResolveQueueService.js';
 import { castReceiptLineVote } from '../services/receiptLineVoteService.js';
 import { markLineResolved } from '../models/receiptLineResolutionModel.js';
 import { deleteReceiptWithData } from '../services/receiptDeletionService.js';
+import { assertReceiptDeletable } from '../services/receiptFamilyScope.js';
+import { HouseholdActionError } from '../services/householdMembership.js';
 import { getReceiptComparison } from '../services/receiptComparisonService.js';
 import { hydrateReceiptCategoriesIfNeeded } from '../services/receiptHydrationService.js';
 import { generateDefaultTemplate } from '../services/defaultTemplateService.js';
@@ -38,28 +50,57 @@ export const markSwipesDone = async (req: Request, res: Response, next: NextFunc
     try {
         const id = Number(req.params.id);
         if (!Number.isFinite(id)) { res.status(400).json({ error: 'Invalid id' }); return; }
+        // Snapshot the publish state BEFORE clearing, so we notify trip members
+        // exactly once — on the real transition to published (a receipt with a
+        // mandatory queue becoming cleared). Already-published rows (required 0,
+        // handled at link time) and repeat calls don't re-notify.
+        const beforeSwipes = await getReceiptById(id);
         await completeMandatorySwipes(id);
-        // Terminal ask-once: the resolve-queue Card-B lines offered this session that
-        // the user did NOT resolve (a vote marks them resolved_user at the /vote path)
-        // are recorded 'asked' now, so future sessions don't re-nag them. This is the
-        // ledger write that USED to live on the resolve-queue GET — moved here (a real
-        // completion event) so serving the queue stays idempotent and re-fetches never
-        // delete the user's cards mid-session. Fail-soft: a ledger hiccup must not fail
-        // the completion the client already acted on.
+        // Terminal ask-once: mark ONLY the Card-B lines actually SERVED this session
+        // 'asked' (those the user did NOT resolve stay suppressed; a vote already marked
+        // resolved_user at the /vote path). The served set is the client's own reported
+        // indices when present, else the mandatory-queue snapshot the client was served —
+        // NEVER a fresh recompute at completion, which would pick the NEXT top uncertain
+        // lines (already-resolved served lines now excluded) and burn lines the user never
+        // saw, permanently hiding them from future voluntary sessions. This is the ledger
+        // write that USED to live on the resolve-queue GET — moved here (a real completion
+        // event) so serving the queue stays idempotent and re-fetches never delete the
+        // user's cards mid-session. Fail-soft: a ledger hiccup must not fail the completion
+        // the client already acted on.
         try {
-            const conn = await (pool as any).getConnection();
-            try {
-                await conn.beginTransaction();
-                await markServedResolveLinesAsked(id, conn);
-                await conn.commit();
-            } catch (e) {
-                await conn.rollback();
-                throw e;
-            } finally {
-                conn.release();
+            const bodyIdxs = Array.isArray(req.body?.servedResolveLineIdxs)
+                ? (req.body.servedResolveLineIdxs as unknown[])
+                      .map((v) => Number(v))
+                      .filter((n) => Number.isInteger(n) && n >= 0)
+                : null;
+            const servedIdxs = bodyIdxs ?? (req.authUserId ? getServedResolveLineIdxs(req.authUserId, id) : null);
+            if (servedIdxs && servedIdxs.length > 0) {
+                const conn = await (pool as any).getConnection();
+                try {
+                    await conn.beginTransaction();
+                    await markServedResolveLinesAsked(id, conn, servedIdxs);
+                    await conn.commit();
+                } catch (e) {
+                    await conn.rollback();
+                    throw e;
+                } finally {
+                    conn.release();
+                }
             }
         } catch (ledgerErr) {
             console.warn(`[markSwipesDone] ask-once ledger write failed for receipt ${id}:`, ledgerErr);
+        }
+        // Publish notification (re-timed off link): a queued receipt attached to
+        // a trip has just cleared → tell the other members. Fire only on the true
+        // pending→published transition to avoid double-fire with the link path.
+        if (beforeSwipes && beforeSwipes.tripId != null) {
+            const reqd = Number(beforeSwipes.mandatorySwipesRequired ?? 0);
+            const done = Number(beforeSwipes.mandatorySwipesCompleted ?? 0);
+            const wasPublished = reqd === 0 || done >= reqd;
+            if (!wasPublished) {
+                notifyTripReceiptPublished(id).catch(e =>
+                    console.warn('[markSwipesDone] publish notify failed:', e?.message ?? e));
+            }
         }
         res.json({ ok: true });
     } catch (error) {
@@ -67,11 +108,25 @@ export const markSwipesDone = async (req: Request, res: Response, next: NextFunc
     }
 };
 
+/**
+ * GET /users/:userId/receipts — blob-free rows (see getReceiptsByUserId) with
+ * optional keyset pagination.
+ *
+ * BACKWARDS COMPAT: clients that pass NO pagination params get the legacy
+ * plain-array response (first page, default limit). Passing `limit` and/or
+ * `cursor` opts into the `{ receipts, nextCursor }` envelope — old builds
+ * never send those params, so their `Array.isArray(data)` handling keeps
+ * working unchanged.
+ */
 export const fetchReceiptsByUserId = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const userId = String(req.params.userId);
-        const receipts = await getReceiptsByUserId(userId);
-        res.json(receipts);
+        const wantsEnvelope = req.query.limit !== undefined || req.query.cursor !== undefined;
+        const page = await getReceiptsByUserId(userId, {
+            limit: req.query.limit !== undefined ? Number(req.query.limit) : undefined,
+            cursor: typeof req.query.cursor === 'string' ? req.query.cursor : undefined,
+        });
+        res.json(wantsEnvelope ? page : page.receipts);
     } catch (error) {
         next(error);
     }
@@ -114,12 +169,135 @@ export const removeReceipt = async (req: Request, res: Response, next: NextFunct
             res.status(400).json({ error: 'Invalid receipt ID' });
             return;
         }
+        // §8 — a receipt counted into a household ledger can never be deleted,
+        // not even by the dev purge: its shares are already inside other
+        // people's balances. Correction goes through an `adjustment` (§4.4).
+        try {
+            await assertReceiptDeletable(id);
+        } catch (e) {
+            if (e instanceof HouseholdActionError) {
+                res.status(e.status).json({
+                    error: e.code,
+                    message: 'This receipt is counted in a family ledger and cannot be deleted',
+                });
+                return;
+            }
+            throw e;
+        }
         const result = await deleteReceiptWithData(id);
         if (!result.deleted) {
             res.status(404).json({ error: 'Receipt not found' });
             return;
         }
         res.status(200).json(result);
+    } catch (error) {
+        next(error);
+    }
+};
+
+/**
+ * DELETE /api/receipts/:id/user
+ *
+ * User-facing "remove this scan" BEFORE the mandatory swipe queue is cleared.
+ * Soft-hides the receipt from every user-facing list (userDeletedAt), detaches
+ * it from its trip/list, and deletes the stored photo — but KEEPS the shared
+ * Price / ReceiptItem / learning rows (unlike the dev-only hard purge). Because
+ * the prices survive, a later re-upload of the same paper un-hides + re-links
+ * the row instead of erroring (see createReceiptFromOcr).
+ *
+ * GATE: allowed only while the mandatory queue is NOT cleared. "Cleared" =
+ * required > 0 AND completed >= required — the paid-for swipe work is done, so
+ * the row must stay; only the photo may be dropped (DELETE /:id/image → 423
+ * points the client there). required === 0 (no queue) counts as NOT cleared.
+ *
+ * Ownership is proven by requireReceiptOwner middleware.
+ */
+export const hideReceiptForUser = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const id = Number(req.params.id);
+        if (isNaN(id)) {
+            res.status(400).json({ error: 'Invalid receipt ID' });
+            return;
+        }
+        const receipt = await getReceiptById(id);
+        if (!receipt) {
+            res.status(404).json({ error: 'Receipt not found' });
+            return;
+        }
+        // §8 — checked BEFORE the swipe gate: "counted into the ledger" is the
+        // stronger and more permanent refusal of the two, and unlike the swipe
+        // gate there is no alternative route (the photo-only delete below is
+        // still allowed — dropping the image moves no money).
+        try {
+            await assertReceiptDeletable(id);
+        } catch (e) {
+            if (e instanceof HouseholdActionError) {
+                res.status(e.status).json({
+                    error: e.code,
+                    message: 'This receipt is counted in a family ledger and cannot be removed',
+                });
+                return;
+            }
+            throw e;
+        }
+        const required = Number(receipt.mandatorySwipesRequired ?? 0);
+        const completed = Number(receipt.mandatorySwipesCompleted ?? 0);
+        const cleared = required > 0 && completed >= required;
+        if (cleared) {
+            res.status(423).json({
+                error: 'swipes-cleared',
+                message: 'Mandatory swipes are done — only the photo can be deleted now',
+            });
+            return;
+        }
+        const filePath = typeof receipt.filePath === 'string' ? receipt.filePath : null;
+        await userHideReceipt(id);
+        // MinIO is not transactional — do it after the DB write, best-effort. A
+        // stranded object is harmless and a missing one is fine, so a failure here
+        // must not fail the hide the client already acted on.
+        try {
+            await deleteReceiptImage(filePath);
+        } catch (e: any) {
+            console.warn(`[hideReceipt] image delete failed for receipt ${id}:`, e?.message ?? e);
+        }
+        res.status(200).json({ ok: true, hidden: true });
+    } catch (error) {
+        next(error);
+    }
+};
+
+/**
+ * DELETE /api/receipts/:id/image
+ *
+ * Photo-only delete (post-swipe): drop the stored MinIO image and clear
+ * filePath. The Receipt row, ReceiptItem, Price and trip link all stay intact.
+ * Allowed regardless of swipe state — this is the alternative the hide gate
+ * (423) points the client to once the mandatory queue is cleared.
+ *
+ * Ownership is proven by requireReceiptOwner middleware.
+ */
+export const deleteReceiptImageOnly = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const id = Number(req.params.id);
+        if (isNaN(id)) {
+            res.status(400).json({ error: 'Invalid receipt ID' });
+            return;
+        }
+        const receipt = await getReceiptById(id);
+        if (!receipt) {
+            res.status(404).json({ error: 'Receipt not found' });
+            return;
+        }
+        const filePath = typeof receipt.filePath === 'string' ? receipt.filePath : null;
+        try {
+            await deleteReceiptImage(filePath);
+        } catch (e: any) {
+            console.warn(`[deleteReceiptImage] MinIO delete failed for receipt ${id}:`, e?.message ?? e);
+        }
+        // filePath is NOT NULL — empty it (matches the createReceipt `filePath || ''`
+        // convention). Keeps the row + prices + trip link untouched.
+        await updateReceiptFilePath(id, '');
+        res.status(200).json({ ok: true, imageDeleted: true });
     } catch (error) {
         next(error);
     }
@@ -211,6 +389,26 @@ export const createReceiptFromOcr = async (req: Request, res: Response, next: Ne
             res.status(400).json({ error: 'auth and parsedData are required' });
             return;
         }
+        // Shared re-link for a reactivated (un-hidden) receipt — mirrors a fresh
+        // upload's trip/list wiring and restores the photo if the body carried one.
+        // A list-scoped upload points the receipt at the list's trip (like the link
+        // endpoint); a bare upload re-mints an ad-hoc trip (ensureTripForReceipt is a
+        // no-op when tripId is already set, and hide/relinquish nulled it).
+        const relinkReactivatedReceipt = async (rowId: number) => {
+            if (filePath) {
+                try { await updateReceiptFilePath(rowId, filePath); }
+                catch (e: any) { console.warn(`[reactivate] filePath restore failed for receipt ${rowId}:`, e?.message ?? e); }
+            }
+            const reListId = Number.isFinite(Number(req.body?.shoppingListId)) && Number(req.body.shoppingListId) > 0
+                ? Number(req.body.shoppingListId)
+                : null;
+            if (reListId != null) {
+                await linkReceiptToList(rowId, reListId);
+                await relinkReceiptToListTrip(rowId, reListId);
+            } else {
+                await ensureTripForReceipt(rowId, String(userId), null);
+            }
+        };
         // Reject duplicates early so re-photographing the same receipt doesn't
         // create parallel records. IKI synthesizes a `{date}-{time}-{cents}-iki-receipt`
         // number specifically so this check works when the receipt format has no
@@ -228,6 +426,18 @@ export const createReceiptFromOcr = async (req: Request, res: Response, next: Ne
             const existing = (await getReceiptByAnyReceiptNoAndUser(candidateReceiptNos, String(userId)))
                 ?? (candidateReceiptNo ? await getReceiptByReceiptNoAndUser(candidateReceiptNo, String(userId)) : null);
             if (existing) {
+                // RE-UPLOAD OF A HIDDEN RECEIPT: the user removed this scan pre-swipe
+                // (DELETE /receipts/:id/user set userDeletedAt, detached trip/list, wiped
+                // the photo) but its idempotent Price rows were KEPT. Re-photographing the
+                // same paper should ATTACH it back, not 409. Un-hide, re-link to the new
+                // upload's context, and re-store the photo — WITHOUT re-ingesting prices
+                // (they were kept) or re-firing the receipt_buy interaction.
+                if (existing.userDeletedAt != null) {
+                    await reactivateHiddenReceipt(existing.id);
+                    await relinkReactivatedReceipt(existing.id);
+                    res.status(200).json({ reactivated: true, receiptId: existing.id });
+                    return;
+                }
                 // Same-user duplicate. The most common real-world cause is the ABORT-THEN-RETRY
                 // case (receipt-238): the first POST exceeded the client timeout, the server
                 // committed anyway, and the retry collides here. Hand back everything the client
@@ -264,6 +474,32 @@ export const createReceiptFromOcr = async (req: Request, res: Response, next: Ne
                     candidateReceiptNos, Number(dupStoreId), String(dupDate), String(userId),
                 );
                 if (other) {
+                    // RELINQUISHED CROSS-USER RECEIPT: the colliding row was HIDDEN by
+                    // its original uploader (userDeletedAt set, prices kept). One row per
+                    // physical receipt — so instead of 409, hand it to THIS uploader:
+                    // clear the hide + transfer ownership (userId + uploaderUserId), then
+                    // re-link to the new upload's context. Prices/learning stay put; no
+                    // receipt_buy re-fire.
+                    if (other.userDeletedAt != null) {
+                        await reassignAndReactivateReceipt(other.id, String(userId));
+                        await relinkReactivatedReceipt(other.id);
+                        res.status(200).json({ reactivated: true, receiptId: other.id });
+                        return;
+                    }
+                    // Souply 2.0 SAME-TRIP EXEMPTION: a fellow trip member
+                    // re-uploading the same physical receipt is EXPECTED
+                    // ("either can upload") — hand back the existing receipt
+                    // so the client links it instead of erroring out.
+                    if (other.tripId != null && (await isTripMember(Number(other.tripId), String(userId)))) {
+                        res.status(409).json({
+                            error: 'duplicate',
+                            sameTrip: true,
+                            tripId: Number(other.tripId),
+                            receiptId: Number(other.id),
+                            message: 'Receipt already uploaded by a trip member',
+                        });
+                        return;
+                    }
                     res.status(409).json({
                         error: 'duplicate',
                         crossAccount: true,
@@ -315,6 +551,12 @@ export const createReceiptFromOcr = async (req: Request, res: Response, next: Ne
             generateDefaultTemplate(String(userId)).catch(e =>
                 console.warn('[defaultTemplate] generation failed:', e?.message),
             );
+            // 2.0: a bare upload becomes an AD-HOC trip (born stage 5,
+            // scoreExempt). List uploads get re-pointed at the list's trip by
+            // the link endpoint moments later (relinkReceiptToListTrip).
+            ensureTripForReceipt(receiptId, String(userId), null).catch(e =>
+                console.warn('[tripLink] ad-hoc trip mint failed:', e?.message),
+            );
         } catch (err: any) {
             // Best-effort cleanup of the orphaned Receipt row on ANY persist failure —
             // createReceipt inserted the bare row BEFORE the (rolled-back) save
@@ -329,6 +571,28 @@ export const createReceiptFromOcr = async (req: Request, res: Response, next: Ne
                 console.warn('Failed to clean up orphan receipt', receiptId, cleanupErr);
             }
             if (err?.code === 'ER_DUP_ENTRY' && /unique_receipt/i.test(String(err?.sqlMessage ?? ''))) {
+                // Before declaring cross-account, check whether the colliding row is a
+                // RELINQUISHED (hidden) receipt — the upfront witness check can miss it
+                // when only the exact canonical collides. If so, transfer + reactivate
+                // it to this uploader instead of erroring (same as branch above).
+                try {
+                    const dupStoreId = parsedData.header?.storeId ?? null;
+                    const dupDate = parsedData.footer?.date ?? null;
+                    if (candidateReceiptNos.length && dupStoreId != null && dupDate) {
+                        const hidden = await getReceiptByAnyReceiptNoStoreDate(
+                            candidateReceiptNos, Number(dupStoreId), String(dupDate),
+                        );
+                        if (hidden && hidden.userDeletedAt != null) {
+                            await reassignAndReactivateReceipt(hidden.id, String(userId));
+                            await relinkReactivatedReceipt(hidden.id);
+                            res.status(200).json({ reactivated: true, receiptId: hidden.id });
+                            return;
+                        }
+                    }
+                } catch (reErr: any) {
+                    console.warn('[reactivate] cross-user hidden-row transfer failed:', reErr?.message ?? reErr);
+                    // fall through to the crossAccount 409
+                }
                 // Cross-account: a DIFFERENT user already uploaded this
                 // physical receipt. Flag it so the client doesn't tell the
                 // current user "you already uploaded this" (they didn't) and
@@ -980,6 +1244,13 @@ export const submitReceiptLineVote = async (req: Request, res: Response, next: N
             await markLineResolved(receiptId, lineIdx, 'user', vote, conn);
             await conn.commit();
             res.json({ ok: true, line: line ?? null });
+            // A line-mutating vote (link OR demote) changes the cross-store comparison —
+            // recompute the FROZEN ReceiptComparisonSnapshot so Sutaupyta + Planavimas
+            // (storeChoice) adapt to the new knowledge. Fire-and-forget + idempotent; it
+            // re-reads getReceiptById which already reflects the just-committed link, and
+            // it covers the VOLUNTARY path (which never calls /complete-swipes).
+            if (line) void snapshotReceiptComparison(receiptId).catch((e) =>
+                console.warn(`[vote] snapshot recompute failed r${receiptId}:`, (e as Error)?.message));
         } catch (e) {
             await conn.rollback();
             throw e;
@@ -1159,4 +1430,280 @@ export const fetchMandatoryQueue = async (req: Request, res: Response, next: Nex
     } catch (error) {
         next(error);
     }
+};
+
+// ── RETAKE / HEAL ─────────────────────────────────────────────────────────────
+// POST /receipts/:id/heal — a retake is a SECOND observation of the SAME receipt.
+// The app re-runs the on-device OCR+parse+match and posts the candidate parse; we
+// align it against the stored lines and heal (best-of, never-downgrade), then
+// replace the item set in place — kept lines stay identical (their SP survives),
+// only healed/inserted lines re-swipe. Different receipt → 409 (client offers a
+// full replace). Owner-gated by the `owns` middleware on the route.
+
+const lineTotalOf = (l: any): number => {
+    const unit = (l?.promoPrice != null && Number(l.promoPrice) > 0) ? Number(l.promoPrice) : Number(l?.price);
+    return (Number.isFinite(unit) ? unit : 0) * (Number(l?.quantity) > 0 ? Number(l.quantity) : 1);
+};
+const confScore = (ic: any): number => {
+    if (ic == null) return 0.5;
+    if (typeof ic === 'number') return ic;
+    if (typeof ic === 'object' && typeof ic.score === 'number') return ic.score;
+    return 0.5;
+};
+const toHealLine = (l: any): HealLine<any> => ({
+    price: lineTotalOf(l),
+    quantity: Number(l?.quantity) > 0 ? Number(l.quantity) : 1,
+    name: typeof l?.name === 'string' ? l.name : '',
+    matched: l?.storeProductId != null && Number(l.storeProductId) > 0,
+    confirmed: !!l?.matchConfirmed,
+    confidence: confScore(l?.itemConfidence),
+    implausible: !!l?.priceImplausible,
+    ref: l,
+});
+
+export const healReceiptFromRetake = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const receiptId = Number(req.params.id);
+        const parsedData = req.body?.parsedData;
+        const newFilePath = typeof req.body?.filePath === 'string' && req.body.filePath ? req.body.filePath : null;
+        // The client uploads the retake IMAGE separately (after this call), so it
+        // signals here that the stored image is being replaced → adopt the retake's
+        // geometry (regions/dims) so the bands + crops line up with the new photo.
+        const swapImage = req.body?.swapImage === true || newFilePath != null;
+        if (!Number.isFinite(receiptId) || !parsedData) { res.status(400).json({ error: 'receiptId and parsedData required' }); return; }
+
+        const [[receipt]]: any = await pool.query('SELECT id, parsedData, filePath FROM Receipt WHERE id = ?', [receiptId]);
+        if (!receipt) { res.status(404).json({ error: 'not found' }); return; }
+        const existingParsed = typeof receipt.parsedData === 'string' ? JSON.parse(receipt.parsedData) : (receipt.parsedData ?? {});
+
+        // Same-receipt guard — a retake of a DIFFERENT receipt aborts (→ full replace).
+        const numOrNull = (v: any): number | null => (v != null && Number.isFinite(Number(v)) ? Number(v) : null);
+        const identity = (pd: any) => ({
+            chainId: numOrNull(pd?.header?.chainId),
+            receiptNo: pd?.footer?.receiptNo != null ? String(pd.footer.receiptNo) : null,
+            // ALL printed id forms — so a retake that garbled one form still matches on another.
+            receiptNos: Array.isArray(pd?.footer?.receiptNos)
+                ? pd.footer.receiptNos.filter((v: any) => typeof v === 'string')
+                : null,
+            date: pd?.footer?.date != null ? String(pd.footer.date) : null,
+            total: numOrNull(pd?.footer?.total),
+        });
+        if (!isSameReceipt(identity(existingParsed), identity(parsedData))) {
+            res.status(409).json({ error: 'different-receipt' });
+            return;
+        }
+
+        const existingLines = await getReceiptItemLines(receiptId);
+        const candidateLines: any[] = Array.isArray(parsedData.products) ? parsedData.products : [];
+        const total = numOrNull(existingParsed?.footer?.total);
+        const plan = computeHealPlan(existingLines.map(toHealLine), candidateLines.map(toHealLine), total);
+
+        // No improvement → touch nothing (don't reset the user's completed swipes).
+        if (plan.healedCount === 0 && plan.insertedCount === 0) {
+            // No line improvement → leave the ITEMS (and completed swipes) untouched.
+            // A retake still delivers fresh reproducibility geometry the stored blob
+            // may lack: `wordsDump` (the off-device reparse input). Persist it into
+            // parsedData ONLY (never the products/items) so a same-parse retake still
+            // makes the receipt reparseable — the interactive scan stores wordsDump,
+            // but a queue/heal receipt otherwise never gets one.
+            const candWd = (parsedData as any)?.wordsDump;
+            let wordsDumpStored = false;
+            if (candWd != null && JSON.stringify(existingParsed?.wordsDump ?? null) !== JSON.stringify(candWd)) {
+                const nextParsed = { ...existingParsed, wordsDump: candWd };
+                await pool.query('UPDATE Receipt SET parsedData = ? WHERE id = ?', [JSON.stringify(nextParsed), receiptId]);
+                wordsDumpStored = true;
+            }
+            res.json({ changed: false, healed: 0, inserted: 0, kept: plan.keptCount, wordsDumpStored });
+            return;
+        }
+
+        // Splice the healed line set from the two parsed-line lists.
+        const healedLines = plan.lines.map((pl) => {
+            if (pl.op === 'inserted') return { ...(pl.candidate!.ref as any) };
+            const base: any = { ...(pl.existing!.ref as any) };
+            // The stored image becomes the RETAKE photo, so a line's crop geometry
+            // must come from the retake (candidate) — keeping the OLD region would
+            // crop the new image at stale coordinates. (Retake-missed lines have no
+            // candidate → keep the old region; they're rare.)
+            if (pl.candidate?.ref) {
+                const c: any = pl.candidate.ref;
+                base.region = c.region ?? base.region;
+                base.rawLines = c.rawLines ?? base.rawLines;
+            }
+            if (pl.op !== 'healed') return base;
+            base.name = pl.name;
+            if (pl.takeCandidatePrice && pl.candidate?.ref) {
+                const c: any = pl.candidate.ref;
+                base.price = c.price; base.promoPrice = c.promoPrice; base.quantity = c.quantity;
+                base.unit = c.unit; base.pricePerUnit = c.pricePerUnit; base.amount = c.amount; base.sizeUnit = c.sizeUnit;
+                base.priceImplausible = false;
+            }
+            if (pl.takeCandidateMatch && pl.candidate?.ref) {
+                const c: any = pl.candidate.ref;
+                base.storeProductId = c.storeProductId;
+                base.matchedName = c.matchedName;
+                base.storeProductImageUrl = c.storeProductImageUrl;
+                base.matchConfidence = c.matchConfidence;
+                base.categoryId = c.categoryId; base.categoryName = c.categoryName; base.categoryL2Name = c.categoryL2Name;
+                base.itemConfidence = c.itemConfidence; base.altMatches = c.altMatches;
+                base.matchSource = 'heal';
+                base.matchConfirmed = false; // healed match must be re-verified
+            }
+            return base;
+        });
+
+        // RE-MATCH unmatched lines against the CURRENT server catalogue. The
+        // original scan matched against a staler catalogue / worse OCR, leaving
+        // altMatches empty — so nothing could auto-apply AND the voluntary crop
+        // queue had no candidate to offer. This re-runs the SAME matcher the scan
+        // uses (findBestProductMatches): confident same-chain hits auto-apply, the
+        // rest get populated altMatches (→ crop cards) + kept surface-eligible (S3).
+        const rematchChainId = numOrNull(existingParsed?.header?.chainId);
+        let rematched = 0;
+        if (rematchChainId != null) {
+            try {
+                const cands = await getCachedChainCandidates(rematchChainId, req.locale);
+                const autoApply = RECOGNITION.match.autoApplyThreshold;
+                for (const line of healedLines) {
+                    const nm = String(line.name ?? '');
+                    if (line.storeProductId != null && Number(line.storeProductId) > 0) {
+                        // Already matched (kept/heal). Recompute a band-less confidence
+                        // (heal-applied lines were persisted without a computed band);
+                        // leave good ones untouched so a confirmed line isn't disturbed.
+                        const ic: any = line.itemConfidence;
+                        if (nm && (!ic || typeof ic.band !== 'string')) {
+                            line.itemConfidence = computeItemConfidence({
+                                nameConf: Number(line.matchConfidence) || 0.9, nameText: nm,
+                                priceVerified: !!line.priceVerified, viaPromo: false, gapToRunnerUp: 0,
+                                source: 'reused', priceImplausible: !!line.priceImplausible,
+                                userConfirmed: !!line.matchConfirmed,
+                            });
+                        }
+                        continue;
+                    }
+                    if (!nm) continue;
+                    let ms = findBestProductMatches(nm, null, line.unit ?? null, cands, undefined, undefined, !!line.isWeighable);
+                    let crossChain = false;
+                    if (ms.length === 0) {
+                        const xc = await getCachedCrossChainCandidates(rematchChainId, req.locale);
+                        ms = findBestProductMatches(nm, null, line.unit ?? null, xc, RECOGNITION.match.minConfidenceCrossChain, undefined, !!line.isWeighable);
+                        crossChain = ms.length > 0;
+                    }
+                    // Store candidates (strip the big image urls — never rendered from altMatches).
+                    line.altMatches = ms.map((m: any) => { const { imageUrl: _drop, ...rest } = m; return rest; });
+                    const gap = ms.length >= 2 ? ms[0].confidence - ms[1].confidence : 0;
+                    if (ms.length > 0 && ms[0].confidence >= autoApply && !crossChain) {
+                        const top: any = ms[0];
+                        line.storeProductId = top.storeProductId;
+                        line.matchedName = top.name;
+                        line.matchConfidence = top.confidence;
+                        line.matchConfirmed = false;
+                        line.matchSource = 'heal-rematch';
+                        // Consistent confidence for a matched line — no stale unmatched veto.
+                        line.itemConfidence = computeItemConfidence({
+                            nameConf: top.confidence, nameText: nm, priceVerified: false, viaPromo: false,
+                            gapToRunnerUp: gap, source: 'reused', priceImplausible: !!line.priceImplausible,
+                        });
+                        rematched++;
+                    } else {
+                        // Unmatched (candidates or none) → a clean 'unmatched' confidence
+                        // (band S3 + the honest veto) so a crop card can still surface it.
+                        line.itemConfidence = computeItemConfidence({
+                            nameConf: ms.length > 0 ? ms[0].confidence : 0, nameText: nm, priceVerified: false,
+                            viaPromo: false, gapToRunnerUp: gap, source: 'unmatched', priceImplausible: !!line.priceImplausible,
+                        });
+                    }
+                }
+            } catch (e) {
+                console.warn(`[heal] re-match failed for receipt ${receiptId}:`, (e as Error)?.message);
+            }
+        }
+
+        const conn = await (pool as any).getConnection();
+        try {
+            await conn.beginTransaction();
+            await replaceReceiptItems(receiptId, healedLines, conn);
+            // NB: mandatory swipes are NOT reset — that would re-lock the stats and
+            // bounce the user into a fresh swipe flow. Healed lines that are still
+            // uncertain surface through the voluntary "identify products" queue.
+            // GEOMETRY comes from the RETAKE parse: the stored image is now the
+            // retake photo, so header/footer band regions (address, PVM, date, time,
+            // total, receipt-no) + the image dims + product crops must all come from
+            // the candidate — keeping the OLD regions draws every band at stale
+            // coordinates (shifted overlays / crops "between products"). We keep only
+            // the TRUSTED identity VALUES (they cleared the capture gate). No new image
+            // → keep the existing geometry (nothing was swapped).
+            const mergedParsed = !swapImage
+                ? { ...existingParsed, products: healedLines }
+                : {
+                    ...parsedData, // retake: header, image, footer.lineRegions
+                    footer: {
+                        ...(parsedData?.footer ?? {}),
+                        receiptNo: existingParsed?.footer?.receiptNo ?? parsedData?.footer?.receiptNo,
+                        receiptNos: existingParsed?.footer?.receiptNos ?? parsedData?.footer?.receiptNos,
+                        date: existingParsed?.footer?.date ?? parsedData?.footer?.date,
+                        time: existingParsed?.footer?.time ?? parsedData?.footer?.time,
+                        total: existingParsed?.footer?.total ?? parsedData?.footer?.total,
+                        totalSavings: existingParsed?.footer?.totalSavings ?? parsedData?.footer?.totalSavings,
+                    },
+                    products: healedLines,
+                };
+            const params: any[] = [JSON.stringify(mergedParsed)];
+            let sql = 'UPDATE Receipt SET parsedData = ?';
+            if (newFilePath) { sql += ', filePath = ?'; params.push(newFilePath); }
+            sql += ' WHERE id = ?'; params.push(receiptId);
+            await conn.query(sql, params);
+            await conn.commit();
+        } catch (e) {
+            await conn.rollback();
+            throw e;
+        } finally {
+            conn.release();
+        }
+
+        // Re-freeze the cross-store comparison against the healed line set.
+        snapshotReceiptComparison(receiptId).catch((e) =>
+            console.warn(`[heal] snapshot recompute failed for receipt ${receiptId}:`, (e as Error)?.message));
+
+        res.json({
+            changed: true,
+            healed: plan.healedCount,
+            inserted: plan.insertedCount,
+            kept: plan.keptCount,
+            rematched,
+        });
+    } catch (error) { next(error); }
+};
+
+// POST /receipts/:id/dev-replace — DEV-ONLY full re-parse REPLACE.
+// The retake/heal endpoint above MERGES conservatively (keeps existing plausible line values), so a
+// parser change that only CORRECTS an already-priced line (e.g. removing a phantom discount) never
+// surfaces on an already-stored receipt. This endpoint overwrites the receipt's lines + blob
+// ENTIRELY with the fresh parse, so the dev re-run button can verify parser changes on the cached
+// photo. Refused in production (like the dev hard-purge) so it can never clobber a real receipt.
+export const devReplaceReceiptParse = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        if (process.env.NODE_ENV === 'production') { res.status(403).json({ error: 'dev-only' }); return; }
+        const receiptId = Number(req.params.id);
+        const parsedData = req.body?.parsedData;
+        if (!Number.isFinite(receiptId) || !parsedData) { res.status(400).json({ error: 'receiptId and parsedData required' }); return; }
+        const [[receipt]]: any = await pool.query('SELECT id FROM Receipt WHERE id = ?', [receiptId]);
+        if (!receipt) { res.status(404).json({ error: 'not found' }); return; }
+
+        const products = Array.isArray(parsedData.products) ? parsedData.products : [];
+        const conn = await (pool as any).getConnection();
+        try {
+            await conn.beginTransaction();
+            await replaceReceiptItems(receiptId, products, conn);
+            // Overwrite the whole blob so wordsDump/footer/header/regions match the fresh parse
+            // (products[] are re-derived from ReceiptItem on read, per the ReceiptItem migration).
+            await conn.query('UPDATE Receipt SET parsedData = ? WHERE id = ?', [JSON.stringify(parsedData), receiptId]);
+            await conn.commit();
+        } catch (e) { await conn.rollback(); throw e; } finally { conn.release(); }
+
+        snapshotReceiptComparison(receiptId).catch((e) =>
+            console.warn(`[dev-replace] snapshot recompute failed for receipt ${receiptId}:`, (e as Error)?.message));
+
+        res.json({ changed: true, replaced: products.length });
+    } catch (error) { next(error); }
 };

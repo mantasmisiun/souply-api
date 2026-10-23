@@ -1,5 +1,6 @@
 import pool from '../config/db.js';
 import { notifyTelegram } from '../scrapers/shared/telegramAlert.js';
+import { forgetSessionUser } from './sessionUserCache.js';
 
 /**
  * Merges the fresh-install UUID into a recovered UUID atomically.
@@ -110,6 +111,7 @@ export async function mergeFreshIntoRecovered(
             stage = 'delete_fresh_user_fast_path';
             await conn.query('DELETE FROM User WHERE id = ?', [freshId]);
             await conn.commit();
+            forgetSessionUser(freshId);
             return snapshot;
         }
 
@@ -254,6 +256,7 @@ export async function mergeFreshIntoRecovered(
         await conn.query('DELETE FROM User WHERE id = ?', [freshId]);
 
         await conn.commit();
+        forgetSessionUser(freshId);
         return snapshot;
     } catch (err: any) {
         try { await conn.rollback(); } catch { /* nothing more to do */ }

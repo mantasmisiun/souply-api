@@ -1,7 +1,9 @@
 import { chromium } from 'playwright-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+import type { Page } from 'playwright';
 import { parseSize } from '../shared/parseSize.js';
 import { upsertPromo } from '../shared/promoUpsert.js';
+import { joinBrand } from '../shared/net.js';
 import { notifyTelegram } from '../shared/telegramAlert.js';
 
 chromium.use(StealthPlugin());
@@ -14,12 +16,27 @@ const OFFERS_URL = `${BASE_URL}/aciu-akcijos`;
 interface BarboraProduct {
     id: string;
     title: string;
+    brand_name?: string | null;
     price?: number;
     retail_price?: number;
     image?: string;
     big_image?: string;
     ShowInOffersTo?: string;
+    category_name_full_path?: string | null;
+    comparative_unit?: string | null;          // "kg" | "l" | "vnt" …
+    comparative_unit_price?: number | null;    // € per comparative unit (current price)
     units?: Array<{ price?: number; retail_price?: number }>;
+}
+
+/** One quick retry on a transient navigation failure — a single blip shouldn't
+ *  drop a subcategory (the outer runScraperWithRetry layer waits 1h). */
+async function gotoWithRetry(page: Page, url: string, timeout: number): Promise<void> {
+    try {
+        await page.goto(url, { waitUntil: 'load', timeout });
+    } catch {
+        await page.waitForTimeout(1500);
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout });
+    }
 }
 
 function extractFromHtml(html: string): BarboraProduct[] {
@@ -33,14 +50,14 @@ function extractSubcategorySlugs(html: string): string[] {
     return [...new Set(matches.map(m => m[1]))];
 }
 
-async function fetchAllProducts(): Promise<BarboraProduct[]> {
+export async function fetchAllProducts(): Promise<BarboraProduct[]> {
     const browser = await chromium.launch({ headless: true });
     try {
         const page = await browser.newPage();
 
         // Main page — also gets us past Cloudflare for subsequent navigations.
         // Rocket Loader defers inline scripts; wait for sidebar links to appear.
-        await page.goto(OFFERS_URL, { waitUntil: 'load', timeout: 60000 });
+        await gotoWithRetry(page, OFFERS_URL, 60000);
         await page.waitForFunction(
             () => document.querySelector('a.category-item--title') !== null,
             { timeout: 15000 },
@@ -54,7 +71,7 @@ async function fetchAllProducts(): Promise<BarboraProduct[]> {
         console.log(`[Barbora] Main page: ${byId.size} products, ${slugs.length} subcategories`);
 
         for (const slug of slugs) {
-            await page.goto(`${BASE_URL}/aciu-akcijos/${slug}`, { waitUntil: 'load', timeout: 30000 });
+            await gotoWithRetry(page, `${BASE_URL}/aciu-akcijos/${slug}`, 30000);
             html = await page.content();
             const before = byId.size;
             extractFromHtml(html).forEach(p => { if (!byId.has(p.id)) byId.set(p.id, p); });
@@ -73,9 +90,13 @@ interface PricedProduct {
     regularPrice: number;
     promoEnd: Date;
     imageUrl: string | null;
+    siteCategory: string | null;
+    /** Pack size derived from €/kg|€/l comparative price when the title has none. */
+    derivedAmount: number | null;
+    derivedUnit: string | null;
 }
 
-function resolvePrice(p: BarboraProduct): PricedProduct | null {
+export function resolvePrice(p: BarboraProduct): PricedProduct | null {
     if (!p.ShowInOffersTo) return null;
 
     const promoEnd = new Date(p.ShowInOffersTo);
@@ -87,12 +108,30 @@ function resolvePrice(p: BarboraProduct): PricedProduct | null {
 
     if (promoPrice <= 0 || regularPrice <= 0 || promoPrice >= regularPrice) return null;
 
+    // Pack size from the comparative price (€/kg, €/l): amount = price / rate.
+    // Only trusted within sane grocery bounds; the CURRENT price is the promo
+    // price on the offers page, so divide promo by the comparative rate.
+    let derivedAmount: number | null = null;
+    let derivedUnit: string | null = null;
+    const compUnit = (p.comparative_unit ?? '').toLowerCase();
+    const rate = p.comparative_unit_price ?? 0;
+    if ((compUnit === 'kg' || compUnit === 'l') && rate > 0) {
+        const qty = promoPrice / rate; // in kg or l
+        if (qty >= 0.005 && qty <= 25) {
+            if (qty < 1) { derivedAmount = Math.round(qty * 1000); derivedUnit = compUnit === 'kg' ? 'g' : 'ml'; }
+            else { derivedAmount = +qty.toFixed(3); derivedUnit = compUnit; }
+        }
+    }
+
     return {
         raw: p,
         promoPrice,
         regularPrice,
         promoEnd,
         imageUrl: p.big_image ?? p.image ?? null,
+        siteCategory: (p.category_name_full_path ?? null)?.slice(0, 255) ?? null,
+        derivedAmount,
+        derivedUnit,
     };
 }
 
@@ -108,14 +147,22 @@ export async function runBarboraPromoScraper(): Promise<void> {
         for (let i = 0; i < products.length; i++) {
             const item = products[i];
             try {
-                const { storeProductName, amount, unit, isWeighable } = parseSize(item.raw.title);
+                // Brand into the name (dedup-safe) — same convention as Lidl.
+                const parsed = parseSize(joinBrand(item.raw.brand_name, item.raw.title));
+                let { amount, unit } = parsed;
+                // Comparative-price size only fills a MISSING size — never overrides
+                // one parsed from the title (title is authoritative).
+                if (amount == null && item.derivedAmount != null) {
+                    amount = item.derivedAmount; unit = item.derivedUnit;
+                }
                 const result = await upsertPromo({
                     chainId: BARBORA_CHAIN_ID,
-                    storeProductName,
+                    storeProductName: parsed.storeProductName,
                     amount,
                     unit,
-                    isWeighable,
+                    isWeighable: parsed.isWeighable,
                     imageUrl: item.imageUrl,
+                    siteCategory: item.siteCategory,
                     regularPrice: item.regularPrice,
                     promoPrice: item.promoPrice,
                     promoEnd: item.promoEnd,

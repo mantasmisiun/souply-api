@@ -5,7 +5,10 @@ import {
     loadCanonicalsForProducts,
     attachCanonicalFields,
 } from '../services/productCanonical.js';
+import { attachUnitPriceBadges } from '../services/productBadge.js';
 import { RECOGNITION } from '../../../shared/recognitionConfig.js';
+import { localizedProductNameSql, type Locale } from '../middleware/locale.js';
+import { productSearchClauses } from '../utils/productSearchMatch.js';
 
 type Connection = typeof pool | any;
 
@@ -61,25 +64,112 @@ export const createProduct = async (
     return result.insertId;
 };
 
-const PRODUCT_WITH_IMAGES_SELECT = `
-    p.id, p.categoryId, p.baseProductId, p.name,
-    (SELECT JSON_ARRAYAGG(spi.imageUrl)
-     FROM StoreProduct spi
-     WHERE spi.productId = p.id AND spi.imageUrl IS NOT NULL) AS imageUrls
+// Locale-aware: LT is a no-op (p.name + plain image aggregate); EN resolves the
+// shortest English SP translation and leads the images with that SP's photo.
+const productWithImagesSelect = (locale: Locale): string => {
+    const loc = localizedProductNameSql(locale);
+    return `
+    p.id, p.categoryId, p.baseProductId, ${loc.nameSql} AS name,
+    ${loc.imageUrlsSql} AS imageUrls
 `;
+};
 
-export const searchProduct = async (query: string) => {
-    const fuzzy = buildFuzzyNameClause(query, 'p.name');
-    const [products]: any = await pool.query(
-        `${BROWSE_SELECT}
-         JOIN Category cat ON cat.id = p.categoryId AND cat.name NOT LIKE 'Nepriskirt%'
-         WHERE ${fuzzy.sql}
+export const searchProduct = async (
+    query: string,
+    locale: Locale = 'lt',
+    opts: {
+        /**
+         * Also return products filed under 'Nepriskirta' (category 688).
+         *
+         * OFF by default, because a shopper browsing search results should not
+         * wade through 18 000 uncategorised rows. But 39 % of the catalog lives
+         * there, INCLUDING most of the fresh produce a recipe asks for —
+         * "Valgomieji batatai" (sweet potatoes), the entire fresh tomato shelf,
+         * "Žaliosios cukinijos", "Lietuviški burokėliai". With the gate on, a
+         * recipe importer searching for a courgette found only a SEED PACKET,
+         * because the real vegetable was invisible to it.
+         */
+        includeUncategorised?: boolean;
+    } = {},
+) => {
+    // Match signals come from the ONE shared source (utils/productSearchMatch) so
+    // /products/search and the Discounts filter never drift apart. Here we use
+    // them for RANKING: name (rank 0) → stemmed name (rank 1) → SP name /
+    // translations / aliases (ranks 2–4), each its own query, merged by rank.
+    const sc = productSearchClauses(query, { nameCol: 'p.name', idCol: 'p.id' });
+    const CAT_GATE = opts.includeUncategorised
+        ? `LEFT JOIN Category cat ON cat.id = p.categoryId`
+        : `JOIN Category cat ON cat.id = p.categoryId AND cat.name NOT LIKE 'Nepriskirt%'`;
+
+    // ── Arm 1 (rank 0): full-token name match — today's behavior, highest rank.
+    const [exact]: any = await pool.query(
+        `${browseSelect(locale)}
+         ${CAT_GATE}
+         WHERE ${sc.nameFuzzy.sql}
            AND p.mergedIntoId IS NULL
          GROUP BY p.id
          ORDER BY p.globalScore DESC
          LIMIT 50`,
-        fuzzy.params,
+        sc.nameFuzzy.params,
     );
+
+    // ── Arm 2 (rank 1): STEMMED name match — inflection recall ("saldi" →
+    // "saldžios", "sojos" → "sojų").
+    let stemmed: any[] = [];
+    if (sc.nameStem && exact.length < 50) {
+        [stemmed] = await pool.query(
+            `${browseSelect(locale)}
+             ${CAT_GATE}
+             WHERE ${sc.nameStem.sql}
+               AND p.mergedIntoId IS NULL
+             GROUP BY p.id
+             ORDER BY p.globalScore DESC
+             LIMIT 50`,
+            sc.nameStem.params,
+        ) as any;
+    }
+
+    // Arms 3–5 resolve PRODUCT ids via the shared match module, then hydrate
+    // through BROWSE_SELECT. Each arm only runs while earlier arms left room.
+    const hydrate = async (ids: number[]): Promise<any[]> => {
+        if (ids.length === 0) return [];
+        const [rows]: any = await pool.query(
+            `${browseSelect(locale)}
+             ${CAT_GATE}
+             WHERE p.id IN (?)
+               AND p.mergedIntoId IS NULL
+             GROUP BY p.id
+             ORDER BY p.globalScore DESC`,
+            [ids],
+        );
+        return rows;
+    };
+    const idArm = async (subquery: string, params: any[]): Promise<any[]> => {
+        const [idRows]: any = await pool.query(`${subquery} LIMIT 50`, params);
+        return hydrate(idRows.map((r: any) => r.productId));
+    };
+
+    let found = exact.length + stemmed.length;
+    const vocabArms: any[][] = [];
+    for (const arm of sc.rankedIdArms) {
+        if (found >= 50) { vocabArms.push([]); continue; }
+        const rows = await idArm(arm.sql, arm.params);
+        vocabArms.push(rows);
+        found += rows.length;
+    }
+
+    // Merge rank-ordered, dedup by product id, cap 50.
+    const seen = new Set<number>();
+    const products: any[] = [];
+    for (const arm of [exact, stemmed, ...vocabArms]) {
+        for (const p of arm) {
+            if (seen.has(p.id)) continue;
+            seen.add(p.id);
+            products.push(p);
+            if (products.length >= 50) break;
+        }
+        if (products.length >= 50) break;
+    }
     if (products.length === 0) return [];
     const categoryIds = [...new Set((products as any[]).map((p: any) => p.categoryId).filter(Boolean))];
     const [catRows]: any = categoryIds.length
@@ -89,12 +179,12 @@ export const searchProduct = async (query: string) => {
     const productsWithCat = (products as any[]).map((p: any) => ({ ...p, categoryName: catNameMap[p.categoryId] ?? null }));
     const productIds = productsWithCat.map((p: any) => p.id);
     const canonicals = await loadCanonicalsForProducts(productIds);
-    return attachCanonicalFields(productsWithCat, canonicals);
+    return attachUnitPriceBadges(attachCanonicalFields(productsWithCat, canonicals));
 };
 
-export const getProductById = async (id: number) => {
+export const getProductById = async (id: number, locale: Locale = 'lt') => {
     const [products]: any = await pool.query(
-        `${BROWSE_SELECT} WHERE p.id = ? GROUP BY p.id`,
+        `${browseSelect(locale)} WHERE p.id = ? GROUP BY p.id`,
         [id]
     );
     const product = products[0] || null;
@@ -103,9 +193,9 @@ export const getProductById = async (id: number) => {
     return attachCanonicalFields([product], canonicals)[0];
 };
 
-export const getProductsByCategory = async (categoryId: number) => {
+export const getProductsByCategory = async (categoryId: number, locale: Locale = 'lt') => {
     const [products]: any = await pool.query(
-        `SELECT ${PRODUCT_WITH_IMAGES_SELECT} FROM Product p WHERE p.categoryId = ?`,
+        `SELECT ${productWithImagesSelect(locale)} FROM Product p WHERE p.categoryId = ?`,
         [categoryId]
     );
     return products;
@@ -148,9 +238,9 @@ export const searchProductsForAdmin = async (
     }));
 };
 
-export const getProductByName = async (name: string) => {
+export const getProductByName = async (name: string, locale: Locale = 'lt') => {
     const [rows]: any = await pool.query(
-        `SELECT ${PRODUCT_WITH_IMAGES_SELECT} FROM Product p WHERE p.name = ?`,
+        `SELECT ${productWithImagesSelect(locale)} FROM Product p WHERE p.name = ?`,
         [name]
     );
     return rows[0] || null;
@@ -190,11 +280,11 @@ const AMOUNT_NORMALIZED_EXPR = `
     END
 `;
 
-const BROWSE_SELECT = `
-    SELECT p.id, p.name, p.categoryId, p.globalScore,
-        (SELECT JSON_ARRAYAGG(spi.imageUrl)
-         FROM StoreProduct spi
-         WHERE spi.productId = p.id AND spi.imageUrl IS NOT NULL) AS imageUrls,
+const browseSelect = (locale: Locale): string => {
+    const loc = localizedProductNameSql(locale);
+    return `
+    SELECT p.id, ${loc.nameSql} AS name, p.categoryId, p.globalScore,
+        ${loc.imageUrlsSql} AS imageUrls,
         -- chainLogos: one {chainId,logoUrl} per distinct chain the product
         -- is sold in. Written as a correlated subquery inside IN(...) rather
         -- than a correlated DERIVED TABLE because MariaDB (prod engine) does
@@ -206,11 +296,21 @@ const BROWSE_SELECT = `
          WHERE sc2.id IN (SELECT sp2.chainId FROM StoreProduct sp2 WHERE sp2.productId = p.id)) AS chainLogos,
         CAST(MIN(${AMOUNT_NORMALIZED_EXPR}) AS UNSIGNED) as minAmount,
         CAST(MAX(${AMOUNT_NORMALIZED_EXPR}) AS UNSIGNED) as maxAmount,
-        'g' as unit,
-        MAX(sp.isWeighable) as hasWeighable
+        -- Size-line dimension: majority-volume products label ml/l, else g/kg.
+        CASE WHEN SUM(CASE WHEN sp.unit IN ('l','ml') THEN 1 ELSE 0 END) >
+                    SUM(CASE WHEN sp.unit IN ('kg','g') THEN 1 ELSE 0 END)
+               THEN 'ml' ELSE 'g' END as unit,
+        MAX(sp.isWeighable) as hasWeighable,
+        -- Does the catalog know how this thing is SOLD at all? Distinct from
+        -- minAmount, which is normalised to g/ml and is therefore NULL for
+        -- everything sold by the piece. A real grocery listing has a unit or an
+        -- amount somewhere; a book imported into 'Nepriskirta' has neither, and
+        -- recipe search uses this to tell the two apart.
+        MAX(CASE WHEN sp.unit IS NOT NULL OR sp.amount IS NOT NULL THEN 1 ELSE 0 END) as hasListing
      FROM Product p
      LEFT JOIN StoreProduct sp ON sp.productId = p.id
 `;
+};
 
 /**
  * Fetch globally merged loser products that the user has personally voted
@@ -223,9 +323,10 @@ async function fetchPersonallyRestoredProducts(
     categoryFilter: string,
     categoryParams: any[],
     baseFilter: string,
+    locale: Locale = 'lt',
 ): Promise<any[]> {
     const [rows]: any = await pool.query(
-        `${BROWSE_SELECT}
+        `${browseSelect(locale)}
          WHERE ${categoryFilter}
            AND p.mergedIntoId IS NOT NULL
            AND EXISTS (
@@ -248,28 +349,29 @@ async function fetchPersonallyRestoredProducts(
 }
 
 /**
- * Browse one L3 category.
+ * Browse ordering for a signed-in shopper: the crowd's ranking, RAISED by what
+ * this shopper has shown interest in.
  *
- * Mode only changes which Products are returned:
- *   'base' — cluster heads only (Product.baseProductId IS NULL). Variants
- *            collapse behind their head; tapping the head opens the detail
- *            screen which shows every variant side-by-side.
- *   'sku'  — every non-merged Product (heads + variants), one row each.
+ * It used to be a convex blend — `c·personal + (1−c)·global` — which looked
+ * reasonable and could not work. `globalScore` is the sum of every user's
+ * personal score over the same weights and the same decay, so
+ * `personal <= global` is an invariant (measured: violated in 0 of 307 real
+ * pairs once both sides are computed fresh). A convex combination of the two
+ * therefore never exceeds `global`: the formula could only ever push a
+ * shopper's own products DOWN, and hardest at exactly 10 interactions, where it
+ * was meant to be most personal. It escaped notice only because stored scores
+ * were stale and inflated; the nightly re-decay that now fixes that staleness
+ * would have turned this into a systematic penalty.
  *
- * Amount ranges reflect the Product's own StoreProducts in both modes
- * (not cluster-wide — keeping the query index-friendly). The detail view
- * in base mode surfaces the full cluster's variants.
- *
- * When userId is provided, globally merged products that the user has
- * personally voted 'different' on are restored to the list.
+ * A boost is monotone and safe: with no history the expression IS `globalScore`,
+ * so a stranger's ordering is byte-for-byte what it was, and every interaction
+ * can only raise a product.
  */
 const BLENDED_ORDER_BY = `
-    ORDER BY CASE
-        WHEN MAX(ups.interactionCount) > 0
-        THEN (LEAST(MAX(ups.interactionCount), 10) / 10.0) * MAX(ups.score)
-             + (1 - LEAST(MAX(ups.interactionCount), 10) / 10.0) * p.globalScore
-        ELSE p.globalScore
-    END DESC
+    ORDER BY p.globalScore
+             + (LEAST(COALESCE(MAX(ups.interactionCount), 0), 10) / 10.0)
+               * COALESCE(MAX(ups.score), 0)
+             DESC
 `;
 
 const parseChainLogos = (cl: any): { chainId: number; logoUrl: string | null }[] => {
@@ -324,13 +426,14 @@ export const getProductsByCategoryWithAmounts = async (
     categoryId: number,
     mode: BrowseMode = 'base',
     userId?: string,
+    locale: Locale = 'lt',
 ) => {
     const baseFilter = mode === 'base' ? 'AND p.baseProductId IS NULL' : '';
 
     let products: any[];
     if (userId) {
         [products] = await pool.query(
-            `${BROWSE_SELECT}
+            `${browseSelect(locale)}
              LEFT JOIN UserProductScore ups ON ups.userId = ? AND ups.productId = p.id
              WHERE p.categoryId = ?
                AND p.mergedIntoId IS NULL
@@ -341,7 +444,7 @@ export const getProductsByCategoryWithAmounts = async (
         ) as any;
     } else {
         [products] = await pool.query(
-            `${BROWSE_SELECT}
+            `${browseSelect(locale)}
              WHERE p.categoryId = ?
                AND p.mergedIntoId IS NULL
                ${baseFilter}
@@ -357,6 +460,7 @@ export const getProductsByCategoryWithAmounts = async (
             'p.categoryId = ?',
             [categoryId],
             baseFilter,
+            locale,
         );
         products.push(...restored);
     }
@@ -365,7 +469,7 @@ export const getProductsByCategoryWithAmounts = async (
     // basket +/- buttons to know the right step size + display unit).
     const productIds = products.map(p => Number(p.id));
     const canonicals = await loadCanonicalsForProducts(productIds);
-    const withCanon = attachCanonicalFields(products, canonicals);
+    const withCanon = await attachUnitPriceBadges(attachCanonicalFields(products, canonicals));
     return userId ? await attachPersonalChainLogos(userId, withCanon) : withCanon;
 };
 
@@ -422,6 +526,7 @@ async function attachRealDiscounts(enriched: any[], productIds: number[]): Promi
            FROM Price pr
            JOIN (SELECT storeProductId, MAX(id) AS maxId FROM Price
                   WHERE storeProductId IN (?) AND promoPrice IS NOT NULL AND promoEnd > NOW()
+                    AND (validFrom IS NULL OR validFrom <= NOW())
                   GROUP BY storeProductId) m ON m.maxId = pr.id
           WHERE pr.promoPrice > 0 AND pr.promoPrice < pr.price`,
         [spIds],
@@ -543,7 +648,9 @@ export const refreshDiscountedSummary = async (): Promise<void> => {
             chains.chainLogos,
             CAST(MIN(${DISCOUNT_AMOUNT_EXPR}) AS UNSIGNED) AS minAmount,
             CAST(MAX(${DISCOUNT_AMOUNT_EXPR}) AS UNSIGNED) AS maxAmount,
-            'g' AS unit,
+            CASE WHEN SUM(CASE WHEN sp.unit IN ('l','ml') THEN 1 ELSE 0 END) >
+                    SUM(CASE WHEN sp.unit IN ('kg','g') THEN 1 ELSE 0 END)
+               THEN 'ml' ELSE 'g' END AS unit,
             MAX(sp.isWeighable) AS hasWeighable,
             MAX(ROUND((1 - d.promoPrice / d.price) * 100)) AS bestDiscountPct
          FROM Product p
@@ -571,6 +678,7 @@ export const refreshDiscountedSummary = async (): Promise<void> => {
                  FROM Price FORCE INDEX (idx_price_promo_end)
                  WHERE promoEnd > NOW()
                    AND promoPrice IS NOT NULL
+                   AND (validFrom IS NULL OR validFrom <= NOW())
                  GROUP BY storeProductId
              ) latest ON latest.maxId = pr.id
              WHERE pr.promoPrice < pr.price
@@ -648,18 +756,22 @@ export const getDiscountedProducts = async (opts: {
     search?: string;
     limit?: number;
     offset?: number;
+    locale?: Locale;
 } = {}) => {
     const conditions: string[] = [];
     const params: any[] = [];
 
     if (opts.l2CategoryId != null) {
-        conditions.push('l2CategoryId = ?');
+        conditions.push('d.l2CategoryId = ?');
         params.push(opts.l2CategoryId);
     }
     if (opts.search) {
-        const fuzzy = buildFuzzyNameClause(opts.search, 'name');
-        conditions.push(`(${fuzzy.sql})`);
-        params.push(...fuzzy.params);
+        // On par with /products/search: the SAME shared match module (name +
+        // stems + SP names + translations + aliases), so English queries and
+        // synonyms hit here too — keyed on the summary's productId.
+        const sc = productSearchClauses(opts.search, { nameCol: 'd.name', idCol: 'd.productId' });
+        conditions.push(sc.matchAny.sql);
+        params.push(...sc.matchAny.params);
     }
 
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -667,14 +779,23 @@ export const getDiscountedProducts = async (opts: {
         ? `LIMIT ${Number(opts.limit)} OFFSET ${Number(opts.offset ?? 0)}`
         : '';
 
+    // LT reads the baked name/imageUrls (zero cost). EN overlays the shortest
+    // EN name + donor-first images via the shared resolver, keyed on the
+    // summary's productId (its baked `name` is the COALESCE fallback).
+    const en = opts.locale === 'en'
+        ? localizedProductNameSql('en', { productAlias: 'd', idExpr: 'd.productId', nameExpr: 'd.name' })
+        : null;
+    const nameCol = en ? `${en.nameSql} AS name` : 'd.name';
+    const imageCol = en ? `${en.imageUrlsSql} AS imageUrls` : 'd.imageUrls';
+
     const [rows]: any = await pool.query(
-        `SELECT productId AS id, name, categoryId, l2CategoryId,
-                imageUrls, chainLogos, minAmount, maxAmount, unit, hasWeighable,
-                bestDiscountPct, realDiscountPct, cheapestChainId,
-                canonicalUnit, canonicalStep, canonicalFamily
-           FROM DiscountedProductSummary
+        `SELECT d.productId AS id, ${nameCol}, d.categoryId, d.l2CategoryId,
+                ${imageCol}, d.chainLogos, d.minAmount, d.maxAmount, d.unit, d.hasWeighable,
+                d.bestDiscountPct, d.realDiscountPct, d.cheapestChainId,
+                d.canonicalUnit, d.canonicalStep, d.canonicalFamily
+           FROM DiscountedProductSummary d
            ${where}
-           ORDER BY COALESCE(realDiscountPct, bestDiscountPct) DESC
+           ORDER BY COALESCE(d.realDiscountPct, d.bestDiscountPct) DESC
            ${limitClause}`,
         params,
     );
@@ -685,6 +806,7 @@ export const getAllProductsByL2WithAmounts = async (
     l2CategoryId: number,
     mode: BrowseMode = 'base',
     userId?: string,
+    locale: Locale = 'lt',
 ) => {
     const baseFilter = mode === 'base' ? 'AND p.baseProductId IS NULL' : '';
     const l2Filter = '(p.categoryId IN (SELECT id FROM Category WHERE parentCategoryId = ?) OR p.categoryId = ?)';
@@ -693,7 +815,7 @@ export const getAllProductsByL2WithAmounts = async (
     let products: any[];
     if (userId) {
         [products] = await pool.query(
-            `${BROWSE_SELECT}
+            `${browseSelect(locale)}
              LEFT JOIN UserProductScore ups ON ups.userId = ? AND ups.productId = p.id
              WHERE ${l2Filter}
                AND p.mergedIntoId IS NULL
@@ -704,7 +826,7 @@ export const getAllProductsByL2WithAmounts = async (
         ) as any;
     } else {
         [products] = await pool.query(
-            `${BROWSE_SELECT}
+            `${browseSelect(locale)}
              WHERE ${l2Filter}
                AND p.mergedIntoId IS NULL
                ${baseFilter}
@@ -720,12 +842,13 @@ export const getAllProductsByL2WithAmounts = async (
             l2Filter,
             l2Params,
             baseFilter,
+            locale,
         );
         products.push(...restored);
     }
 
     const productIds = products.map(p => Number(p.id));
     const canonicals = await loadCanonicalsForProducts(productIds);
-    const withCanon = attachCanonicalFields(products, canonicals);
+    const withCanon = await attachUnitPriceBadges(attachCanonicalFields(products, canonicals));
     return userId ? await attachPersonalChainLogos(userId, withCanon) : withCanon;
 };

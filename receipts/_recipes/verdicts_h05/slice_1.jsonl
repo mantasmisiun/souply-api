@@ -1,0 +1,76 @@
+{"ingredient": "romaninių salotų", "n": 1, "verdict": "MAJOR", "class": "wrong-species-lexicon", "expected": "Romaninės salotos (id 79)", "why": "Romaine lettuce was lexicon-keyed to 'shallot' and matched Valgomieji svogūnėliai (shallots) at confidence 1.00; only the dropped_word flag stopped a silent shallot purchase, and the exact product 'Romaninės salotos' is in the catalog."}
+{"ingredient": "česnako skiltelės", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Garlic clove -> Česnakai, 0.1 kg is the minimum sane weighable buy."}
+{"ingredient": "kepalo čiabatos", "n": 1, "verdict": "MAJOR", "class": "filled-product-for-plain", "expected": "KASDIENĖ čiabata (id 1269)", "why": "A loaf of ciabatta became a 120 g ciabatta bun stuffed with cheese and black ham; the catalog stocks ~15 plain ciabatta loaves."}
+{"ingredient": "parmezano", "n": 2, "verdict": "OK", "class": "ok", "expected": null, "why": "Parmesan -> Sūris PARMIGIANO REGGIANO 32 %, 100 g piece covers 2 tbsp grated."}
+{"ingredient": "druskos", "n": 4, "verdict": "MINOR", "class": "premium-variant-swap", "expected": "Valgomoji druska RIMI SMART (id 24899)", "why": "Plain salt silently became a 95 g pink-salt grinder - right kind, several times the price, and plain table salt exists."}
+{"ingredient": "vištų vidinių filė", "n": 1, "verdict": "MINOR", "class": "wrong-cut", "expected": "Viščiukų vidinė filė RIMI (id 22467)", "why": "Chicken inner fillet (tenders) fell back to breast fillet even though 'Viščiukų vidinė filė RIMI' exists; flagged, so no silent harm."}
+{"ingredient": "juodųjų pipirų", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Black pepper -> Juodieji pipirai SAUDA, pantry staple, exact head match."}
+{"ingredient": "plonų parmezano riekelių", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Thin parmesan shavings -> Parmigiano Reggiano block; the dropped_word flag is conservative but the product is right."}
+{"ingredient": "ančiuvių filė", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Anchovy fillets -> Ančiuvių filė SUN & SEA in olive oil, 45 g tin covers 6 fillets."}
+{"ingredient": "česnako skiltelė", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Garlic clove -> Česnakai."}
+{"ingredient": "garstyčių", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Mustard -> Garstyčios RIMI."}
+{"ingredient": "citrinu sulčių", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Lemon juice -> Citrinų sultys LIMMI, 200 ml bottle."}
+{"ingredient": "kiaušinių trynių", "n": 2, "verdict": "OK", "class": "ok", "expected": null, "why": "Egg yolks -> Kiaušiniai (10-pack), one pack for 2 yolks is correct."}
+{"ingredient": "beskonio aliejaus", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Flavourless oil -> Saulėgrąžų aliejus, the standard neutral oil; flagged anyway."}
+{"ingredient": "alyvuogių aliejaus", "n": 3, "verdict": "OK", "class": "ok", "expected": null, "why": "Olive oil -> Alyvuogių aliejus BASSO 500 ml."}
+{"ingredient": "daržovių sultinio", "n": 1, "verdict": "MINOR", "class": "quantity-absurd", "expected": "Daržovių sultinys MAGGI x1", "why": "900 ml of stock was converted into 6 units of a 160 g stock-powder jar - a ~20x overbuy added SILENTLY; volume of made-up broth was treated as weight of concentrate."}
+{"ingredient": "raudonosios paprikos", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Red bell peppers 500 g -> Raud. saldžiosios paprikos, 0.5 kg weighable."}
+{"ingredient": "morkų", "n": 2, "verdict": "OK", "class": "ok", "expected": null, "why": "Carrots -> Plautos morkos, 0.25 kg."}
+{"ingredient": "svogūnų", "n": 3, "verdict": "OK", "class": "ok", "expected": null, "why": "Onions -> Svogūnai, 0.16 kg."}
+{"ingredient": "grietinėlės", "n": 2, "verdict": "OK", "class": "ok", "expected": null, "why": "Cream -> Grietinėlė 35 %, 200 ml carton covers 150 ml."}
+{"ingredient": "salierų stiebų", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Celery stalks -> Lapkotiniai salierai (stalk celery, not celeriac) - the variety distinction was made correctly."}
+{"ingredient": "česnako", "n": 3, "verdict": "OK", "class": "ok", "expected": null, "why": "Garlic -> Česnakai."}
+{"ingredient": "aliejaus", "n": 3, "verdict": "OK", "class": "ok", "expected": null, "why": "Unspecified oil -> Saulėgrąžų aliejus, correct default for frying."}
+{"ingredient": "čili dribsnių", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Chilli flakes -> Aitriųjų paprikų dribsniai SANTA MARIA; the salt-flakes runner-up was correctly beaten."}
+{"ingredient": "čiobrelių", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Thyme -> fresh Čiobreliai IKI DERLIUS."}
+{"ingredient": "maltų juodųjų pipirų", "n": 3, "verdict": "MINOR", "class": "grind-not-verified", "expected": "a product explicitly named as ground black pepper", "why": "'Maltų' (ground) was dropped without a flag; 'Juodieji pipirai SAUDA' 100 g does not state a grind, so whole peppercorns may arrive for a recipe that needs ground."}
+{"ingredient": "duonos", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Bread as a serving side -> AGOTOS sėklų duona; any loaf satisfies the line."}
+{"ingredient": "fetos sūrio", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Feta -> Fetos sūris OLYMPUS 43 %."}
+{"ingredient": "žuvies sultinio", "n": 1, "verdict": "CATALOG_GAP", "class": "no-fish-stock", "expected": null, "why": "No fish stock/fumet exists in the catalog (only chicken, beef, vegetable, mushroom, turkey, pork, ramen); it fell back to chicken stock but flagged it, so nothing wrong went in silently."}
+{"ingredient": "lašišos filė", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Salmon fillet -> Atšaldyta atlantinių lašišų filė."}
+{"ingredient": "bulvių", "n": 3, "verdict": "OK", "class": "ok", "expected": null, "why": "Potatoes 200 g -> a 1.1 kg packed bag, the smallest packaged option; overbuy is unavoidable."}
+{"ingredient": "sviesto", "n": 4, "verdict": "OK", "class": "ok", "expected": null, "why": "Butter -> Sviestas ŠEIMININKĖS 82 %, 200 g."}
+{"ingredient": "krapų", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Dill bunch ~30 g -> 2 x 25 g packs; rounding UP is the right side to err on."}
+{"ingredient": "kiaulienos nugarinės", "n": 1, "verdict": "MAJOR", "class": "mince-for-whole-cut", "expected": "Švieži kiaulienos nugarinės pjausniai / Lietuviška kiaulienos nugarinė (id 1673)", "why": "1 kg of pork LOIN became 30 %-fat minced pork; the correct loin was sitting in altName, and only the dropped_word flag prevented a silent swap."}
+{"ingredient": "daržovių", "n": 1, "verdict": "MAJOR", "class": "prepared-sauce-for-produce", "expected": "Morkos (id 47) + Bulvės - the vegetables the line names in brackets", "why": "'Vegetables (carrots, potatoes)' matched a 500 g jar of Daržovių padažas - a prepared sauce for fresh produce; flagged as generic_ingredient."}
+{"ingredient": "prieskonių", "n": 1, "verdict": "MINOR", "class": "generic-ingredient", "expected": null, "why": "'Spices to taste' -> Prieskonių mišinys VEGETA is a defensible universal answer and it was routed to review."}
+{"ingredient": "sojos padažo", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Soy sauce -> Sojų padažas VITANA."}
+{"ingredient": "rudojo cukraus", "n": 1, "verdict": "MINOR", "class": "wrong-variety", "expected": "Rudasis cukrus RIMI (id 25126)", "why": "2 tsp of brown sugar silently became 'Rudasis cukrus uogienėms ALVO' - preserving/jam sugar - while plain brown sugar exists in the same category."}
+{"ingredient": "prieskonių mėsai", "n": 1, "verdict": "MINOR", "class": "generic-ingredient", "expected": null, "why": "'Spices for meat' -> a BBQ burger spice mix is a reasonable read and it was flagged; notably it beat a duck-meat product that scored higher."}
+{"ingredient": "česnakiniai pipirai", "n": 1, "verdict": "MAJOR", "class": "modifier-not-head", "expected": "Česnakiniai pipirai SALDVA (id 5160)", "why": "Garlic pepper was reduced to plain black pepper even though 'Česnakiniai pipirai SALDVA/SANTA MARIA' are both in the catalog; flagged."}
+{"ingredient": "miltų", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Flour 250 g -> Kvietiniai miltai 550 D, 0.25 kg weighable."}
+{"ingredient": "cukraus", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Sugar 100 g -> Cukrus EXTRA LINE, 0.1 kg."}
+{"ingredient": "grietinės", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Sour cream -> Grietinė DVARO 30 %, 200 g tub for 100 g."}
+{"ingredient": "vanilinio cukraus", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Vanilla sugar -> Vanilinis cukrus, exact."}
+{"ingredient": "kepimo miltelių", "n": 2, "verdict": "OK", "class": "ok", "expected": null, "why": "Baking powder -> Kepimo milteliai, exact."}
+{"ingredient": "varškės", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Curd 500 g -> Varškė PRESIDENT, 0.5 kg weighable."}
+{"ingredient": "kiaušinių baltymų", "n": 1, "verdict": "MINOR", "class": "quantity-absurd", "expected": "1 pack of eggs", "why": "4 egg whites became 4 UNITS of a 10-egg pack = 40 eggs, added silently; contrast the yolk line where 2 yolks correctly became 1 pack."}
+{"ingredient": "manų kruopų", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Semolina -> Manų kruopos DOBELES."}
+{"ingredient": "tešlos", "n": 1, "verdict": "CRITICAL", "class": "parse-artifact-silent-snack", "expected": "nothing - the line is a parse artifact and should have been dropped or flagged", "why": "'1 tbsp of dough' is not a shoppable ingredient, yet a 200 g bag of 'Sūrieji tešlos šaukšteliai LAIMA' (savoury pastry snacks) went into the basket SILENTLY at confidence 0.75 because the bare word 'tešlos' is fully present in the product name."}
+{"ingredient": "kvietinių miltų", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Wheat flour 400 g -> 0.4 kg weighable flour."}
+{"ingredient": "ruginių miltų", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Rye flour 50 g -> 0.1 kg, the practical weighable minimum (over, not under)."}
+{"ingredient": "cukraus „Panevėžio plus\"", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Branded sugar -> generic Cukrus EXTRA LINE with the brand dropped and the line flagged."}
+{"ingredient": "kiaušiniai", "n": 1, "verdict": "MINOR", "class": "quantity-absurd", "expected": "1 pack of eggs", "why": "3 eggs became 3 units of a 10-egg pack = 30 eggs, added silently."}
+{"ingredient": "citrinos žievelės", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Lemon zest -> Citrinos, 0.1 kg is about one lemon."}
+{"ingredient": "aguonų", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Poppy seeds -> Aguonos ARIMEX 100 g."}
+{"ingredient": "mėgstamos uogienės", "n": 1, "verdict": "MINOR", "class": "arbitrary-variant", "expected": "a mainstream jam (strawberry/raspberry) rather than fig", "why": "'Your favourite jam' silently resolved to fig jam - technically inside the request but an unusual, pricier default; quantity (2 x 330 g for 500 g) is right."}
+{"ingredient": "maltos mėsos", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Minced meat -> Smulkinta maišyta kiauliena ir jautiena 400 g for 300 g."}
+{"ingredient": "konservuotų pomidorų savo sultyse", "n": 1, "verdict": "MINOR", "class": "wrong-form", "expected": "Konservuoti, susmulkinti pomidorai FIORINO (the runner-up)", "why": "The recipe asks for CHOPPED canned tomatoes and got whole ones; the exact chopped product was the alternative."}
+{"ingredient": "makaronų", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Pasta -> Makaronai TAGLIATELLE 250 g; variety is unspecified in the recipe."}
+{"ingredient": "mocarela sūrio", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Mozzarella -> Mocarela WELL DONE 210 g."}
+{"ingredient": "pomidorų pastos", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Tomato paste -> Pomidorų pasta RIMI 100 %."}
+{"ingredient": "paprikos miltelių", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Paprika powder -> Malta saldžioji paprika ALVO."}
+{"ingredient": "druska", "n": 2, "verdict": "MINOR", "class": "premium-variant-swap", "expected": "Valgomoji druska RIMI SMART (id 24899)", "why": "Same silent pink-salt-grinder swap for plain salt."}
+{"ingredient": "grietinė", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Sour cream -> Grietinė DVARO 30 %."}
+{"ingredient": "kvietiniai miltai", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "1 tbsp flour -> 0.05 kg of wheat flour."}
+{"ingredient": "kiauliena", "n": 1, "verdict": "CRITICAL", "class": "parenthetical-modifier-stripped", "expected": "Šaltai rūkyta BAJORŲ šoninė pjaustyta griežinėliais (id 2291) or Šaltai rūkytas kiaulienos kumpis (id 1992)", "why": "'kiauliena (kumpis, rūkytas, juostelės)' means SMOKED HAM STRIPS; the bracketed qualifiers were stripped and bare 'kiauliena' silently became 30 %-fat minced raw pork - a species-level word that is not in the generic-category guard."}
+{"ingredient": "sviestas", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Butter -> Sviestas ŠEIMININKĖS 82 %."}
+{"ingredient": "juodieji pipirai", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Black pepper -> Juodieji pipirai SAUDA."}
+{"ingredient": "citrinų sultys", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Lemon juice -> Citrinų sultys LIMMI."}
+{"ingredient": "žalumynų", "n": 1, "verdict": "MAJOR", "class": "dried-for-fresh", "expected": "Žalumynų rinkinys (id 21331) or Petražolės (id 100)", "why": "Fresh greens as a garnish matched a 25 g jar of dried Tuscan herb blend; the catalog stocks fresh greens sets and parsley. Flagged as generic_ingredient."}
+{"ingredient": "žuvis", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "'Any fish' -> Žuvis Didysis jūrinis ešerys, an actual fish, and correctly routed to review; note the runner-up was a BOOK."}
+{"ingredient": "česnakas", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Garlic -> Česnakai."}
+{"ingredient": "rozmarinas", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Rosemary sprigs -> fresh Rozmarinai IKI DERLIUS."}
+{"ingredient": "pipirai", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Pepper -> Juodieji pipirai SAUDA."}
+{"ingredient": "vynas", "n": 1, "verdict": "MINOR", "class": "parenthetical-modifier-stripped", "expected": "Baltasis sausas vynas, chosen because the recipe says white - not by luck", "why": "'(baltas)' was stripped from the name yet a white dry wine won anyway - right by chance, and ALCOHOL was added silently at the 0.75 floor with no colour constraint enforced."}
+{"ingredient": "Raudonas sausas vynas", "n": 1, "verdict": "OK", "class": "ok", "expected": null, "why": "Red dry wine 750 ml -> Raudonasis sausas vynas LUNADORO 750 ml, exact on colour, dryness and size."}

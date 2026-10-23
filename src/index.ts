@@ -2,6 +2,7 @@ import './config/env.js';
 import './config/sentry.js';
 import express from 'express';
 import cors from 'cors';
+import compression from 'compression';
 import helmet from 'helmet';
 import * as path from 'path';
 import * as fsSync from 'fs';
@@ -15,10 +16,15 @@ import { errorHandler } from './middleware/errorHandler.js';
 import { resolveLocale } from './middleware/locale.js';
 import { versionGate } from './middleware/versionGate.js';
 import appRoutes from './routes/appRoutes.js';
+import joinRoutes from './routes/joinRoutes.js';
+import tripRoutes from './routes/tripRoutes.js';
+import notificationRoutes from './routes/notificationRoutes.js';
 import userRoutes from './routes/userRoutes.js';
 import basketRoutes from './routes/basketRoutes.js';
 import basketItemRoutes from './routes/basketItemRoutes.js';
 import basketTemplateRoutes from './routes/basketTemplateRoutes.js';
+import smartBasketRoutes from './routes/smartBasketRoutes.js';
+import recipeImportRoutes from './routes/recipeImportRoutes.js';
 import authRoutes from './routes/authRoutes.js';
 import shoppingListRoutes from './routes/shoppingListRoutes.js';
 import shoppingListItemRoutes from './routes/shoppingListItemRoutes.js';
@@ -42,10 +48,13 @@ import { Sentry } from './config/sentry.js';
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Trust the single reverse proxy (Nginx/Traefik) in front of the API so
-// `req.ip` resolves to the real client IP — required for the per-IP rate
-// limiter below to bucket per visitor rather than per proxy. Assumes ONE
-// proxy hop; bump the number if another hop (e.g. Cloudflare) is added.
+// Trust ONE proxy hop so `req.ip` resolves to the real client IP — required
+// for the per-IP rate limiter below to bucket per visitor rather than per
+// proxy. Reality check (perf audit #4): there is NO nginx/traefik in front of
+// this API — staging/prod compose publish the port directly, and prod's only
+// hop is the Cloudflare Tunnel (cloudflared). Nothing upstream compresses the
+// origin leg, which is why compression() below runs in-process. Bump the hop
+// count if another proxy layer is ever added.
 app.set('trust proxy', 1);
 
 // Allow-list of origins permitted to talk to this API from a browser.
@@ -87,6 +96,14 @@ app.use(cors({
     credentials: true,
 }));
 
+// Response compression (perf audit #4): the API serves large repetitive JSON
+// (receipt lists, catalog pages, price histories) that gzips 8-12x, and no
+// proxy compresses the origin leg (see the trust-proxy note above). Default
+// filter: only compressible content-types, only responses >1KB; clients that
+// send no Accept-Encoding get identity, so nothing breaks. Registered before
+// the routers so every response body is eligible.
+app.use(compression());
+
 app.use(express.json({ limit: '10mb' }));
 app.use(resolveLocale);
 
@@ -117,6 +134,11 @@ app.use('/api/geocode', publicLimiter);
 app.use('/api/auth/oauth', publicLimiter);
 
 app.use('/api', appRoutes);
+app.use('/api', smartBasketRoutes);
+app.use('/api', recipeImportRoutes);
+app.use('/api', joinRoutes);
+app.use('/api', tripRoutes);
+app.use('/api', notificationRoutes);
 app.use('/api', storeRoutes);
 app.use('/api', categoryRoutes);
 app.use('/api', productRoutes);
@@ -302,4 +324,32 @@ if (process.env.NODE_ENV !== 'test') {
             .catch(e => console.error('[adminLease] sweeper failed:', e.message));
     }, HOUR_MS);
     sweeper.unref();
+
+    // Family-shopping settlement sweeper (spec §3.2.2): auto-confirms a
+    // proposal after 7 days of silence, writes member_left if that was what a
+    // leaving member was waiting on, and sends the reminders that go out before
+    // it lapses.
+    //
+    // DELIBERATELY NOT BEHIND ENABLE_SCHEDULER. That flag gates the store
+    // SCRAPERS — work with an EXTERNAL side effect (hitting retailer sites)
+    // that dev and staging must never perform. This job has no external side
+    // effect at all; it is internal ledger maintenance, and it is the mechanism
+    // that makes §3.2.2's anti-hostage guarantee true. Gating it would give
+    // dev and staging a DIFFERENT money model from production — proposals that
+    // never lapse and leavers who stay trapped — so the one behaviour most
+    // worth testing before release would be the one behaviour that only ever
+    // runs in production. The admin lease sweeper above is the right precedent:
+    // same class of thing (internal state maintenance, hourly, ungated).
+    const settlementSweeper = setInterval(() => {
+        import('./services/householdSettlements.js')
+            .then(m => m.sweepLapsedSettlements())
+            .then(r => {
+                if (r.confirmed || r.reminded || r.departed.length) {
+                    console.log(`[household] settlements: ${r.confirmed} auto-confirmed, `
+                        + `${r.reminded} reminded, ${r.departed.length} departed`);
+                }
+            })
+            .catch(e => console.error('[household] settlement sweeper failed:', e.message));
+    }, HOUR_MS);
+    settlementSweeper.unref();
 }

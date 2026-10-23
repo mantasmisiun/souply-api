@@ -98,8 +98,8 @@ export const fetchStoreProductsByProductId = async (req: Request, res: Response,
         // component (unions swiped-equivalent SPs, incl. 688-bucket orphans).
         const userId = typeof req.query.userId === 'string' && req.query.userId ? req.query.userId : undefined;
         const storeProducts = mode === 'base'
-            ? await getStoreProductsForCluster(productId, userId)
-            : await getStoreProductsByProductId(productId, userId);
+            ? await getStoreProductsForCluster(productId, userId, req.locale)
+            : await getStoreProductsByProductId(productId, userId, req.locale);
         res.json(storeProducts);
     } catch (error) {
         next(error);
@@ -178,7 +178,7 @@ export const fetchProductsByCategoryWithAmounts = async (req: Request, res: Resp
             res.status(400).json({ error: 'Invalid category ID' });
             return;
         }
-        const products = await getProductsByCategoryWithAmounts(categoryId);
+        const products = await getProductsByCategoryWithAmounts(categoryId, 'base', undefined, req.locale);
         res.json(products);
     } catch (error) {
         next(error);

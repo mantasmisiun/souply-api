@@ -138,7 +138,7 @@ export async function applyReceiptSplit(opts: {
         if (!topSpId) {
             const catId = await getUnassignedCategoryId(conn);
             const prodId = await createProduct(catId, null, opts.top.name, conn);
-            topSpId = await createStoreProduct(prodId, Number(chainId), opts.top.name, null, false, opts.top.amount, opts.top.unit, null, conn);
+            topSpId = await createStoreProduct(prodId, Number(chainId), opts.top.name, null, false, opts.top.amount, opts.top.unit, null, null, conn);
         }
 
         await conn.query(

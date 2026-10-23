@@ -28,7 +28,7 @@ jest.unstable_mockModule('../src/models/receiptSwipeCandidateModel.js', () => ({
 }));
 jest.unstable_mockModule('../src/config/db.js', () => ({ default: { query: jest.fn() } }));
 
-const { getMandatoryQueue, prewarmMandatoryQueue, _clearMandatoryQueueSnapshots } =
+const { getMandatoryQueue, prewarmMandatoryQueue, getServedResolveLineIdxs, _clearMandatoryQueueSnapshots } =
     await import('../src/services/mandatoryQueueService.js');
 
 const pair = (id: string, slot: 1 | 2 | 3, a = 10, b = 20) => ({
@@ -116,5 +116,32 @@ describe('snapshot cache', () => {
         mockBuildItems.mockResolvedValue({ items: [pair('other', 2, 9, 10), pair('o2', 1, 11, 12), pair('o3', 3, 13, 14)], slotCounts: { slot1: 1, slot2: 1, slot3: 1 } });
         const q = await getMandatoryQueue('u2', 237);
         expect(q.fromSnapshot).toBe(false);
+    });
+});
+
+// GAP 2 — the served set POST /complete-swipes marks 'asked' comes from THIS snapshot
+// (the exact card set the client received), never a fresh recompute that would burn
+// unseen lines.
+describe('getServedResolveLineIdxs', () => {
+    it('returns the snapshot Card-B (receipt) line indices for the owning user', async () => {
+        mockBuildItems.mockResolvedValue({ items: [pair('a', 2, 1, 2)], slotCounts: { slot1: 0, slot2: 1, slot3: 0 } });
+        mockResolveCards.mockResolvedValue({ cards: [cardB(1), cardB(4)], image: null });
+        await prewarmMandatoryQueue('u1', 237);
+        expect(getServedResolveLineIdxs('u1', 237)).toEqual([1, 4]);
+    });
+
+    it('never leaks a foreign user\'s served set, and is null when no snapshot exists', async () => {
+        mockBuildItems.mockResolvedValue({ items: [], slotCounts: { slot1: 0, slot2: 0, slot3: 0 } });
+        mockResolveCards.mockResolvedValue({ cards: [cardB(2)], image: null });
+        await prewarmMandatoryQueue('u1', 237);
+        expect(getServedResolveLineIdxs('u2', 237)).toBeNull(); // foreign user
+        expect(getServedResolveLineIdxs('u1', 999)).toBeNull();  // no snapshot
+    });
+
+    it('returns [] (not null) for a session that served no Card-B lines', async () => {
+        mockBuildItems.mockResolvedValue({ items: [pair('a', 2, 1, 2)], slotCounts: { slot1: 0, slot2: 1, slot3: 0 } });
+        mockResolveCards.mockResolvedValue({ cards: [], image: null });
+        await prewarmMandatoryQueue('u1', 237);
+        expect(getServedResolveLineIdxs('u1', 237)).toEqual([]);
     });
 });

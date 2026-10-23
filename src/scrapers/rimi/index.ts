@@ -1,4 +1,5 @@
 import * as cheerio from 'cheerio';
+import { fetchWithRetry } from '../shared/net.js';
 import { parseSize } from '../shared/parseSize.js';
 import { upsertPromo } from '../shared/promoUpsert.js';
 import { notifyTelegram } from '../shared/telegramAlert.js';
@@ -26,8 +27,7 @@ const PAGE_SIZE = 80;
 
 async function fetchPage(pageNum: number): Promise<string> {
     const url = `https://www.rimi.lt/e-parduotuve/lt/akcijos?currentPage=${pageNum}&pageSize=${PAGE_SIZE}`;
-    const res = await fetch(url, { headers: HEADERS });
-    if (!res.ok) throw new Error(`HTTP ${res.status} on page ${pageNum}`);
+    const res = await fetchWithRetry(url, { headers: HEADERS });
     return res.text();
 }
 
@@ -41,11 +41,14 @@ function getTotalPages(html: string): number {
     return max;
 }
 
-interface ScrapedProduct {
+export interface ScrapedProduct {
     name: string;
     imageUrl: string | null;
     regularPrice: number;
     promoPrice: number;
+    /** Rimi's own category breadcrumb from the product URL:
+     *  /produktai/<l1>/<l2>/<l3>/<slug>/p/<code> → "l1/l2/l3". Signal only. */
+    siteCategory: string | null;
 }
 
 // Extract a euro price from sr-only text like "1.79 € per kg" or "1,99 €"
@@ -119,7 +122,16 @@ function parseProducts(html: string): ScrapedProduct[] {
         if (!regularPrice || !promoPrice) return; // no concrete prices — skip
         if (promoPrice >= regularPrice) return;    // sanity: promo must be cheaper
 
-        products.push({ name, imageUrl, regularPrice, promoPrice });
+        // Category breadcrumb from the detail URL (drop the product slug + code).
+        let siteCategory: string | null = null;
+        const href = card.find('a.card__url').first().attr('href') ?? '';
+        const hm = href.match(/\/produktai\/(.+)\/p\/\d+/);
+        if (hm) {
+            const segs = hm[1].split('/');
+            if (segs.length > 1) siteCategory = segs.slice(0, -1).join('/').slice(0, 255);
+        }
+
+        products.push({ name, imageUrl, regularPrice, promoPrice, siteCategory });
     });
 
     return products;
@@ -127,25 +139,28 @@ function parseProducts(html: string): ScrapedProduct[] {
 
 const delay = (ms: number) => new Promise(r => setTimeout(r, ms));
 
+/** Scrape-only pass (no DB writes) — shared by the real run and the dry harness. */
+export async function collectRimiProducts(maxPages?: number): Promise<ScrapedProduct[]> {
+    const firstHtml = await fetchPage(1);
+    const totalPages = Math.min(getTotalPages(firstHtml), maxPages ?? Infinity);
+    console.log(`[Rimi] ${totalPages} pages`);
+
+    const htmlPages = [firstHtml];
+    for (let p = 2; p <= totalPages; p++) {
+        await delay(1000 + Math.random() * 1500);
+        htmlPages.push(await fetchPage(p));
+        if (p % 20 === 0) console.log(`[Rimi] fetched ${p}/${totalPages} pages`);
+    }
+    return htmlPages.flatMap(parseProducts);
+}
+
 export async function runRimiPromoScraper(): Promise<void> {
     console.log('[Rimi] Starting promo scrape…');
     const promoEnd = getWeekEnd();
     let inserted = 0, skipped = 0, spCreated = 0, productCreated = 0, parseErrors = 0;
 
     try {
-        const firstHtml = await fetchPage(1);
-        const totalPages = getTotalPages(firstHtml);
-        console.log(`[Rimi] ${totalPages} pages`);
-
-        const htmlPages = [firstHtml];
-        for (let p = 2; p <= totalPages; p++) {
-            await delay(1000 + Math.random() * 1500);
-            htmlPages.push(await fetchPage(p));
-            if (p % 20 === 0) console.log(`[Rimi] fetched ${p}/${totalPages} pages`);
-        }
-
-        // Flatten all pages into one list so we can log progress by product count
-        const allProducts = htmlPages.flatMap(parseProducts);
+        const allProducts = await collectRimiProducts();
         console.log(`[Rimi] ${allProducts.length} promo products to process`);
 
         for (let i = 0; i < allProducts.length; i++) {
@@ -159,6 +174,7 @@ export async function runRimiPromoScraper(): Promise<void> {
                     unit,
                     isWeighable,
                     imageUrl: item.imageUrl,
+                    siteCategory: item.siteCategory,
                     regularPrice: item.regularPrice,
                     promoPrice: item.promoPrice,
                     promoEnd,

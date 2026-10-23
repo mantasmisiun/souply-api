@@ -2,6 +2,7 @@ import pool from '../config/db.js';
 import { nameSimilarity } from '../utils/productNameNormalize.js';
 import type { RawSlot2Row } from '../services/slot2QueueBuilder.js';
 import type { Locale } from '../middleware/locale.js';
+import { localizedSpNameSql } from '../middleware/locale.js';
 
 /**
  * Slot 2 candidate minimum similarity (cross-chain name match).
@@ -22,6 +23,17 @@ import type { Locale } from '../middleware/locale.js';
 const SLOT2_MIN_SCORE = 0.60;
 const SLOT2B_ANCHOR_MIN_SCORE = 0.85;
 /**
+ * Slot-2a "reject → next candidate": the OSC seeder stores up to TOP_K (=5) ranked
+ * cross-chain candidates per orphan. 2a fetches ranks 1..this and, per orphan, serves
+ * the LOWEST-ranked one the user hasn't already voted on — so a 'different' on the
+ * rank-1 pair advances to rank-2 instead of hiding the orphan forever. Mirrors the
+ * seeder's TOP_K. */
+const SLOT2A_MAX_RANK = 5;
+
+function canonicalPairKey(spA: number, spB: number): string {
+    return `${Math.min(spA, spB)}-${Math.max(spA, spB)}`;
+}
+/**
  * Safety cap: orphans per chain fetched for Slot 2b fallback pass.
  *
  * The slot 2b orphan pool is anchored to the USER'S OWN orphan SPs first
@@ -38,12 +50,23 @@ const MAX_GLOBAL_ORPHANS_PER_CHAIN = 50;
  * Slot 2a — Uncategorised product rescue via OrphanSwipeCandidate.
  *
  * For each auto-matched SP in the user's receipts that is orphaned
- * (Product.categoryId = 688), surface the pre-computed rank-1 cross-chain
- * candidate from OrphanSwipeCandidate (score ≥ 0.75). These pairs let the
- * user confirm whether the orphan is the same product as its best candidate,
- * rescuing it from the "Nepriskirta" bucket on community consensus.
+ * (Product.categoryId = 688), surface the best UNVOTED cross-chain candidate
+ * from OrphanSwipeCandidate (score ≥ floor). These pairs let the user confirm
+ * whether the orphan is the same product as its best candidate, rescuing it
+ * from the "Nepriskirta" bucket on community consensus.
+ *
+ * REJECT → NEXT: a 'different' vote records the rank-1 pair in `votedPairKeys`;
+ * rather than hiding the orphan (the old `rankPos = 1` join did exactly that),
+ * we fetch ranks 1..SLOT2A_MAX_RANK and, per orphan, serve the lowest-ranked
+ * pair not yet voted — so the orphan offers candidate #2, #3, … over sessions.
+ * When `votedPairKeys` is omitted this reduces to the old rank-1 behaviour.
  */
-async function fetchSlot2aRows(userId: string, priorityReceiptId?: number, locale: Locale = 'lt'): Promise<RawSlot2Row[]> {
+async function fetchSlot2aRows(
+    userId: string,
+    priorityReceiptId?: number,
+    locale: Locale = 'lt',
+    votedPairKeys?: Set<string>,
+): Promise<RawSlot2Row[]> {
     // Optional receipt scoping. Mirrors slot 1/3 filter style: when a
     // receipt is in focus, only return orphans from THAT receipt so
     // the voluntary-mode swipe queue actually moves THIS receipt's
@@ -51,16 +74,17 @@ async function fetchSlot2aRows(userId: string, priorityReceiptId?: number, local
     // the user's history.
     const receiptFilter = priorityReceiptId !== undefined ? 'AND r.id = ?' : '';
     const params: any[] = priorityReceiptId !== undefined
-        ? [SLOT2_MIN_SCORE, locale, locale, userId, priorityReceiptId]
-        : [SLOT2_MIN_SCORE, locale, locale, userId];
-    const [rows]: any = await pool.query(
+        ? [SLOT2A_MAX_RANK, SLOT2_MIN_SCORE, locale, locale, userId, priorityReceiptId]
+        : [SLOT2A_MAX_RANK, SLOT2_MIN_SCORE, locale, locale, userId];
+    const [rawRows]: any = await pool.query(
         `SELECT DISTINCT
              osp.id                                    AS orphanSpId,
              osc.candidateSpId                         AS candidateSpId,
              osc.similarityScore                       AS score,
+             osc.rankPos                               AS rankPos,
              (osp.chainId = csp.chainId)              AS sameChain,
              op.id                                     AS orphanProductId,
-             COALESCE(osp.storeProductName, op.name)   AS orphanName,
+             ${localizedSpNameSql(locale, 'osp', 'COALESCE(osp.storeProductName, op.name)')}   AS orphanName,
              osp.brandName                             AS orphanBrandName,
              osp.imageUrl                              AS orphanImageUrl,
              osp.unit                                  AS orphanUnit,
@@ -70,7 +94,7 @@ async function fetchSlot2aRows(userId: string, priorityReceiptId?: number, local
              op.categoryId                             AS orphanCategoryId,
              COALESCE(oct.name, oc.name)               AS orphanCategoryName,
              cp.id                                     AS candidateProductId,
-             COALESCE(csp.storeProductName, cp.name)   AS candidateName,
+             ${localizedSpNameSql(locale, 'csp', 'COALESCE(csp.storeProductName, cp.name)')}   AS candidateName,
              csp.brandName                             AS candidateBrandName,
              csp.imageUrl                              AS candidateImageUrl,
              csp.unit                                  AS candidateUnit,
@@ -90,7 +114,7 @@ async function fetchSlot2aRows(userId: string, priorityReceiptId?: number, local
            JOIN OrphanSwipeCandidate osc
              ON osc.orphanProductId  = op.id
             AND osc.resolved         = 0
-            AND osc.rankPos          = 1
+            AND osc.rankPos         <= ?
             AND osc.similarityScore >= ?
             -- The seeder picks ONE canonical orphanSpId per Product (the
             -- freshest-priced SP). Joining on Product instead of SP makes
@@ -108,9 +132,26 @@ async function fetchSlot2aRows(userId: string, priorityReceiptId?: number, local
            LEFT JOIN CategoryTranslation oct ON oct.categoryId = oc.id AND oct.locale = ?
            LEFT JOIN CategoryTranslation cct ON cct.categoryId = cc.id AND cct.locale = ?
           WHERE r.userId = ?
-          ${receiptFilter}`,
+          ${receiptFilter}
+          ORDER BY osp.id ASC, osc.rankPos ASC`,
         params,
     );
+
+    // REJECT → NEXT: rows arrive grouped by orphan (osp.id) and ordered by rankPos
+    // ascending. Per orphan, keep the FIRST (lowest-rank) candidate whose canonical
+    // pair the user hasn't voted on — a rejected rank-1 pair is skipped so rank-2
+    // surfaces next. One card per orphan (no rank spam). Empty voted set ⇒ rank-1,
+    // i.e. the previous behaviour.
+    const voted = votedPairKeys ?? new Set<string>();
+    const rows: any[] = [];
+    const chosen = new Set<number>();
+    for (const r of rawRows as any[]) {
+        const orphanSpId = Number(r.orphanSpId);
+        if (chosen.has(orphanSpId)) continue; // already took a lower-ranked candidate
+        if (voted.has(canonicalPairKey(orphanSpId, Number(r.candidateSpId)))) continue; // rejected → try next rank
+        chosen.add(orphanSpId);
+        rows.push(r);
+    }
 
     return (rows as any[]).map((r): RawSlot2Row => ({
         source: '2a',
@@ -171,7 +212,7 @@ async function fetchSlot2bRows(userId: string, priorityReceiptId?: number, local
         `SELECT DISTINCT
              rsc.storeProductId                        AS anchorSpId,
              sp.chainId                                AS chainId,
-             COALESCE(sp.storeProductName, p.name)     AS anchorName,
+             ${localizedSpNameSql(locale, 'sp', 'COALESCE(sp.storeProductName, p.name)')}     AS anchorName,
              sp.brandName                              AS anchorBrandName,
              sp.imageUrl                               AS anchorImageUrl,
              sp.unit                                   AS anchorUnit,
@@ -222,7 +263,7 @@ async function fetchSlot2bRows(userId: string, priorityReceiptId?: number, local
         `SELECT DISTINCT
              sp.id                                    AS orphanSpId,
              sp.chainId,
-             COALESCE(sp.storeProductName, p.name)    AS orphanName,
+             ${localizedSpNameSql(locale, 'sp', 'COALESCE(sp.storeProductName, p.name)')}    AS orphanName,
              sp.brandName                             AS orphanBrandName,
              sp.imageUrl                              AS orphanImageUrl,
              sp.unit                                  AS orphanUnit,
@@ -253,7 +294,7 @@ async function fetchSlot2bRows(userId: string, priorityReceiptId?: number, local
         `SELECT
              sp.id                                    AS orphanSpId,
              sp.chainId,
-             COALESCE(sp.storeProductName, p.name)    AS orphanName,
+             ${localizedSpNameSql(locale, 'sp', 'COALESCE(sp.storeProductName, p.name)')}    AS orphanName,
              sp.brandName                             AS orphanBrandName,
              sp.imageUrl                              AS orphanImageUrl,
              sp.unit                                  AS orphanUnit,
@@ -349,14 +390,17 @@ async function fetchSlot2bRows(userId: string, priorityReceiptId?: number, local
 /** Fetch and merge Slot 2a and 2b raw rows for the given user. When
  *  `priorityReceiptId` is supplied, both 2a and 2b scope to that
  *  receipt (mirrors slot 1/3 filter style) so the queue serves the
- *  receipt's own orphans first instead of the user's entire backlog. */
+ *  receipt's own orphans first instead of the user's entire backlog.
+ *  `votedPairKeys` (the caller's no-repeat ledger) lets slot-2a advance a
+ *  rejected top OSC candidate to the orphan's next-ranked one. */
 export async function fetchAllSlot2Rows(
     userId: string,
     priorityReceiptId?: number,
     locale: Locale = 'lt',
+    votedPairKeys?: Set<string>,
 ): Promise<RawSlot2Row[]> {
     const [rows2a, rows2b] = await Promise.all([
-        fetchSlot2aRows(userId, priorityReceiptId, locale),
+        fetchSlot2aRows(userId, priorityReceiptId, locale, votedPairKeys),
         fetchSlot2bRows(userId, priorityReceiptId, locale),
     ]);
     return [...rows2a, ...rows2b];

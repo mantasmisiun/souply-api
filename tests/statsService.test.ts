@@ -127,21 +127,41 @@ describe('computeReceiptSavings', () => {
 // ---------------------------------------------------------------------------
 
 describe('getUserStats', () => {
-    // Query order (post-ReceiptItem-cutover):
-    //   1. Receipts query (always)
+    // Query order (post-ReceiptItem-cutover, perf audit #14):
+    //   1. Receipts query (always — NO parsedData column anymore)
     //   2. ReceiptItem batch query (when any receipts exist)
-    //   3. SP→productId+category join (when any item has storeProductId)
-    //   4. Market avg query for savings (when spPriceList is non-empty)
+    //   3. LEGACY BLOB fetch: parsedData for ONLY the receipts with no
+    //      ReceiptItem rows (skipped entirely when every receipt has rows)
+    //   4. SP→productId+category join (when any item has storeProductId)
+    //   5. Market avg query for savings (when spPriceList is non-empty)
     //
     // Items come from ReceiptItem rows; the blob products/items is ONLY the
     // legacy fallback for receipts that have no rows. Receipts need an `id`
-    // for the item grouping — every fixture row carries one.
+    // for the item grouping AND the blob linkage — helpers assign one when a
+    // fixture omits it (production rows always have ids).
+
+    // Queue the conditional legacy-blob fetch: the fixture keeps parsedData on
+    // the receipt row for authoring convenience; production serves it from the
+    // dedicated id-scoped query this mocks.
+    function queueLegacyBlobFetch(receipts: any[], itemRows: any[]) {
+        receipts.forEach((r: any, i: number) => { if (r.id == null) r.id = i + 1; });
+        const withRows = new Set(itemRows.map((r: any) => Number(r.receiptId)));
+        const legacy = receipts.filter((r: any) => !withRows.has(Number(r.id)));
+        if (legacy.length > 0) {
+            mockPoolQuery.mockResolvedValueOnce([
+                legacy.map((r: any) => ({ id: r.id, parsedData: r.parsedData })),
+            ]);
+        }
+    }
 
     // Helper: receipts whose items carry no storeProductId (SP + avg queries skipped).
     // itemRows defaults to [] = legacy blob fallback path.
     function setupPoolNoSp(receipts: any[], itemRows: any[] = []) {
         mockPoolQuery.mockResolvedValueOnce([receipts]);
-        if (receipts.length > 0) mockPoolQuery.mockResolvedValueOnce([itemRows]);
+        if (receipts.length > 0) {
+            mockPoolQuery.mockResolvedValueOnce([itemRows]);
+            queueLegacyBlobFetch(receipts, itemRows);
+        }
     }
 
     // Helper: receipts WITH storeProductId items.
@@ -153,7 +173,9 @@ describe('getUserStats', () => {
     ) {
         mockPoolQuery
             .mockResolvedValueOnce([receipts])  // receipts
-            .mockResolvedValueOnce([itemRows])  // ReceiptItem batch
+            .mockResolvedValueOnce([itemRows]); // ReceiptItem batch
+        queueLegacyBlobFetch(receipts, itemRows);
+        mockPoolQuery
             .mockResolvedValueOnce([spRows])    // SP→productId+category
             .mockResolvedValueOnce([avgRows]);  // market avg
     }
@@ -254,6 +276,41 @@ describe('getUserStats', () => {
         expect(result.totalSavings).toBeCloseTo(0.50);
     });
 
+    it('savingsLastMonth is clamped to the same period last month (MTD baseline)', async () => {
+        // Three receipts on the same product (avg 2.00):
+        //   A: THIS month day 2      → saved 0.50 (this-month bucket)
+        //   B: LAST month day 1      → saved 0.30 (always inside the MTD window)
+        //   C: LAST month, final day → saved 0.20 (inside only when the cutoff
+        //      reaches the end of last month, i.e. today is month-end-ish)
+        const now = new Date();
+        const lastM = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+        const daysInLastMonth = new Date(now.getFullYear(), now.getMonth(), 0).getDate();
+        const cutoff = Math.min(now.getDate(), daysInLastMonth);
+        const d = (base: Date, day: number) =>
+            `${base.getFullYear()}-${String(base.getMonth() + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+
+        const mk = (id: number, date: string, price: string) => ({
+            id,
+            receiptDate: date,
+            parsedData: { products: [{ price, quantity: '1', storeProductId: 10 }] },
+            chainName: 'Maxima',
+        });
+        setupPoolWithSp(
+            [
+                mk(1, d(now, 2), '1.50'),
+                mk(2, d(lastM, 1), '1.70'),
+                mk(3, d(lastM, daysInLastMonth), '1.80'),
+            ],
+            [{ spId: 10, productId: 100, categoryName: 'Pienas' }],
+            [{ productId: 100, avg_price: '2.00' }],
+        );
+
+        const result = await getUserStats('user1');
+        expect(result.savingsThisMonth).toBeCloseTo(0.50);
+        const expected = 0.30 + (cutoff >= daysInLastMonth ? 0.20 : 0);
+        expect(result.savingsLastMonth).toBeCloseTo(expected);
+    });
+
     it('returns negative totalSavings when receipt price exceeds market avg', async () => {
         const parsedData = { products: [{ price: '2.50', quantity: '1', storeProductId: 10 }] };
         setupPoolWithSp(
@@ -311,9 +368,10 @@ describe('getUserStats', () => {
         expect(maxima.total).toBeCloseTo(2.00);
     });
 
-    it('excludes L1 categories (categoryName NULL) from categoryBreakdown', async () => {
-        // sp10 maps to L1 (categoryName = null) — should not appear in categoryBreakdown
-        // sp11 maps to L2 (categoryName = 'Pienas') — should appear
+    it('buckets uncategorised (categoryName NULL) into Nepriskirta, not dropped', async () => {
+        // sp10 maps to L1 (categoryName = null) — must NOT be dropped: it lands in
+        // the "Nepriskirta" bucket so the donut total reconciles with the spend.
+        // sp11 maps to L2 (categoryName = 'Pienas').
         const parsedData = {
             products: [
                 { price: '5.00', quantity: '1', storeProductId: 10 },
@@ -323,18 +381,39 @@ describe('getUserStats', () => {
         setupPoolWithSp(
             [{ receiptDate: '2026-05-01', parsedData, chainName: 'Maxima' }],
             [
-                { spId: 10, productId: 100, categoryName: null },   // L1 → excluded
+                { spId: 10, productId: 100, categoryName: null },   // L1 → Nepriskirta
                 { spId: 11, productId: 101, categoryName: 'Pienas' }, // L2 → included
             ],
             [],
         );
 
         const result = await getUserStats('user1');
-        expect(result.categoryBreakdown).toHaveLength(1);
-        expect(result.categoryBreakdown[0].categoryName).toBe('Pienas');
+        expect(result.categoryBreakdown).toHaveLength(2);
+        const byName = Object.fromEntries(result.categoryBreakdown.map((c: any) => [c.categoryName, c.total]));
+        expect(byName['Pienas']).toBeCloseTo(2.00);
+        expect(byName['Nepriskirta']).toBeCloseTo(5.00);
+        // The breakdown now sums to the full spend (nothing dropped).
+        const sum = result.categoryBreakdown.reduce((s: number, c: any) => s + c.total, 0);
+        expect(sum).toBeCloseTo(7.00);
     });
 
-    it('issues at most 4 pool queries for receipts with matched SPs', async () => {
+    it('issues at most 4 pool queries for row-backed receipts (no blob fetch)', async () => {
+        // Post-cutover receipt: items come from ReceiptItem rows, so the
+        // conditional legacy-blob query must NOT run.
+        setupPoolWithSp(
+            [{ id: 1, receiptDate: '2026-05-01', parsedData: { products: [] }, chainName: 'Maxima' }],
+            [{ spId: 10, productId: 100, categoryName: 'Pienas' }],
+            [{ productId: 100, avg_price: '2.00' }],
+            [{ receiptId: 1, storeProductId: 10, price: '1.00', promoPrice: null, quantity: '1' }],
+        );
+
+        await getUserStats('user1');
+
+        // receipts + ReceiptItem batch + SP join + market avg = 4
+        expect(mockPoolQuery).toHaveBeenCalledTimes(4);
+    });
+
+    it('adds exactly ONE extra query when legacy blob-only receipts are present', async () => {
         const parsedData = { products: [{ price: '1.00', quantity: '1', storeProductId: 10 }] };
         setupPoolWithSp(
             [{ id: 1, receiptDate: '2026-05-01', parsedData, chainName: 'Maxima' }],
@@ -344,8 +423,8 @@ describe('getUserStats', () => {
 
         await getUserStats('user1');
 
-        // receipts + ReceiptItem batch + SP join + market avg = 4
-        expect(mockPoolQuery).toHaveBeenCalledTimes(4);
+        // receipts + ReceiptItem batch + LEGACY BLOB + SP join + market avg = 5
+        expect(mockPoolQuery).toHaveBeenCalledTimes(5);
     });
 
     it('issues only 1 pool query when there are no receipts', async () => {

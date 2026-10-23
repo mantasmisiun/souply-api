@@ -87,17 +87,26 @@ export const createStoreProduct = async (
     amount: number | null = null,
     unit: string | null = null,
     imageUrl: string | null = null,
+    siteCategory: string | null = null,
     conn?: Connection
     ) => {
     const db = conn || pool;
     const [result]: any = await db.query(
-        'INSERT INTO StoreProduct (productId, chainId, storeProductName, brandName, isWeighable, amount, unit, imageUrl) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-        [productId, chainId, storeProductName, brandName, isWeighable, amount, unit, imageUrl]
+        'INSERT INTO StoreProduct (productId, chainId, storeProductName, brandName, isWeighable, amount, unit, imageUrl, siteCategory) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [productId, chainId, storeProductName, brandName, isWeighable, amount, unit, imageUrl, siteCategory]
     );
     return result.insertId;
 };
 
-export const getStoreProductsByProductId = async (productId: number, userId?: string) => {
+export const getStoreProductsByProductId = async (productId: number, userId?: string, locale: Locale = 'lt') => {
+    // EN overrides each SP's display name with its own English translation
+    // (image stays the SP's own imageUrl). LT is untouched.
+    const enJoin = locale === 'en'
+        ? "LEFT JOIN StoreProductTranslation spt ON spt.storeProductId = StoreProduct.id AND spt.lang = 'en'"
+        : '';
+    const nameCol = locale === 'en'
+        ? ', COALESCE(spt.text, StoreProduct.storeProductName) AS storeProductName'
+        : '';
     // With a userId, expand to the user's personal equivalence component so a
     // product they swiped 'identical'/'similar' shows ALL its equivalent SPs —
     // including ones still parked in the hidden Nepriskirta bucket (the 688
@@ -107,9 +116,10 @@ export const getStoreProductsByProductId = async (productId: number, userId?: st
         ? await getPersonalComponentForProduct(userId, productId)
         : [productId];
     const [rows]: any = await pool.query(
-        `SELECT StoreProduct.*, StoreChain.name AS chainName, StoreChain.logoUrl
+        `SELECT StoreProduct.*, StoreChain.name AS chainName, StoreChain.logoUrl${nameCol}
          FROM StoreProduct
          JOIN StoreChain ON StoreProduct.chainId = StoreChain.id
+         ${enJoin}
          WHERE StoreProduct.productId IN (?)
            AND (StoreProduct.provisional = 0 OR StoreProduct.provisionalOwnerUserId = ?)`,
         [productIds, userId ?? '']
@@ -124,9 +134,15 @@ export const getStoreProductsByProductId = async (productId: number, userId?: st
  * variant side-by-side with its own chart, giving the user "all yogurts of
  * this base" at a glance.
  */
-export const getStoreProductsForCluster = async (productId: number, userId?: string) => {
+export const getStoreProductsForCluster = async (productId: number, userId?: string, locale: Locale = 'lt') => {
     // Follow mergedIntoId chain so a globally merged loser still shows its winner's cluster.
     const effectiveProductId = await resolveEffectiveProductId(productId);
+    const enJoin = locale === 'en'
+        ? "LEFT JOIN StoreProductTranslation spt ON spt.storeProductId = sp.id AND spt.lang = 'en'"
+        : '';
+    const nameCol = locale === 'en'
+        ? ', COALESCE(spt.text, sp.storeProductName) AS storeProductName'
+        : '';
 
     const [headRows]: any = await pool.query(
         `SELECT COALESCE(baseProductId, id) AS headId
@@ -145,15 +161,72 @@ export const getStoreProductsForCluster = async (productId: number, userId?: str
     const personalIds = userId ? await getPersonalComponentForProduct(userId, productId) : [];
 
     const [rows]: any = await pool.query(
-        `SELECT sp.*, sc.name AS chainName, sc.logoUrl
+        `SELECT sp.*, sc.name AS chainName, sc.logoUrl${nameCol}
            FROM StoreProduct sp
            JOIN StoreChain sc ON sc.id = sp.chainId
            JOIN Product p ON p.id = sp.productId
+           ${enJoin}
           WHERE ((p.id = ? OR p.baseProductId = ?) AND p.mergedIntoId IS NULL)
              OR p.id IN (?)`,
         [headId, headId, personalIds.length ? personalIds : [0]]
     );
     return rows;
+};
+
+/**
+ * List-scoped candidate resolution (listScopedMatcher.fishListScopedCandidates):
+ * given a set of PRODUCT ids (a shopping list's products) resolve them to their
+ * SAME-CHAIN StoreProducts, carrying the exact fields an altMatches entry needs
+ * (mirrors getChainSpsByRegularPrice's SELECT shape so a fished list candidate can
+ * sit in altMatches verbatim). Non-provisional catalog + orphan SPs; a product with
+ * no SP in this chain simply drops out (fail-open — nothing to propose there).
+ */
+export const getChainSpsByProductIds = async (
+    chainId: number,
+    productIds: number[],
+    conn?: Connection,
+): Promise<Array<{
+    storeProductId: number; productId: number; categoryId: number | null;
+    categoryName: string | null; categoryL2Name: string | null; name: string;
+    brandName: string | null; amount: number | null; unit: string | null;
+    isWeighable: boolean; isCatalog: boolean; imageUrl: string | null;
+}>> => {
+    const db = conn || pool;
+    const ids = [...new Set(productIds.map(Number).filter((n) => Number.isFinite(n) && n > 0))];
+    if (ids.length === 0) return [];
+    const [rows]: any = await db.query(
+        `SELECT sp.id AS storeProductId, sp.productId, sp.storeProductName AS name,
+                sp.brandName, sp.amount, sp.unit, sp.isWeighable, sp.imageUrl,
+                p.categoryId, c.name AS categoryName,
+                CASE
+                  WHEN c.parentCategoryId IS NULL  THEN NULL
+                  WHEN c2.parentCategoryId IS NULL THEN c.name
+                  ELSE c2.name
+                END AS categoryL2Name,
+                EXISTS(SELECT 1 FROM Price pr2 WHERE pr2.storeProductId = sp.id AND pr2.receiptId IS NULL) AS isCatalog
+           FROM StoreProduct sp
+           JOIN Product p ON p.id = sp.productId
+           LEFT JOIN Category c  ON c.id = p.categoryId
+           LEFT JOIN Category c2 ON c2.id = c.parentCategoryId
+          WHERE sp.chainId = ?
+            AND sp.productId IN (?)
+            AND sp.provisional = 0`,
+        [chainId, ids],
+    );
+    return rows.map((r: any) => ({
+        storeProductId: Number(r.storeProductId),
+        productId: Number(r.productId),
+        categoryId: r.categoryId != null ? Number(r.categoryId) : null,
+        categoryName: r.categoryName ?? null,
+        categoryL2Name: r.categoryL2Name ?? null,
+        name: String(r.name),
+        brandName: r.brandName ?? null,
+        amount: r.amount != null ? parseFloat(r.amount) : null,
+        unit: r.unit ?? null,
+        isWeighable: !!r.isWeighable,
+        isCatalog: !!r.isCatalog,
+        imageUrl: r.imageUrl ?? null,
+    }));
 };
 
 export const getStoreProductsByChainId = async (chainId: number) => {

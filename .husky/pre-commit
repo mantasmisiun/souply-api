@@ -18,3 +18,27 @@ if [ "$branch" = "dev" ]; then
     echo "   Consider: git pull --ff-only   (before you build on a stale base)"
   fi
 fi
+
+# --- secret scan (gitleaks) -------------------------------------------------
+# These repos are public and GitHub keeps refs/pull/* forever, so a secret that
+# lands in history cannot be force-pushed away — only deleting the repo fixes
+# it. Cheaper to block the commit.
+if [ "$SKIP_GITLEAKS" != "1" ]; then
+  if command -v gitleaks >/dev/null 2>&1; then
+    gitleaks git --staged --redact .; rc=$?
+    if [ $rc -eq 126 ]; then          # older build: unknown subcommand/flag
+      gitleaks protect --staged --redact; rc=$?
+    fi
+    if [ $rc -ne 0 ]; then
+      echo ""
+      echo "🚫 gitleaks flagged a secret in the staged changes — commit blocked."
+      echo "   Remove it, or allowlist a false positive in .gitleaks.toml."
+      echo "   Deliberate override:  SKIP_GITLEAKS=1 before your commit command."
+      echo ""
+      exit 1
+    fi
+  else
+    echo "⚠️  gitleaks not installed — staged changes were NOT scanned."
+    echo "   Install:  sudo pacman -S gitleaks"
+  fi
+fi

@@ -34,14 +34,15 @@ jest.unstable_mockModule('../src/models/productModel.js', () => ({
     createProduct: mockCreateProduct,
 }));
 
-const mockFuzzyProduct = jest.fn<any>().mockResolvedValue(null);
-const mockFuzzySp      = jest.fn<any>().mockResolvedValue(null);
-jest.unstable_mockModule('../src/scrapers/shared/productMatcher.js', () => ({
-    fuzzyMatchProduct: mockFuzzyProduct,
-    fuzzyMatchSp:      mockFuzzySp,
-    addProductToIndex: jest.fn(),
-    addSpToIndex:      jest.fn(),
-    normalizeName:     (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(),
+// Advanced-matcher resolution is mocked at the helper boundary. Default: no match
+// → uncategorised (688). Individual tests override to drive JOIN / MINT / reuse.
+const mockMatch = jest.fn<any>().mockResolvedValue({
+    spId: null, productId: null, categoryId: 688, reviewPending: false, via: 'uncategorised',
+});
+jest.unstable_mockModule('../src/scrapers/shared/scraperProductMatch.js', () => ({
+    matchScrapedProduct: mockMatch,
+    JOIN_MIN: 0.8,
+    MINT_MIN: 0.75,
 }));
 
 let upsertPriceForSpId: any;
@@ -109,8 +110,9 @@ describe('upsertPriceForSpId — fan-out', () => {
         // Each row's storeId (index 1) covers all 3 stores
         const insertedStoreIds = insertValues.map((r: any[]) => r[1]);
         expect(insertedStoreIds).toEqual(expect.arrayContaining([1, 2, 3]));
-        // priceVerified (index 8) must be true so prices are visible in the app
-        expect(insertValues.every((r: any[]) => r[8] === true)).toBe(true);
+        // priceVerified (index 9 — validFrom inserted at index 5) must be true so
+        // prices are visible in the app
+        expect(insertValues.every((r: any[]) => r[9] === true)).toBe(true);
     });
 
     it('returns "inserted" when at least one store gets a new row', async () => {
@@ -215,10 +217,9 @@ describe('upsertPromo — result codes', () => {
         expect(result).toBe('inserted');
     });
 
-    it('returns "sp_created" when fuzzyMatchProduct finds an existing Product', async () => {
+    it('returns "sp_created" when the matcher JOINs an existing Product', async () => {
         mockFindExact.mockResolvedValue(null);
-        mockFuzzySp.mockResolvedValue(null);
-        mockFuzzyProduct.mockResolvedValue({ id: 300, name: 'Pienas' });
+        mockMatch.mockResolvedValue({ spId: null, productId: 300, categoryId: 0, reviewPending: false, via: 'join' });
         setupPoolMock([1], []);
 
         const result = await upsertPromo({
@@ -231,10 +232,9 @@ describe('upsertPromo — result codes', () => {
         expect(result).toBe('sp_created');
     });
 
-    it('returns "product_created" when neither SP nor Product fuzzy-match found', async () => {
+    it('returns "product_created" when no match — mints uncategorised', async () => {
         mockFindExact.mockResolvedValue(null);
-        mockFuzzySp.mockResolvedValue(null);
-        mockFuzzyProduct.mockResolvedValue(null);
+        mockMatch.mockResolvedValue({ spId: null, productId: null, categoryId: 688, reviewPending: false, via: 'uncategorised' });
         setupPoolMock([1], []);
 
         const result = await upsertPromo({
@@ -245,6 +245,25 @@ describe('upsertPromo — result codes', () => {
         });
 
         expect(result).toBe('product_created');
+    });
+
+    it('MINT: flags categoryReviewPending when minted into a borrowed category', async () => {
+        mockFindExact.mockResolvedValue(null);
+        mockMatch.mockResolvedValue({ spId: null, productId: null, categoryId: 42, reviewPending: true, via: 'mint_borrowed' });
+        setupPoolMock([1], []);
+
+        await upsertPromo({
+            chainId: 12,
+            storeProductName: 'Similar-ish product',
+            amount: null, unit: null, isWeighable: false,
+            imageUrl: null, regularPrice: 5, promoPrice: null, promoEnd: PROMO_END,
+        });
+
+        // Product minted under the BORROWED category, then flagged for review.
+        expect(mockCreateProduct).toHaveBeenCalledWith(42, null, 'Similar-ish product');
+        const flag = mockPoolQuery.mock.calls.find(
+            (c: any[]) => typeof c[0] === 'string' && c[0].includes('categoryReviewPending = 1'));
+        expect(flag).toBeDefined();
     });
 
     it('returns "skipped" when SP exists and price is already current at all stores', async () => {

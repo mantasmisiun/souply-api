@@ -1,5 +1,47 @@
 import pool from '../config/db.js';
 import type { Connection } from 'mysql2/promise';
+import { localizedProductNameSql, type Locale } from '../middleware/locale.js';
+
+/**
+ * A `~|~`-joined preview of a basket's most-recently-added product names
+ * (localized, newest-first, capped at 5) for the basket-chooser rows. `~|~` is
+ * a separator no product name contains; the client splits on it. Reusable so
+ * the templates preview keys on the same shape.
+ */
+export const itemPreviewSql = (locale: Locale, basketIdExpr: string): string => {
+    const { nameSql } = localizedProductNameSql(locale, { productAlias: 'ppv' });
+    // A correlated derived table can't reference the outer basket id in MariaDB,
+    // so cap with SUBSTRING_INDEX over a newest-first GROUP_CONCAT instead (the
+    // concat is ordered by item id DESC, so the first 5 slots are the newest —
+    // safe even if GROUP_CONCAT truncates the tail at its length limit).
+    // CONVERT(... USING utf8mb4) normalises collation — EN names come from a
+    // utf8mb4_bin translations column and GROUP_CONCAT-ing them against the
+    // uca1400 separator literal otherwise errors "illegal mix of collations".
+    return `(SELECT SUBSTRING_INDEX(
+                GROUP_CONCAT(CONVERT(${nameSql} USING utf8mb4) ORDER BY bipv.id DESC SEPARATOR '~|~'),
+                '~|~', 5)
+          FROM BasketItem bipv
+          JOIN Product ppv ON ppv.id = bipv.productId
+         WHERE bipv.basketId = ${basketIdExpr})`;
+};
+
+/**
+ * SHOPPING-LIST counterpart of `itemPreviewSql` — newest-first item names (max 5)
+ * for one list. Once a basket becomes lists its own preview goes stale/empty, so
+ * the trip card previews the LIST items from here instead. Name resolution mirrors
+ * the planning pairing: localized product name > store-product name > custom name.
+ */
+export const listItemPreviewSql = (locale: Locale, listIdExpr: string): string => {
+    const { nameSql } = localizedProductNameSql(locale, { productAlias: 'plpv' });
+    return `(SELECT SUBSTRING_INDEX(
+                GROUP_CONCAT(CONVERT(COALESCE(${nameSql}, splpv.storeProductName, slipv.customName) USING utf8mb4)
+                             ORDER BY slipv.id DESC SEPARATOR '~|~'),
+                '~|~', 5)
+          FROM ShoppingListItem slipv
+          LEFT JOIN StoreProduct splpv ON splpv.id = slipv.storeProductId
+          LEFT JOIN Product plpv ON plpv.id = COALESCE(slipv.productId, splpv.productId)
+         WHERE slipv.listId = ${listIdExpr})`;
+};
 
 export const createBasket = async (userId: string, sourceTemplateId: number | null = null, conn?: Connection) => {
     const db = (conn ?? pool) as any;
@@ -111,9 +153,17 @@ export const markBasketUserEdited = async (id: number, conn?: Connection) => {
  * at any given time.
  */
 export const getUserDraftBasketId = async (userId: string): Promise<number | null> => {
+    // The idempotent-create backstop: only a LIVE, resumable personal draft
+    // counts. A draft that is archived, or idle ≥48 h (an abandoned cart the
+    // hourly sweep hasn't reached yet), must NOT be returned — otherwise a
+    // fresh "add" silently lands in a basket the user made days ago. Same 48 h
+    // freshness the chooser (discoverOptions) uses, so the two never disagree.
     const [rows]: any = await pool.query(
         `SELECT id FROM Basket
           WHERE userId = ? AND status = 'draft'
+            AND householdId IS NULL -- the shared container is NOT the personal draft
+            AND archivedAt IS NULL
+            AND updatedAt >= DATE_SUB(NOW(), INTERVAL 48 HOUR)
           ORDER BY updatedAt DESC
           LIMIT 1`,
         [userId]
@@ -121,7 +171,7 @@ export const getUserDraftBasketId = async (userId: string): Promise<number | nul
     return rows[0]?.id ?? null;
 };
 
-export const getBasketsByUserId = async (userId: string) => {
+export const getBasketsByUserId = async (userId: string, locale: Locale = 'lt') => {
     // Pull the selected-store total for inProgress / completed baskets so
     // the Krepselis card can show what the user actually spent at their
     // chosen shop. `cheapestTotal` is the persisted result of the most
@@ -150,12 +200,16 @@ export const getBasketsByUserId = async (userId: string) => {
                 t.coverColor   AS templateCoverColor,
                 t.coverImage   AS templateCoverImage,
                 u.username     AS templateCreatorHandle,
-                t.name         AS templateName
+                t.name         AS templateName,
+                ${itemPreviewSql(locale, 'Basket.id')} AS itemPreview
          FROM Basket
          LEFT JOIN BasketItem ON Basket.id = BasketItem.basketId
          LEFT JOIN BasketTemplate t ON t.id = Basket.sourceTemplateId
          LEFT JOIN User u ON u.id = t.userId
          WHERE Basket.userId = ?
+           -- Auto-archived (abandoned) carts leave the active/resumable list:
+           -- the chooser, silent-resume and the Krepšelis card all read this.
+           AND Basket.archivedAt IS NULL
          GROUP BY Basket.id
          ORDER BY updatedAt DESC`,
         [userId]
@@ -228,7 +282,24 @@ export const updateBasketName = async (id: number, name: string) => {
 };
 
 export const deleteBasket = async (id: number) => {
+    // A forming basket owns a bare Trip (no lists, no receipts). Deleting the
+    // basket must also drop that trip so its Shopping card disappears instead
+    // of lingering as an empty forming trip. Only bare trips are removed —
+    // once a trip has lists/receipts it's history and stays.
+    const [[row]]: any = await pool.query('SELECT tripId FROM Basket WHERE id = ?', [id]);
+    const tripId = row?.tripId ?? null;
     await pool.query('DELETE FROM Basket WHERE id = ?', [id]);
+    if (tripId != null) {
+        const [[counts]]: any = await pool.query(
+            `SELECT
+                (SELECT COUNT(*) FROM ShoppingList WHERE tripId = ?) AS lists,
+                (SELECT COUNT(*) FROM Receipt WHERE tripId = ?) AS receipts`,
+            [tripId, tripId]);
+        if (Number(counts?.lists) === 0 && Number(counts?.receipts) === 0) {
+            await pool.query('DELETE FROM TripMember WHERE tripId = ?', [tripId]);
+            await pool.query('DELETE FROM Trip WHERE id = ?', [tripId]);
+        }
+    }
 };
 
 //For basket price comparison, to get productIds and their details for items in the basket

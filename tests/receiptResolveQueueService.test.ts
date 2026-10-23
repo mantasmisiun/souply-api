@@ -108,22 +108,57 @@ describe('buildReceiptResolveCards', () => {
         expect(wrote).toBe(false);
     });
 
-    it('markServedResolveLinesAsked records every still-servable Card-B line asked (terminal ask-once)', async () => {
-        const parsed = { products: [
-            line({ storeProductId: 10, needsHuman: 0.9, itemConfidence: { band: 'S3' } }),
-            line({ storeProductId: 11, needsHuman: 0.7, itemConfidence: { band: 'S3' } }),
-        ]};
-        const conn = makeConn(parsed);
-        const n = await markServedResolveLinesAsked(108, conn);
+    it('markServedResolveLinesAsked marks EXACTLY the served indices asked (never a recompute)', async () => {
+        const conn = makeConn({ products: [] }); // no recompute → parsedData is irrelevant
+        const n = await markServedResolveLinesAsked(108, conn, [0, 2, 2]); // dedups the repeat
         expect(n).toBe(2);
         const asked = (conn.query as any).mock.calls
             .filter(([sql]: any[]) => /INSERT IGNORE INTO ReceiptLineResolution/.test(sql))
             .map(([, params]: any[]) => params[1])
             .sort();
-        expect(asked).toEqual([0, 1]);
+        expect(asked).toEqual([0, 2]);
     });
 
-    it('full flow: serve is stable across re-fetches, then complete-swipes marks asked so a LATER serve is empty', async () => {
+    it('markServedResolveLinesAsked ignores invalid indices and an empty set', async () => {
+        const conn = makeConn({ products: [] });
+        expect(await markServedResolveLinesAsked(108, conn, [])).toBe(0);
+        expect(await markServedResolveLinesAsked(108, conn, [-1, NaN, 1.5] as any)).toBe(0);
+        const wrote = (conn.query as any).mock.calls.some(([sql]: any[]) => /INSERT IGNORE/.test(sql));
+        expect(wrote).toBe(false);
+    });
+
+    // GAP 2 REGRESSION: completion must mark ONLY the served lines, never a fresh
+    // recompute. Repro: 3 uncertain lines; the mandatory session served the top-2
+    // (idx 0,1) and the user resolved them. The OLD body recomputed at completion,
+    // which — with 0,1 now resolved+excluded — picked the NEXT line (idx 2, NEVER
+    // shown) and marked it asked, hiding it forever. The fix marks only [0,1], so the
+    // unseen line 2 stays cardable in a later (voluntary) session.
+    it('completion marks only the SERVED set; an unseen unresolved line stays cardable', async () => {
+        const ledger = new Set<number>([0, 1]); // 0,1 resolved by votes during the session
+        const parsed = { products: [
+            line({ storeProductId: 10, needsHuman: 0.9, itemConfidence: { band: 'S3' } }),
+            line({ storeProductId: 11, needsHuman: 0.7, itemConfidence: { band: 'S3' } }),
+            line({ storeProductId: 12, needsHuman: 0.5, itemConfidence: { band: 'S3' } }),
+        ]};
+        const conn: any = {
+            query: jest.fn(async (sql: string, params: any[]) => {
+                if (/SELECT parsedData/.test(sql)) return [[{ parsedData: JSON.stringify(parsed) }]];
+                if (/FROM ReceiptItem/.test(sql)) return [[]];
+                if (/SELECT receiptLineIdx/.test(sql)) return [[...ledger].map((i) => ({ receiptLineIdx: i }))];
+                if (/INSERT IGNORE INTO ReceiptLineResolution/.test(sql)) { ledger.add(Number(params[1])); return [{ affectedRows: 1 }]; }
+                return [{ affectedRows: 1 }];
+            }),
+        };
+        // Complete-swipes marks ONLY the served indices [0,1] (already resolved → no-ops).
+        const n = await markServedResolveLinesAsked(108, conn, [0, 1]);
+        expect(n).toBe(2);
+        // The never-served line 2 is NOT in the ledger and is still cardable.
+        expect(ledger.has(2)).toBe(false);
+        const later = await buildReceiptResolveCards(108, conn, 5);
+        expect(later.cards.map((c) => c.receiptLineIdx)).toEqual([2]);
+    });
+
+    it('full flow: serve is stable across re-fetches, then complete-swipes marks the served line so a LATER serve is empty', async () => {
         const ledger = new Set<number>();
         const parsed = { products: [line({ storeProductId: 10, needsHuman: 0.9, itemConfidence: { band: 'S3' } })] };
         const conn: any = {
@@ -138,8 +173,8 @@ describe('buildReceiptResolveCards', () => {
         // Serve twice within a session — the second fetch is NOT emptied by the first.
         expect((await buildReceiptResolveCards(108, conn)).cards.length).toBe(1);
         expect((await buildReceiptResolveCards(108, conn)).cards.length).toBe(1);
-        // Session completes → terminal ask-once marking.
-        await markServedResolveLinesAsked(108, conn);
+        // Session completes → terminal ask-once marking of the served line (idx 0).
+        await markServedResolveLinesAsked(108, conn, [0]);
         // A later session no longer re-nags the (unresolved-but-asked) line.
         expect((await buildReceiptResolveCards(108, conn)).cards.length).toBe(0);
     });

@@ -132,8 +132,15 @@ describe('receipt API — object-level authorization (IDOR closed)', () => {
     });
 
     it('a valid token but for an unrelated fresh user is still refused (403), proving token≠bypass', async () => {
-        const strangerToken = await issueSessionToken('authtest-cccc-cccc-cccc-cccccccccccc');
-        const res = await request(app).get(`/api/receipts/${receiptId}`).set('Authorization', `Bearer ${strangerToken}`);
-        expect(res.status).toBe(403);
+        const STRANGER = 'authtest-cccc-cccc-cccc-cccccccccccc';
+        // A real account (a token with no User row 401s before the ownership check).
+        await pool.query('INSERT INTO User (id, isAdmin, points) VALUES (?,0,0) ON DUPLICATE KEY UPDATE points=0', [STRANGER]);
+        try {
+            const strangerToken = await issueSessionToken(STRANGER);
+            const res = await request(app).get(`/api/receipts/${receiptId}`).set('Authorization', `Bearer ${strangerToken}`);
+            expect(res.status).toBe(403);
+        } finally {
+            await pool.query('DELETE FROM User WHERE id = ?', [STRANGER]);
+        }
     });
 });

@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
+import { ADMIN_OPEN_ACCESS } from '../config/adminAccess.js';
 import crypto from 'crypto';
 import pool from '../config/db.js';
 import { avatarSignedUrl } from '../services/storageService.js';
@@ -6,6 +7,7 @@ import { createUser, getUserById, updateLastActive } from '../models/userModel.j
 import { getUserPointsProfile } from '../services/userPointsService.js';
 import { hasPendingMandatorySwipes, shouldShowBurstWarning } from '../services/swipeSessionService.js';
 import { getPendingMandatorySwipeCount } from '../models/receiptModel.js';
+import { countActiveTripsForUser } from '../services/tripListService.js';
 import { getEquivalencesForUser, upsertEquivalence, deleteEquivalence, getUserProductMergeMap, type EquivalenceVerdict } from '../models/userEquivalenceModel.js';
 import { getUserStats } from '../services/statsService.js';
 import { getVoteHistory, orderPair, type MatchVote } from '../models/storeProductMatchModel.js';
@@ -87,6 +89,30 @@ export const updateUserLastActive = async (req: Request, res: Response, next: Ne
     }
 };
 
+/**
+ * Souply 2.0 tab badges — ONE call replacing the client's 3-fetch poller.
+ * Phase 4: `trips` counts REAL trips (non-archived, derived stage 1-4) —
+ * every basket/list/receipt mints its trip at persist time (tripLinkService),
+ * so the Trip table is authoritative. Counted by a dedicated SQL COUNT
+ * (countActiveTripsForUser), NOT the full trip-list assembly.
+ */
+export const fetchTabBadges = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const id = String(req.params.id);
+        // Perf (audit #6): this endpoint is polled constantly and returns two
+        // integers — both sides are now direct COUNTs. countActiveTripsForUser
+        // reproduces the old `listTripsForUser(...).filter(archived==null &&
+        // stage<5).length` exactly (equivalence covered in tabBadges tests).
+        const [activeTrips, pendingSwipeCount] = await Promise.all([
+            countActiveTripsForUser(id),
+            getPendingMandatorySwipeCount(id),
+        ]);
+        res.json({ trips: activeTrips, pendingSwipes: pendingSwipeCount });
+    } catch (error) {
+        next(error);
+    }
+};
+
 export const fetchUserProfile = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const id = String(req.params.id);
@@ -119,14 +145,15 @@ export const fetchUserProfile = async (req: Request, res: Response, next: NextFu
             showBurstWarning,
             // Surface the admin flag so the client can decide whether to
             // show the "Pereiti į admin panelį" button on the Profilis tab.
-            isAdmin: !!(user as any).isAdmin,
-            role: (user as any).adminRole ?? null,
+            isAdmin: ADMIN_OPEN_ACCESS || !!(user as any).isAdmin,
+            role: ADMIN_OPEN_ACCESS ? 'superadmin' : ((user as any).adminRole ?? null),
             // Identity for the profile header (avatar + name + @handle).
             firstName: (user as any).firstName ?? null,
             lastName: (user as any).lastName ?? null,
             displayName: (user as any).displayName ?? null,
             username: (user as any).username ?? null,
             avatarUrl: await avatarSignedUrl((user as any).avatarUrl),
+            avatarColor: (user as any).avatarColor ?? null,
             // Aggregate template stats for the profile cards.
             templateCount: Number(agg.templateCount ?? 0),
             totalVisits: Number(agg.totalVisits ?? 0),

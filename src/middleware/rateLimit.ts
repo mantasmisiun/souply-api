@@ -75,6 +75,11 @@ export const publicLimiter = createRateLimiter({ windowMs: 60 * 1000, max: 30 })
 // enough to blunt scripted abuse of the comparison engine.
 export const storePricesLimiter = createRateLimiter({ windowMs: 60 * 1000, max: 40 });
 
+// Recipe import fetches a URL the CALLER chooses, which makes this the one
+// endpoint that can be pointed at a third-party server. A real person pastes a
+// link, looks at the result, and pastes another — a handful a minute at most.
+export const recipeImportLimiter = createRateLimiter({ windowMs: 60 * 1000, max: 12 });
+
 // PDF rasterisation is a BLOCKING, CPU/memory-heavy op (poppler spawnSync). Even behind
 // auth, cap the rate so one client can't wedge the single Node event loop with a stream
 // of PDFs. A real user converts a handful of receipt PDFs per minute at most.

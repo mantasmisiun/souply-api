@@ -1,5 +1,6 @@
 import pool from '../config/db.js';
 import type { Connection } from 'mysql2/promise';
+import { localizedProductNameSql, localizedCategoryNameSql, type Locale } from '../middleware/locale.js';
 
 export const createListItem = async (
     listId: number,
@@ -52,7 +53,21 @@ export const createListItemsBatch = async (
     return res.affectedRows as number;
 };
 
-export const getListItemsByShoppingListId = async (listId: number) => {
+export const getListItemsByShoppingListId = async (listId: number, locale: Locale = 'lt') => {
+    // EN resolves the product's shortest English name (donor-first images too),
+    // keyed on the row's effective product; LT keeps the SP/product/custom
+    // COALESCE verbatim.
+    const loc = localizedProductNameSql(locale, {
+        idExpr: 'COALESCE(sp.productId, sli.productId, p.id)',
+        nameExpr: 'COALESCE(sp.storeProductName, p.name, sli.customName)',
+    });
+    // The list groups by aisle, and those headers are APP taxonomy — they must
+    // follow the request locale like every other category surface. Without this
+    // the shopping list showed raw `Category.name` (LT) under an EN interface.
+    // Same helper the catalog uses; LEFT JOIN so a missing translation falls
+    // back to the LT original rather than blanking the header.
+    const trCat3 = localizedCategoryNameSql(locale, { categoryAlias: 'c3', translationAlias: 'ct3' });
+    const trCat2 = localizedCategoryNameSql(locale, { categoryAlias: 'c2', translationAlias: 'ct2' });
     // Ordering:
     //   1. unchecked first (isChecked ASC)
     //   2. alphabetically by resolved name within each bucket — stable
@@ -63,11 +78,8 @@ export const getListItemsByShoppingListId = async (listId: number) => {
     // frontend can ignore these fields today.
     const [rows]: any = await pool.query(
         `SELECT sli.*,
-                COALESCE(sp.storeProductName, p.name, sli.customName) AS productName,
-                (SELECT JSON_ARRAYAGG(spi.imageUrl)
-                 FROM StoreProduct spi
-                 WHERE spi.productId = COALESCE(sp.productId, sli.productId, p.id)
-                   AND spi.imageUrl IS NOT NULL) AS imageUrls,
+                ${loc.nameSql} AS productName,
+                ${loc.imageUrlsSql} AS imageUrls,
                 sp.unit,
                 sp.amount,
                 -- Weighable is a property of the PRODUCT, not the list row. The
@@ -83,29 +95,38 @@ export const getListItemsByShoppingListId = async (listId: number) => {
                     NULLIF(sli.isWeighable, 0),
                     0
                 ) AS isWeighable,
-                c3.id   AS l3CategoryId,
-                c3.name AS l3CategoryName,
-                c2.id   AS l2CategoryId,
-                c2.name AS l2CategoryName,
+                c3.id            AS l3CategoryId,
+                ${trCat3.nameSql} AS l3CategoryName,
+                c3.name          AS l3CategoryNameKey,
+                c2.id            AS l2CategoryId,
+                ${trCat2.nameSql} AS l2CategoryName,
+                c2.name          AS l2CategoryNameKey,
                 c1.id   AS l1CategoryId,
                 (SELECT CONCAT('-', ROUND((1 - pr.promoPrice / pr.price) * 100), '%')
                  FROM Price pr
                  WHERE pr.storeProductId = sli.storeProductId
                    AND pr.requiresCoupon = 1
                    AND pr.promoEnd IS NOT NULL AND pr.promoEnd > NOW()
+                   AND (pr.validFrom IS NULL OR pr.validFrom <= NOW())
                    AND pr.price > 0 AND pr.promoPrice > 0
-                 ORDER BY pr.date DESC LIMIT 1) AS couponLabel
+                 ORDER BY pr.date DESC LIMIT 1) AS couponLabel,
+                sli.checkedBy AS checkedByUserId,
+                COALESCE(cb.displayName, cb.firstName) AS checkedByName,
+                cb.avatarColor AS checkedByColor
          FROM ShoppingListItem sli
          LEFT JOIN Product p ON sli.productId = p.id
          LEFT JOIN StoreProduct sp ON sli.storeProductId = sp.id
          LEFT JOIN Category c3 ON p.categoryId = c3.id
+         ${trCat3.joinSql}
          LEFT JOIN Category c2 ON c3.parentCategoryId = c2.id
+         ${trCat2.joinSql}
          LEFT JOIN Category c1 ON c2.parentCategoryId = c1.id
+         LEFT JOIN User cb ON cb.id = sli.checkedBy
          WHERE sli.listId = ?
          ORDER BY sli.isChecked ASC,
                   COALESCE(sp.storeProductName, p.name, sli.customName, '') ASC,
                   sli.id ASC`,
-        [listId]
+        [trCat3.localeParam, trCat2.localeParam, listId],
     );
     return rows.map((row: any) => ({
         ...row,
@@ -113,7 +134,10 @@ export const getListItemsByShoppingListId = async (listId: number) => {
         isWeighable: row.isWeighable === 1,
         quantity: parseFloat(row.quantity),
         price: row.price ? parseFloat(row.price) : null,
-        unit: row.isWeighable ? 'kg' : 'vnt.',
+        // Preserve the store product's pack unit (l/ml/g/…) for the app's
+        // "N × 500 ml" render — fall back to vnt. only when the row has no SP
+        // unit. Weighables stay 'kg': their display path measures, not packs.
+        unit: row.isWeighable ? 'kg' : (row.unit ?? 'vnt.'),
         amount: row.amount ? parseFloat(row.amount) : null,
         requiresCoupon: row.couponLabel != null,
         couponLabel: row.couponLabel ?? null,
@@ -127,11 +151,20 @@ export const updateListItemQuantity = async (id: number, quantity: number) => {
     );
 };
 
-export const toggleListItem = async (id: number, isChecked: boolean) => {
-    await pool.query(
-        'UPDATE ShoppingListItem SET isChecked = ? WHERE id = ?',
-        [isChecked, id]
-    );
+export const toggleListItem = async (id: number, isChecked: boolean, userId: string | null = null) => {
+    // Record WHO checked it (and clear the attribution on uncheck) so a shared
+    // list can show each member's avatar on the items they ticked.
+    if (isChecked) {
+        await pool.query(
+            'UPDATE ShoppingListItem SET isChecked = 1, checkedBy = ?, checkedAt = NOW() WHERE id = ?',
+            [userId, id]
+        );
+    } else {
+        await pool.query(
+            'UPDATE ShoppingListItem SET isChecked = 0, checkedBy = NULL, checkedAt = NULL WHERE id = ?',
+            [id]
+        );
+    }
 };
 
 export const deleteListItem = async (id: number) => {

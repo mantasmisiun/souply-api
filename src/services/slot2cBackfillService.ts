@@ -35,6 +35,7 @@ const SLOT2C_TRIGRAM_BLOCK = 0.2;      // cheap jaccard pre-filter before Levens
 const SLOT2C_PRICE_BONUS = 0.15;       // both sides' latest prices agree → corroboration
 const SLOT2C_ORPHAN_POOL = 250;        // freshest orphans considered
 const SLOT2C_CANDIDATE_POOL = 250;     // categorised products in the receipt's category family
+const SLOT2C_SEED_TARGET_CAP = 10;     // categorised SPs fished per SEED via targeted name search
 
 // ── name normalization + similarity (the seeder's shape: trigram block → Levenshtein) ──
 
@@ -46,6 +47,24 @@ function normalizeName(s: string): string {
         .replace(/[^a-z0-9]+/g, ' ')
         .trim()
         .replace(/\s+/g, ' ');
+}
+
+// Filler tokens that must not drive a targeted name search on their own (brand/marketing
+// noise the scrapers glue onto orphan names). Mirrors planningScoreService's NAME_STOP.
+const NAME_STOP = new Set(['bon', 'via', 'clever', 'lengvai', 'ekologiskas', 'lietuviski', 'lietuviskas', 'didziosios', 'smulkiavaisiai', 'smulki', 'skonio', 'salt', 'hill']);
+
+/** Significant name tokens (normalized, ≥4 chars, not filler, deduped) — the seed's
+ *  handle onto the categorised catalog for the targeted candidate search. */
+function significantTokens(s: string): string[] {
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const w of normalizeName(s).split(' ')) {
+        if (w.length >= 4 && !NAME_STOP.has(w) && !seen.has(w)) {
+            seen.add(w);
+            out.push(w);
+        }
+    }
+    return out;
 }
 
 function trigramSet(s: string): Set<string> {
@@ -329,6 +348,54 @@ export async function buildSlot2cBackfill(
           LIMIT ?`,
         [locale, seedSpIds.size ? [...seedSpIds] : [0], receiptChainId, SLOT2C_ORPHAN_POOL],
     );
+
+    // TARGETED SEED CANDIDATES: the scope candidate pool above is an arbitrary LIMIT sample of a
+    // large sibling-broadened category family — for a real receipt it holds ~1,100 products, so the
+    // 250-cap EXCLUDES ~77%, routinely dropping the exact categorised sibling a receipt's OWN orphan
+    // needs (and an orphan whose true category isn't even on the receipt is outside the scope
+    // entirely). Result: the seed forms no pair → served 0. So for each SEED orphan — a bounded
+    // handful — fish its best categorised counterpart from the WHOLE catalog by a significant-token
+    // name search, unbounded by the receipt scope or the 250-sample, and merge (deduped by spId) into
+    // the candidate pool BEFORE the pairing loop. Purely additive: the scope candidates stay, the
+    // existing floor / no-repeat / pairing thresholds still gate quality. Fail-open: a failed fetch
+    // leaves today's scope pool untouched.
+    let targetedCount = 0;
+    if (seedSpIds.size > 0) {
+        try {
+            const seedOrphRows = (orphRows as any[]).filter((r) => seedSpIds.has(Number(r.spId)));
+            const haveSpIds = new Set<number>((candRows as any[]).map((r) => Number(r.spId)));
+            for (const s of seedOrphRows) {
+                const tokens = significantTokens(String(s.name ?? ''));
+                if (tokens.length === 0) continue;
+                const likeSql = tokens.map(() => 'sp.storeProductName LIKE ?').join(' OR ');
+                const likeParams = tokens.map((t) => `%${t}%`);
+                const [tRows]: any = await pool.query(
+                    `SELECT ${rowFields}
+                       FROM Product p
+                       JOIN StoreProduct sp ON sp.id = (
+                           SELECT MIN(sp2.id) FROM StoreProduct sp2 WHERE sp2.productId = p.id
+                       )
+                       ${rowJoins}
+                      WHERE p.categoryId <> 688
+                        AND p.categoryId IS NOT NULL
+                        AND p.mergedIntoId IS NULL
+                        AND (${likeSql})
+                      LIMIT ?`,
+                    [locale, ...likeParams, SLOT2C_SEED_TARGET_CAP],
+                );
+                for (const r of tRows as any[]) {
+                    const spId = Number(r.spId);
+                    if (haveSpIds.has(spId)) continue; // dedup against scope pool + prior seeds
+                    haveSpIds.add(spId);
+                    (candRows as any[]).push(r);
+                    targetedCount++;
+                }
+            }
+        } catch (e) {
+            console.warn(`[Slot2c] r${receiptId}: targeted seed candidate fetch failed (using scope pool):`, (e as Error)?.message ?? e);
+        }
+    }
+
     const allIds = [...(candRows as any[]), ...(orphRows as any[])].map((r) => Number(r.spId));
     const prices = await fetchLatestPrices(allIds);
     const candidates = mapPool(candRows as any[], prices);
@@ -358,6 +425,45 @@ export async function buildSlot2cBackfill(
     }
     const weightedSim = (a: string, b: string): number =>
         a && b ? 1 - weightedLevenshtein(a, b) / Math.max(a.length, b.length) : 0;
+
+    // SEED TOKEN IDF — document frequency of each seed's significant tokens across the
+    // CATEGORISED catalogue, so the token lane can weight a shared token by rarity: a
+    // shared rare identity token (auksaspalvės, dorados — each in a handful of products)
+    // is far stronger evidence than a shared common descriptor (atvėsintos — hundreds).
+    // Bounded to seed tokens (a handful) → one accent-folded scan. A token ABSENT from
+    // the categorised catalogue (df=0, e.g. an orphan-only "neskrostos") carries no
+    // cross-catalogue matching signal and is excluded rather than — as raw IDF would —
+    // dominating the score. Fail-open: on error the lane degrades to the flat coefficient.
+    const seedTokenDf = new Map<string, number>();
+    let catalogN = 0;
+    if (seedSpIds.size > 0) {
+        const seedTokenSet = new Set<string>();
+        for (const o of orphans) {
+            if (!seedSpIds.has(o.spId)) continue;
+            for (const tk of significantTokens(o.norm)) seedTokenSet.add(tk);
+        }
+        const seedTokens = [...seedTokenSet];
+        if (seedTokens.length > 0) {
+            try {
+                // Fold Lithuanian diacritics so the normalized (ASCII) token matches the
+                // diacritic'd catalogue name: LIKE '%atvesintos%' must hit "atvėsintos".
+                const NORM = `REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(LOWER(sp.storeProductName),'ą','a'),'č','c'),'ę','e'),'ė','e'),'į','i'),'š','s'),'ų','u'),'ū','u'),'ž','z')`;
+                const sums = seedTokens.map((_, i) => `SUM(${NORM} LIKE ?) AS d${i}`).join(', ');
+                const [dfRows]: any = await pool.query(
+                    `SELECT COUNT(*) AS n, ${sums}
+                       FROM StoreProduct sp JOIN Product p ON p.id = sp.productId
+                      WHERE p.categoryId <> 688 AND p.categoryId IS NOT NULL AND p.mergedIntoId IS NULL`,
+                    seedTokens.map((t) => `%${t}%`),
+                );
+                const row = (dfRows as any[])[0] ?? {};
+                catalogN = Number(row.n ?? 0);
+                seedTokens.forEach((tk, i) => seedTokenDf.set(tk, Number(row[`d${i}`] ?? 0)));
+            } catch (e) {
+                console.warn(`[Slot2c] r${receiptId}: token-DF fetch failed (token lane → flat coefficient):`, (e as Error)?.message ?? e);
+            }
+        }
+    }
+
     const votedPairKeys = await fetchVotedPairKeys(userId);
     const best = new Map<string, RawSlot2Row & { composite: number }>();
     for (const o of orphans) {
@@ -368,6 +474,38 @@ export async function buildSlot2cBackfill(
             let nameScore = levenshteinRatio(o.norm, c.norm);
             if (isSeed) {
                 nameScore = Math.max(nameScore, weightedSim(o.norm, c.norm));
+                // Token lane — a shared SIGNIFICANT token is strong evidence even when
+                // extra descriptor words tank the full-string ratio ("Bananai BON VIA" ⇄
+                // "Bananai", "neskrostos … dorados" ⇄ "skrostos … dorados"). Weight each
+                // seed token by catalogue rarity (IDF): shared RARE identity tokens
+                // (auksaspalvės, dorados) outweigh shared common descriptors (atvėsintos),
+                // and catalogue-absent tokens (neskrostos, df=0) drop out instead of
+                // diluting the coverage. Score = shared rare mass ÷ the seed's
+                // discriminative mass. Degrades to the flat overlap coefficient when DF
+                // is unavailable. Mirrors the line matcher / planningScore sameKind.
+                const oTok = significantTokens(o.norm);
+                if (oTok.length > 0) {
+                    const cTok = new Set(significantTokens(c.norm));
+                    if (catalogN > 0) {
+                        let wShared = 0, wO = 0;
+                        for (const tk of oTok) {
+                            const df = seedTokenDf.get(tk) ?? 0;
+                            if (df <= 0) continue;                      // catalogue-absent → no signal
+                            const w = Math.log((catalogN + 1) / (df + 1));
+                            wO += w;
+                            if (cTok.has(tk)) wShared += w;
+                        }
+                        if (wO > 0) {
+                            if (wShared > 0) nameScore = Math.max(nameScore, wShared / wO);
+                        } else {
+                            const shared = oTok.filter((tk) => cTok.has(tk)).length;
+                            if (shared > 0) nameScore = Math.max(nameScore, shared / Math.max(1, Math.min(oTok.length, cTok.size)));
+                        }
+                    } else {
+                        const shared = oTok.filter((tk) => cTok.has(tk)).length;
+                        if (shared > 0) nameScore = Math.max(nameScore, shared / Math.max(1, Math.min(oTok.length, cTok.size)));
+                    }
+                }
                 for (const alias of seedAliases.get(o.spId) ?? []) {
                     if (!alias) continue;
                     nameScore = Math.max(nameScore, levenshteinRatio(alias, c.norm), weightedSim(alias, c.norm));
@@ -410,7 +548,7 @@ export async function buildSlot2cBackfill(
     ].slice(0, Math.max(0, k));
     console.log(
         `[Slot2c] r${receiptId}: cats=${catIds.length} orphans=${orphans.length} candidates=${candidates.length} `
-        + `pairs=${best.size} → served ${items.length}/${k}`
+        + `(targeted+${targetedCount}) pairs=${best.size} → served ${items.length}/${k}`
         + (items.length ? ` :: ${items.map((i) => `${i.cardId} "${i.orphan.name}"⇄"${i.candidate.name}" s=${i.score.toFixed(2)}`).join(' | ')}` : ''),
     );
     return items;

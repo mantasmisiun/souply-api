@@ -87,6 +87,11 @@ export const comboDiscountOf = (parsedData: any, cap = Infinity): number => {
     return Math.round(Math.min(v, cap) * 100) / 100;
 };
 
+/** Donut label for spend with no resolved L2 category (uncategorised / unmatched
+ *  / un-rescued Nepriskirta). Shown as its own slice so the donut total matches
+ *  the real spend; small amounts fold into "Kitos" like any other category. */
+export const UNCATEGORISED_CAT = 'Nepriskirta';
+
 /**
  * Fetches the average latest market price for each matched receipt item,
  * then delegates to the pure computeSavingsFromPrices function.
@@ -150,8 +155,12 @@ export const computeReceiptSavings = async (
 // ---------------------------------------------------------------------------
 
 export const getUserStats = async (userId: string, locale: Locale = 'lt') => {
+    // Perf (audit #14): NO r.parsedData here — the blob (full OCR dump) was
+    // loaded for EVERY completed receipt on every stats call, yet it is only
+    // the legacy item fallback for receipts without ReceiptItem rows. Those
+    // few are hydrated in a second, id-scoped query below.
     const [receipts]: any = await pool.query(
-        `SELECT r.id, r.receiptDate, r.parsedData, sc.name AS chainName, sc.miniLogoUrl AS chainMiniLogoUrl
+        `SELECT r.id, r.receiptDate, sc.name AS chainName, sc.miniLogoUrl AS chainMiniLogoUrl
            FROM Receipt r
            LEFT JOIN Store s ON s.id = r.storeId
            LEFT JOIN StoreChain sc ON sc.id = s.chainId
@@ -176,7 +185,7 @@ export const getUserStats = async (userId: string, locale: Locale = 'lt') => {
     // spId → [{price, qty, month}] collected from all receipt items with a
     // matched SP. `month` (local `YYYY-MM`, null when the receipt has no date)
     // lets savings be bucketed per calendar month for the this-month figure.
-    const spPriceList = new Map<number, Array<{ price: number; qty: number; month: string | null }>>();
+    const spPriceList = new Map<number, Array<{ price: number; qty: number; month: string | null; day: number | null }>>();
     // productId → the user's personal orphan rescue (Nepriskirta → real category
     // via their own "same" votes). Empty when there are no matched SPs.
     let rescueByProduct = new Map<number, { categoryId: number | null; leafName: string | null; l2Name: string | null }>();
@@ -204,12 +213,26 @@ export const getUserStats = async (userId: string, locale: Locale = 'lt') => {
             list.push(row);
             itemsByReceipt.set(Number(row.receiptId), list);
         }
+        // Legacy fallback, now CONDITIONAL (audit #14): fetch parsedData only
+        // for receipts with no ReceiptItem rows (pre-migration receipts an
+        // environment never backfilled — 77/110 on dev as of 2026-07). The
+        // set can only shrink: every new receipt writes ReceiptItem rows.
+        const legacyIds = receipts
+            .map((r: any) => Number(r.id))
+            .filter((id: number) => !(itemsByReceipt.get(id)?.length));
+        const legacyBlobById = new Map<number, any>();
+        if (legacyIds.length > 0) {
+            const [blobRows]: any = await pool.query(
+                'SELECT id, parsedData FROM Receipt WHERE id IN (?)',
+                [legacyIds],
+            );
+            for (const b of blobRows) legacyBlobById.set(Number(b.id), b.parsedData);
+        }
         perReceiptItems = receipts.map((receipt: any) => {
             const rows = itemsByReceipt.get(Number(receipt.id));
             if (rows && rows.length > 0) return { receipt, items: rows };
-            const parsed = typeof receipt.parsedData === 'string'
-                ? JSON.parse(receipt.parsedData)
-                : receipt.parsedData;
+            const blob = legacyBlobById.get(Number(receipt.id));
+            const parsed = typeof blob === 'string' ? JSON.parse(blob) : blob;
             return { receipt, items: parsed?.products ?? parsed?.items ?? [] };
         });
 
@@ -304,12 +327,14 @@ export const getUserStats = async (userId: string, locale: Locale = 'lt') => {
                     const rescued = pid != null ? rescueByProduct.get(pid)?.l2Name : undefined;
                     if (rescued) catName = rescued;
                 }
-                if (catName) {
-                    categoryMap[catName] = (categoryMap[catName] ?? 0) + itemTotal;
-                    if (month) {
-                        const cm = (categoryMonthMap[month] ??= {});
-                        cm[catName] = (cm[catName] ?? 0) + itemTotal;
-                    }
+                // No catalog L2 and no personal rescue → the Nepriskirta bucket,
+                // NOT dropped (else the donut total under-counts the real spend;
+                // small amounts still fold into "Kitos" downstream).
+                const catForDonut = catName || UNCATEGORISED_CAT;
+                categoryMap[catForDonut] = (categoryMap[catForDonut] ?? 0) + itemTotal;
+                if (month) {
+                    const cm = (categoryMonthMap[month] ??= {});
+                    cm[catForDonut] = (cm[catForDonut] ?? 0) + itemTotal;
                 }
                 if (month) {
                     monthMap[month] = (monthMap[month] ?? 0) + itemTotal;
@@ -319,7 +344,7 @@ export const getUserStats = async (userId: string, locale: Locale = 'lt') => {
                 // Accumulate for savings — only matched SPs with a known productId.
                 if (spId && unitPrice > 0 && spToProductId.has(spId)) {
                     const list = spPriceList.get(spId) ?? [];
-                    list.push({ price: unitPrice, qty, month });
+                    list.push({ price: unitPrice, qty, month, day: md ? md.getDate() : null });
                     spPriceList.set(spId, list);
                 }
             }
@@ -338,6 +363,21 @@ export const getUserStats = async (userId: string, locale: Locale = 'lt') => {
     // show the current-month figure and its change vs last month. Same
     // avg-vs-paid formula as the all-time total — only the grouping differs.
     const monthSavingsMap: Record<string, number> = {};
+    // MTD baseline: last month's savings only through the SAME day-of-month,
+    // so a half-elapsed month isn't compared against a complete one (the chip
+    // would otherwise point down all month). The cutoff is clamped to last
+    // month's real length — on May 31 vs April (30d) or March 30 vs February
+    // (28/29d) the whole shorter month counts, which is the standard
+    // month-to-date convention.
+    const nowM = new Date();
+    const thisMonthKey = `${nowM.getFullYear()}-${String(nowM.getMonth() + 1).padStart(2, '0')}`;
+    const lastM = new Date(nowM.getFullYear(), nowM.getMonth() - 1, 1);
+    const lastMonthKey = `${lastM.getFullYear()}-${String(lastM.getMonth() + 1).padStart(2, '0')}`;
+    // Day 0 of the current month = last day of the previous month (handles
+    // 28/29/30/31 automatically, leap years included).
+    const daysInLastMonth = new Date(nowM.getFullYear(), nowM.getMonth(), 0).getDate();
+    const mtdCutoffDay = Math.min(nowM.getDate(), daysInLastMonth);
+    let lastMonthMtdSavings = 0;
     if (spPriceList.size > 0) {
         // spPriceList only contains spIds that are in spToProductId (guarded above).
         const productIds = [...new Set(
@@ -374,29 +414,30 @@ export const getUserStats = async (userId: string, locale: Locale = 'lt') => {
                 if (!productId) continue;
                 const avg = productAvgPrice.get(productId);
                 if (!avg || avg <= 0) continue;
-                for (const { price, qty, month } of purchases) {
+                for (const { price, qty, month, day } of purchases) {
                     const saved = (avg - price) * qty;
                     totalSavings += saved;
-                    if (month) monthSavingsMap[month] = (monthSavingsMap[month] ?? 0) + saved;
+                    if (month) {
+                        monthSavingsMap[month] = (monthSavingsMap[month] ?? 0) + saved;
+                        if (month === lastMonthKey && day != null && day <= mtdCutoffDay) {
+                            lastMonthMtdSavings += saved;
+                        }
+                    }
                 }
             }
         }
     }
     totalSavings = Math.round(totalSavings * 100) / 100;
 
-    // This-month savings + change vs last month. Local calendar months (same
-    // convention as Pass 2's `month` keys), NOT toISOString(). savingsChangePct
-    // is null when last month has no savings baseline to compare against.
-    const nowM = new Date();
-    const thisMonthKey = `${nowM.getFullYear()}-${String(nowM.getMonth() + 1).padStart(2, '0')}`;
-    const lastM = new Date(nowM.getFullYear(), nowM.getMonth() - 1, 1);
-    const lastMonthKey = `${lastM.getFullYear()}-${String(lastM.getMonth() + 1).padStart(2, '0')}`;
+    // This-month savings + change vs the SAME PERIOD last month (keys and the
+    // MTD cutoff computed above, before the accumulation loop). Local calendar
+    // months, NOT toISOString().
     const savingsThisMonth = Math.round((monthSavingsMap[thisMonthKey] ?? 0) * 100) / 100;
-    // Last month's figure is returned raw so the client can show a €-delta
-    // "vs last month" chip. A percentage change was intentionally dropped: it's
-    // unstable for a signed savings metric (sign flips + tiny denominators make
-    // e.g. a 14-cent baseline read as "-101%"). A € delta is always honest.
-    const savingsLastMonth = Math.round((monthSavingsMap[lastMonthKey] ?? 0) * 100) / 100;
+    // The baseline is month-to-date-clamped (day ≤ mtdCutoffDay) so the €-delta
+    // chip compares like with like all month long. A percentage change was
+    // intentionally dropped: it's unstable for a signed savings metric (sign
+    // flips + tiny denominators make e.g. a 14-cent baseline read as "-101%").
+    const savingsLastMonth = Math.round(lastMonthMtdSavings * 100) / 100;
 
     const storeBreakdown = Object.entries(storeMap)
         .map(([chainName, total]) => ({

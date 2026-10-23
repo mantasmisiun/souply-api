@@ -1,15 +1,17 @@
 import { Request, Response, NextFunction } from 'express';
+import { ensureTripForList, relinkReceiptToListTrip } from '../services/tripLinkService.js';
 import pool from '../config/db.js';
 import {
     createShoppingList,
     getShoppingListById,
     getShoppingListsByUserId,
     deleteShoppingList,
+    deleteShoppingListsByBasketId,
     updateShoppingListStatus,
     updateShoppingListBasket,
     getShoppingListByBasketId,
     getShoppingListByBasketAndStore,
-    getBasketIdByListId,
+    getBasketIdByListId, allBasketListsCompleted,
     duplicateShoppingList,
     linkReceiptToList,
 } from '../models/shoppingListModel.js';
@@ -26,7 +28,7 @@ import {
     getShareTokenByToken,
     markShareTokenClaimed,
 } from '../models/shoppingListShareTokenModel.js';
-import { getBasketOwnerId } from '../models/basketModel.js';
+import { basketWritableBy } from '../middleware/resourceAuth.js';
 import { getReceiptOwnerId } from '../models/receiptModel.js';
 
 /**
@@ -58,12 +60,19 @@ export const addShoppingList = async (req: Request, res: Response, next: NextFun
             res.status(400).json({ error: 'items must be an array' });
             return;
         }
-        // When creating a list FROM a basket, the caller must own that basket — otherwise
-        // supplying someone else's basketId flips their basket to 'inProgress' and reads
-        // its template. (The list routes have no basket-owner middleware; check inline.)
+        // When creating a list FROM a basket, the caller must be able to WRITE that
+        // basket — otherwise supplying someone else's basketId flips their basket to
+        // 'inProgress' and reads its template. (The list routes have no basket
+        // middleware; check inline.)
+        //
+        // `basketWritableBy`, not a raw owner check: a household's SHARED basket is
+        // writable by every member (Basket.householdId set). A plain owner check made
+        // `Basket.userId` — the household FOUNDER — the only person who could start a
+        // family shop, so every other member got a 403 walking §6 step 1→2. Personal
+        // baskets are untouched: the rule only widens when householdId IS NOT NULL.
         if (basketId) {
-            const basketOwner = await getBasketOwnerId(Number(basketId));
-            if (basketOwner !== null && basketOwner !== userId) {
+            const verdict = await basketWritableBy(Number(basketId), userId);
+            if (verdict === 'forbidden') {
                 res.status(403).json({ error: 'forbidden' });
                 return;
             }
@@ -93,6 +102,10 @@ export const addShoppingList = async (req: Request, res: Response, next: NextFun
         try {
             await conn.beginTransaction();
             const id = await createShoppingList(userId, storeId, basketId ?? null, conn);
+            // 2.0: the list joins its basket's trip (a split's rows share it)
+            // or mints its own when standalone. Returned so clients can land
+            // back on the trip surface after creating the list(s).
+            const tripId = await ensureTripForList(id, userId, basketId ?? null, conn);
             // Owner membership row — same transaction so the list
             // and its owner either both exist or neither does.
             await addShoppingListMember(id, userId, 'owner', conn);
@@ -151,7 +164,7 @@ export const addShoppingList = async (req: Request, res: Response, next: NextFun
                 }
             }
             await conn.commit();
-            res.status(201).json({ id, userId, storeId, basketId: basketId ?? null });
+            res.status(201).json({ id, userId, storeId, basketId: basketId ?? null, tripId });
         } catch (e) {
             await conn.rollback();
             throw e;
@@ -214,7 +227,12 @@ export const changeShoppingListStatus = async (req: Request, res: Response, next
             await checkAllItemsByListId(id);
             await updateShoppingListStatus(id, status);
             const basketId = await getBasketIdByListId(id);
-            if (basketId) await updateBasketStatus(basketId, 'completed');
+            // SPLIT-SAFE: a 2/3-store basket completes only when EVERY store's
+            // list is completed — completing the FIRST store used to mark the
+            // whole basket terminal while the other store was still shoppable.
+            if (basketId && (await allBasketListsCompleted(basketId))) {
+                await updateBasketStatus(basketId, 'completed');
+            }
         } else {
             // 'active' — used when reopening a completed list.
             await updateShoppingListStatus(id, status);
@@ -263,10 +281,41 @@ export const linkReceiptToShoppingList = async (req: Request, res: Response, nex
             return;
         }
         await linkReceiptToList(receiptId, id);
+        // 2.0: move the receipt onto the LIST's trip (dropping the churn
+        // ad-hoc trip the bare upload may have minted seconds earlier).
+        await relinkReceiptToListTrip(receiptId, id);
         res.json({ success: true });
     } catch (error) {
         next(error);
     }
+};
+
+/**
+ * DELETE /api/baskets/:basketId/shopping-lists — remove EVERY list for a basket
+ * (owner only). Called by the client just before re-creating lists for a new
+ * store selection, so the trip's tabs match the current picks instead of
+ * accumulating. The Trip survives (members/receipts kept); re-create reattaches.
+ */
+export const removeShoppingListsByBasket = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const basketId = Number(req.params.basketId);
+        if (isNaN(basketId)) { res.status(400).json({ error: 'Invalid basket ID' }); return; }
+        const userId = req.authUserId;
+        if (!userId) { res.status(401).json({ error: 'auth-required' }); return; }
+        // Same rule as creation above: a household member who can START a family
+        // shop must be able to unwind it, or they strand lists only the founder
+        // could clear. Personal baskets stay owner-only.
+        const verdict = await basketWritableBy(basketId, userId);
+        if (verdict === 'forbidden') { res.status(403).json({ error: 'forbidden' }); return; }
+        await deleteShoppingListsByBasketId(basketId);
+        // The basket returns to 'compared' — its lists (the in-progress state)
+        // are gone; a re-create will move it forward again.
+        const basket = await getBasketById(basketId);
+        if (basket && basket.status === 'inProgress') {
+            await updateBasketStatus(basketId, 'compared');
+        }
+        res.status(204).send();
+    } catch (error) { next(error); }
 };
 
 export const removeShoppingList = async (req: Request, res: Response, next: NextFunction) => {
@@ -436,4 +485,27 @@ export const duplicateList = async (req: Request, res: Response, next: NextFunct
     } catch (error) {
         next(error);
     }
+};
+
+
+/**
+ * Souply 2.0 per-store mini-cycles — "Nepirkau čia": close a completed
+ * slot WITHOUT a receipt (stage derivation treats skipped slots as closed,
+ * so skipping the last open slot moves the trip to stage 5). Unskip
+ * reopens the slot (the user found the receipt after all).
+ */
+export const skipListReceipt = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const id = Number(req.params.id);
+        await pool.query('UPDATE ShoppingList SET receiptSkippedAt = NOW() WHERE id = ? AND receiptSkippedAt IS NULL', [id]);
+        res.json({ id, receiptSkipped: true });
+    } catch (error) { next(error); }
+};
+
+export const unskipListReceipt = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const id = Number(req.params.id);
+        await pool.query('UPDATE ShoppingList SET receiptSkippedAt = NULL WHERE id = ?', [id]);
+        res.json({ id, receiptSkipped: false });
+    } catch (error) { next(error); }
 };

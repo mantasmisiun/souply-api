@@ -6,6 +6,8 @@ import {
     // ^ dev-only cascade purge; route below is gated server-side too.
     fetchReceiptImage,
     createReceiptFromOcr,
+    healReceiptFromRetake,
+    devReplaceReceiptParse,
     updateReceiptFromOcr,
     updateReceiptRegions,
     getReceiptUploadUrl,
@@ -21,8 +23,14 @@ import {
     logAnalizeFailure,
     logReocrTelemetry,
     markSwipesDone,
+    hideReceiptForUser,
+    deleteReceiptImageOnly,
 } from '../controllers/receiptController.js';
 import { getFlaggedReceiptCrop } from '../controllers/adminReceiptCropController.js';
+import {
+    fetchFamilyReceipt,
+    patchReceiptItemScope,
+} from '../controllers/receiptFamilyController.js';
 import {
     logBatchReceipt,
     finalizeBatchReport,
@@ -51,6 +59,10 @@ router.post('/receipts/batch-log/finalize', finalizeBatchReport);
 // Create a new receipt from OCR results — called once on receipt-process screen mount.
 // The receipt is owned by the token subject (req.authUserId), NOT a body userId.
 router.post('/receipts', requireUser, createReceiptFromOcr);
+// Retake/heal: merge a re-scan of the SAME receipt into the stored parse.
+router.post('/receipts/:id/heal', requireUser, owns, healReceiptFromRetake);
+// DEV-ONLY: full re-parse REPLACE (bypasses the conservative heal). Refused in production.
+router.post('/receipts/:id/dev-replace', requireUser, owns, devReplaceReceiptParse);
 
 // Analize-flow bail path: log a receipt that couldn't be processed
 // (OCR produced nothing, chain not detected, or store lookup failed).
@@ -74,6 +86,16 @@ router.post('/receipts/upload-url', requireUser, getReceiptUploadUrl);
 router.patch('/receipts/:id/file-path', requireUser, owns, setReceiptFilePath);
 router.post('/receipts/pdf-to-image', pdfConvertLimiter, requireUser, convertPdfToImage);
 
+// FAMILY SHOPPING §4 — the ONLY two /receipts/:id routes that are not bound to
+// `owns`, deliberately: §4.5 exists precisely so a household member who did not
+// upload the receipt can see its FAMILY section. Both authorize on household
+// membership inside the service (see receiptFamilyController), and the read is
+// built as an allowlist that carries no grand total and no image. Everything
+// else about a receipt — the photo, the comparison basket, the raw parsedData
+// with `footer.total` in it — stays owner-only on the routes below.
+router.get('/receipts/:id/family', requireUser, fetchFamilyReceipt);
+router.patch('/receipts/:id/family/scope', requireUser, patchReceiptItemScope);
+
 router.get('/users/:userId/receipts', requireUser, requireSelfUserParam, fetchReceiptsByUserId);
 router.get('/receipts/:id', requireUser, owns, fetchReceiptById);
 router.get('/receipts/:id/image', requireUser, owns, fetchReceiptImage);
@@ -89,6 +111,15 @@ router.post('/receipts/:id/lines/:idx/vote', requireUser, owns, submitReceiptLin
 // non-admin reuse of the flagged-crop controller, which keys on receiptId/lineIdx).
 router.get('/receipts/:id/resolve-queue', requireUser, owns, getReceiptResolveQueue);
 router.get('/receipts/:receiptId/lines/:lineIdx/crop', requireUser, requireReceiptOwner('receiptId'), getFlaggedReceiptCrop);
+
+// User-facing "remove this scan" BEFORE the mandatory queue is cleared: soft-hide
+// (userDeletedAt) + detach trip/list + wipe the photo, KEEPING the shared price /
+// learning rows (so a re-upload un-hides). 423 once swipes are cleared — use the
+// photo-only delete below instead. Ownership-bound.
+router.delete('/receipts/:id/user', requireUser, owns, hideReceiptForUser);
+// Photo-only delete (post-swipe): drop the MinIO image + clear filePath, keeping
+// the row + prices + trip link. Allowed regardless of swipe state. Ownership-bound.
+router.delete('/receipts/:id/image', requireUser, owns, deleteReceiptImageOnly);
 
 // DEV-ONLY hard delete: receipt + its prices + orphan SPs/Products + MinIO
 // image. The controller refuses when NODE_ENV==='production' (prod/staging).

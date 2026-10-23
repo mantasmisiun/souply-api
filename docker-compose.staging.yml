@@ -1,41 +1,135 @@
-# STAGING souply-api → :3002 → souply_staging (souply-api.manofoto.dpdns.org).
+# STAGING — Oracle VM `souply-staging`, self-contained (mariadb + minio + api + web
+# + mailpit + tunnel). Mirrors docker-compose.oracle.yml (prod) so a promote is a
+# rehearsal of the real thing; differences are deliberate and commented.
 #
-# Built from the `staging` worktree on OMV. Image tag: souply-api:staging.
-# Independent of prod — staging can run ahead of main. Build context is the
-# parent so the shared/ sibling is included (worktree must place shared/ there).
+# Lives in /opt/souply/souply-api/ on the VM, checked out on `staging`
+# (api needs the parent for shared/, web is its own dir):
 #
-#   cd /opt/souply-staging/souply-api  # staging worktree
+#   cd /opt/souply/souply-api
+#   bash scripts/staging/init-env.sh        # once: generates .env + .env.staging
 #   docker compose -f docker-compose.staging.yml up -d --build
+#
+# Reachable two ways:
+#   - public HTTPS via the Cloudflare Tunnel: staging.souply.lt,
+#     api-staging.souply.lt, files-staging.souply.lt (single-level names —
+#     the free Universal SSL cert doesn't cover *.staging.souply.lt)
+#   - NetBird (100.77.190.238): the published ports below. The Oracle VCN only
+#     admits SSH from the internet, so they are not public.
 name: souply-staging
 services:
-  souply-api-staging:
+  mariadb:
+    image: mariadb:11.4            # same as prod
+    container_name: souply-staging-mariadb
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --max-allowed-packet=256M
+    environment:
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?run scripts/staging/init-env.sh}
+      MARIADB_DATABASE: souply_staging
+      MARIADB_USER: souply_app
+      MARIADB_PASSWORD: ${DB_APP_PASSWORD:?run scripts/staging/init-env.sh}
+    volumes:
+      - mariadb_data:/var/lib/mysql
+    # No host port — the api reaches it over the compose network; loads go via
+    # `docker exec`.
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  # Prod uses R2; staging keeps its own MinIO so it can never touch prod objects.
+  minio:
+    # Same pinned build as docker-compose.local.yml (MinIO no longer publishes
+    # community images; Chainguard rebuilds from source, latest-only → digest).
+    image: cgr.dev/chainguard/minio@sha256:d88920d6a50bd0b088223b688be3b76c63e6205dbe494437f67ba1240ea12880
+    container_name: souply-staging-minio
+    restart: unless-stopped
+    user: "0:0"                    # image is uid 65532, fresh named volume is root-owned
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?run scripts/staging/init-env.sh}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?run scripts/staging/init-env.sh}
+    ports:
+      - "9000:9000"                # S3 API (NetBird; public via files-staging)
+      - "9001:9001"                # console (NetBird only)
+    volumes:
+      - minio_data:/data
+
+  souply-api:
     build:
       context: ..
       dockerfile: souply-api/Dockerfile
     image: souply-api:staging
-    container_name: souply-api-staging
+    container_name: souply-staging-api
     restart: unless-stopped
     env_file:
-      - .env.staging            # DB_NAME=souply_staging, CORS=https://souply.manofoto.dpdns.org, ENABLE_SCHEDULER=false
+      - .env.staging               # NODE_ENV=production, ENABLE_SCHEDULER=false, no dev-auth
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      minio:
+        condition: service_started
     ports:
-      - "3002:3000"
-    networks:
-      - mysql_net
-      - minio_2_default
-      - souply_redis_default
+      - "3000:3000"                # NetBird; public via api-staging
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 30s
-networks:
-  mysql_net:
-    external: true
-    name: mysql_net
-  minio_2_default:
-    external: true
-    name: minio_2_default
-  souply_redis_default:
-    external: true
-    name: souply_redis_default
+      start_period: 40s
+
+  souply-web:
+    build:
+      context: ../souply-web
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: https://api-staging.souply.lt
+        VITE_GOOGLE_CLIENT_ID: 554949767682-oqvvbc2a3klc1tedqvbdotmg4uqkj5s3.apps.googleusercontent.com
+        VITE_APP_ENV: staging      # amber STAGING banner + [STAGING] title + noindex
+        VITE_APPLE_SERVICES_ID: lt.souply.web
+        VITE_APPLE_REDIRECT_URI: https://staging.souply.lt/auth/callback
+    image: souply-web:staging
+    container_name: souply-staging-web
+    restart: unless-stopped
+    environment:
+      SSR_API_URL: http://souply-api:3000
+      PUBLIC_ORIGIN: https://staging.souply.lt
+      OG_FALLBACK_IMAGE: https://staging.souply.lt/og-default.png
+    ports:
+      - "8080:80"                  # NetBird; public via staging.souply.lt
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:80/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # Staging never sends real email: every message lands here (UI on :8025, NetBird).
+  mailpit:
+    image: axllent/mailpit:v1.31.3
+    container_name: souply-staging-mailpit
+    restart: unless-stopped
+    ports:
+      - "8025:8025"
+
+  # Off until the tunnel exists: put CLOUDFLARE_TUNNEL_TOKEN=… and
+  # COMPOSE_PROFILES=tunnel in .env, then `up -d` starts it every time.
+  cloudflared:
+    profiles: ["tunnel"]
+    image: cloudflare/cloudflared:2026.9.3
+    container_name: souply-staging-cloudflared
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    depends_on:
+      - souply-api
+      - souply-web
+
+volumes:
+  mariadb_data:
+  minio_data:

@@ -1,6 +1,7 @@
 import pool from '../config/db.js';
 import type { Connection } from 'mysql2/promise';
 import { clampSavings } from '../util/savings.js';
+import { localizedProductNameSql, type Locale } from '../middleware/locale.js';
 
 export interface BasketTemplateRow {
     id: number;
@@ -49,6 +50,13 @@ export interface TemplateItemInput {
     quantity: number;
     unit?: string | null;
     sortOrder?: number;
+    /**
+     * A cupboard staple (salt, pepper, oil, spices) rather than real shopping.
+     * The recipe importer decides this; the recipe screen groups on it, and the
+     * keep-or-drop choice happens when a BASKET is made — not when the recipe is
+     * created, because owning salt this week says nothing about the recipe.
+     */
+    isPantry?: boolean;
 }
 
 /** The concrete intent we freeze onto a template item at save time — the
@@ -124,14 +132,20 @@ export const createTemplate = async (
         /** { kind: 'preset', iconKey } | { kind: 'emoji', emoji }. Stored as
          *  JSON; null falls back to the deterministic sample cover. */
         coverImage?: unknown;
+        /** The page an imported recipe was read from — the app stores the
+         *  shopping list, never the method, so this link IS the method. */
+        sourceUrl?: string | null;
+        /** Hostname without "www.", for the byline under the title. */
+        sourceSite?: string | null;
     } = {},
     conn?: Connection,
 ): Promise<number> => {
     const db = (conn ?? pool) as any;
     const [result]: any = await db.query(
         `INSERT INTO BasketTemplate
-            (userId, name, isDefault, autoUpdate, sourceTemplateId, coverColor, coverImage)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            (userId, name, isDefault, autoUpdate, sourceTemplateId, coverColor, coverImage,
+             sourceUrl, sourceSite)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
             userId,
             name,
@@ -140,6 +154,8 @@ export const createTemplate = async (
             opts.sourceTemplateId ?? null,
             opts.coverColor ?? null,
             opts.coverImage != null ? JSON.stringify(opts.coverImage) : null,
+            opts.sourceUrl ?? null,
+            opts.sourceSite ?? null,
         ],
     );
     return result.insertId;
@@ -184,11 +200,21 @@ export const getTemplateById = async (id: number): Promise<BasketTemplateRow | n
  * (private + unlisted + public). Public-profile / discovery queries live
  * in a separate model fn once Pass B ships.
  */
-export const getTemplatesByUserId = async (userId: string) => {
+export const getTemplatesByUserId = async (userId: string, locale: Locale = 'lt') => {
+    // `~|~`-joined preview of the template's most-recently-added product names
+    // (localized, newest-first, cap 5) — same shape as the basket chooser rows.
+    const { nameSql } = localizedProductNameSql(locale, { productAlias: 'ppv' });
+    const itemPreview = `(SELECT SUBSTRING_INDEX(
+                GROUP_CONCAT(CONVERT(${nameSql} USING utf8mb4) ORDER BY btipv.id DESC SEPARATOR '~|~'),
+                '~|~', 5)
+          FROM BasketTemplateItem btipv
+          JOIN Product ppv ON ppv.id = btipv.productId
+         WHERE btipv.templateId = bt.id)`;
     const [rows]: any = await pool.query(
         `SELECT bt.*,
                 (SELECT COUNT(*) FROM BasketTemplateItem bti
-                  WHERE bti.templateId = bt.id) AS itemCount
+                  WHERE bti.templateId = bt.id) AS itemCount,
+                ${itemPreview} AS itemPreview
            FROM BasketTemplate bt
           WHERE bt.userId = ?
           ORDER BY bt.updatedAt DESC`,
@@ -275,7 +301,8 @@ export const addCollectiveSavings = async (id: number, eur: number, conn?: Conne
 
 // ── Items ──────────────────────────────────────────────────────────────────
 
-export const getTemplateItems = async (templateId: number) => {
+export const getTemplateItems = async (templateId: number, locale: Locale = 'lt') => {
+    const loc = localizedProductNameSql(locale);
     // `isWeighable` is derived from the matched StoreProduct rows — if
     // ANY chain sells this Product by weight, treat it as weighable on
     // the client. Mirrors how `getBasketItemsByBasketId` exposes the
@@ -283,17 +310,14 @@ export const getTemplateItems = async (templateId: number) => {
     // unit, decimal keyboard, 0.1 stepper).
     const [rows]: any = await pool.query(
         `SELECT bti.*,
-                p.name AS productName,
-                (SELECT JSON_ARRAYAGG(spi.imageUrl)
-                   FROM StoreProduct spi
-                  WHERE spi.productId = bti.productId
-                    AND spi.imageUrl IS NOT NULL) AS imageUrls,
+                ${loc.nameSql} AS productName,
+                ${loc.imageUrlsSql} AS imageUrls,
                 (SELECT COALESCE(MAX(sp.isWeighable), 0)
                    FROM StoreProduct sp
                   WHERE sp.productId = bti.productId) AS isWeighable,
                 -- Drift: the live Product no longer matches what the creator
-                -- saw at save time (admin re-merge/split, rename). Lets the
-                -- client show the frozen snapshot + a "changed" hint.
+                -- saw at save time (admin re-merge/split, rename). Compares the
+                -- CANONICAL (LT) name — snapshots are LT, locale is display-only.
                 (bti.snapName IS NOT NULL AND bti.snapName <> p.name) AS hasDrifted
            FROM BasketTemplateItem bti
            JOIN Product p ON p.id = bti.productId
@@ -330,12 +354,13 @@ export const insertTemplateItemsBatch = async (
             a?.snapAmount ?? null,
             a?.snapUnit ?? null,
             a?.snapImageUrl ?? null,
+            it.isPantry ? 1 : 0,
         ];
     });
     const [res]: any = await db.query(
         `INSERT INTO BasketTemplateItem
             (templateId, productId, quantity, unit, sortOrder,
-             anchorSpId, snapName, snapAmount, snapUnit, snapImageUrl)
+             anchorSpId, snapName, snapAmount, snapUnit, snapImageUrl, isPantry)
          VALUES ?`,
         [values],
     );

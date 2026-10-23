@@ -1,4 +1,5 @@
 import type { Request, Response, NextFunction } from 'express';
+import pool from '../config/db.js';
 import { getBasketOwnerId, getBasketItemOwnerId } from '../models/basketModel.js';
 import { getBasketTemplateOwnerId } from '../models/basketTemplateModel.js';
 import { getShoppingListById, getListOwnerUserId } from '../models/shoppingListModel.js';
@@ -34,18 +35,90 @@ function ownerGuard(lookup: (id: number) => Promise<string | null>, paramName: s
 }
 
 export const requireBasketOwner = (paramName: 'id' | 'basketId' = 'id') => ownerGuard(getBasketOwnerId, paramName);
+
+/** Souply 2.0 MEMBER guard for trips: any TripMember may act (owner-only ops
+ *  pass role='owner'). Same 404-over-403 probing defense as the list guards.
+ *  Every trip-scoped route MUST use this — the authz sweep rules apply. */
+export const requireTripMember = (paramName: 'id' | 'tripId' = 'id', role?: 'owner') =>
+    async function (req: Request, res: Response, next: NextFunction): Promise<void> {
+        const tripId = num(req.params[paramName]);
+        if (!Number.isFinite(tripId) || tripId <= 0) { res.status(400).json({ error: 'invalid trip id' }); return; }
+        if (!req.authUserId) { res.status(401).json({ error: 'auth-required' }); return; }
+        const [rows]: any = await pool.query(
+            'SELECT role FROM TripMember WHERE tripId = ? AND userId = ? LIMIT 1',
+            [tripId, req.authUserId],
+        );
+        if (!rows.length) { res.status(404).json({ error: 'not found' }); return; }
+        if (role === 'owner' && rows[0].role !== 'owner') { res.status(403).json({ error: 'forbidden' }); return; }
+        next();
+    };
 export const requireBasketItemOwner = (paramName = 'id') => ownerGuard(getBasketItemOwnerId, paramName);
 export const requireBasketTemplateOwner = (paramName: 'id' | 'templateId' = 'id') => ownerGuard(getBasketTemplateOwnerId, paramName);
 
 /** OWNER guard reading the id from req.body[field] (routes with no path id, e.g. POST). */
+/** A basket is writable by its OWNER — or, for a household's SHARED basket
+ *  (Basket.householdId set), by ANY member of that household (2.0 family
+ *  basket: every member adds/edits items). */
+export const basketWritableBy = async (basketId: number, userId: string): Promise<'ok' | 'not-found' | 'forbidden'> => {
+    const [rows]: any = await pool.query('SELECT userId, householdId FROM Basket WHERE id = ? LIMIT 1', [basketId]);
+    const basket = rows[0];
+    if (!basket) return 'not-found';
+    if (basket.userId === userId) return 'ok';
+    if (basket.householdId != null) {
+        const [m]: any = await pool.query(
+            'SELECT 1 FROM HouseholdMember WHERE householdId = ? AND userId = ? LIMIT 1',
+            [basket.householdId, userId]);
+        if (m.length > 0) return 'ok';
+    }
+    return 'forbidden';
+};
+
 export const requireBasketOwnerFromBody = (field = 'basketId') =>
     async function (req: Request, res: Response, next: NextFunction): Promise<void> {
         const id = num(req.body?.[field]);
         if (!Number.isFinite(id) || id <= 0) { res.status(400).json({ error: `invalid ${field}` }); return; }
         if (!req.authUserId) { res.status(401).json({ error: 'auth-required' }); return; }
-        const owner = await getBasketOwnerId(id);
-        if (owner === null) { res.status(404).json({ error: 'not found' }); return; }
-        if (owner !== req.authUserId) { res.status(403).json({ error: 'forbidden' }); return; }
+        const verdict = await basketWritableBy(id, req.authUserId);
+        if (verdict === 'not-found') { res.status(404).json({ error: 'not found' }); return; }
+        if (verdict === 'forbidden') { res.status(403).json({ error: 'forbidden' }); return; }
+        next();
+    };
+
+/** BASKET-scoped guard honouring the shared-basket rule, reading the id from a
+ *  path param. The counterpart to requireBasketOwnerFromBody (which, despite its
+ *  name, already applies basketWritableBy).
+ *
+ *  Use this — not requireBasketOwner — on any route a household member must
+ *  reach for the family basket. Members could already ADD, EDIT and DELETE
+ *  items while being unable to LIST them or use the by-product upsert (the
+ *  catalog stepper's path), which made the shared basket unusable for everyone
+ *  except the household creator.
+ *
+ *  Personal baskets are unaffected: basketWritableBy only widens when
+ *  Basket.householdId IS NOT NULL, otherwise it is a plain owner check. */
+export const requireBasketWritable = (paramName: 'id' | 'basketId' = 'basketId') =>
+    async function (req: Request, res: Response, next: NextFunction): Promise<void> {
+        const id = num(req.params[paramName]);
+        if (!Number.isFinite(id) || id <= 0) { res.status(400).json({ error: 'invalid basket id' }); return; }
+        if (!req.authUserId) { res.status(401).json({ error: 'auth-required' }); return; }
+        const verdict = await basketWritableBy(id, req.authUserId);
+        if (verdict === 'not-found') { res.status(404).json({ error: 'not found' }); return; }
+        if (verdict === 'forbidden') { res.status(403).json({ error: 'forbidden' }); return; }
+        next();
+    };
+
+/** Item-level guard honouring the same shared-basket rule: resolve the
+ *  item's basket, then apply basketWritableBy. */
+export const requireBasketItemWritable = (paramName = 'id') =>
+    async function (req: Request, res: Response, next: NextFunction): Promise<void> {
+        const itemId = num(req.params[paramName]);
+        if (!Number.isFinite(itemId) || itemId <= 0) { res.status(400).json({ error: 'invalid id' }); return; }
+        if (!req.authUserId) { res.status(401).json({ error: 'auth-required' }); return; }
+        const [rows]: any = await pool.query('SELECT basketId FROM BasketItem WHERE id = ? LIMIT 1', [itemId]);
+        if (!rows[0]) { res.status(404).json({ error: 'not found' }); return; }
+        const verdict = await basketWritableBy(Number(rows[0].basketId), req.authUserId);
+        if (verdict === 'not-found') { res.status(404).json({ error: 'not found' }); return; }
+        if (verdict === 'forbidden') { res.status(403).json({ error: 'forbidden' }); return; }
         next();
     };
 

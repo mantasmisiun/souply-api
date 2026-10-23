@@ -6,6 +6,9 @@ import { runRimiPromoScraper } from './rimi/index.js';
 import { runLidlPromoScraper } from './lidl/index.js';
 import { runScraperWithRetry } from './shared/runWithRetry.js';
 import { recalcGlobalScores } from '../models/productInteractionModel.js';
+import { refreshUserProductScores } from '../services/productAffinityService.js';
+import { sweepTripAutoArchive } from '../services/tripArchiveService.js';
+import { sweepBasketAutoArchive } from '../services/basketArchiveService.js';
 import { refreshDiscountedSummary } from '../models/productModel.js';
 import { propagateCrossChainImages } from '../services/imagePropagationService.js';
 import { sendDailyReceiptIssuesReport } from '../services/adminDailyReportService.js';
@@ -57,9 +60,44 @@ cron.schedule('0 6 * * 4', () => run('Thu', [{ name: 'Norfa', fn: runNorfaPromoS
 // Saturday 06:00 — Lidl weekend "super savaitgalis" starts
 cron.schedule('0 6 * * 6', () => run('Sat', [{ name: 'Lidl', fn: runLidlPromoScraper }]), { timezone: 'Europe/Vilnius' });
 
-// Nightly 03:00 — keep globalScore fresh for anonymous browse
-cron.schedule('0 3 * * *', () => {
-    recalcGlobalScores().catch(e => console.error('[Scheduler] Global score recalc failed:', e.message));
+// Hourly — Souply 2.0 trip auto-archive (48 h forming / 7 d planned; set-based,
+// two UPDATEs). Hourly keeps the notification dot honest within the hour of a
+// threshold crossing without any per-trip scheduling.
+cron.schedule('15 * * * *', () => {
+    sweepTripAutoArchive().catch(e => console.error('[Scheduler] Trip archive sweep failed:', e.message));
+    // Abandoned-cart sweep: personal draft/compared baskets idle ≥48 h with no
+    // shopping list leave the resumable pool (never silently resurrected).
+    sweepBasketAutoArchive().catch(e => console.error('[Scheduler] Basket archive sweep failed:', e.message));
+}, { timezone: 'Europe/Vilnius' });
+
+/**
+ * Nightly 03:00 — re-decay BOTH halves of the popularity picture.
+ *
+ * `globalScore` keeps anonymous browse fresh. The per-user scores need the same
+ * treatment for a subtler reason: they are written only when a shopper
+ * interacts, with the decay baked in AT WRITE TIME, so a habit dropped a year
+ * ago stays at full strength while the global half decays nightly — and every
+ * comparison between the two drifts apart. Measured before this ran: stored
+ * scores were a median 36 % too high.
+ *
+ * SEQUENTIAL, not fire-and-forget. Both statements scan `ProductInteraction`
+ * into a temp table, and launching them together put them on the same
+ * connections at the same moment — the exact race the 03:30 job below carries a
+ * comment forbidding. Running in series also means the two halves are computed
+ * against the same clock, which is the whole point of refreshing them together.
+ */
+cron.schedule('0 3 * * *', async () => {
+    try {
+        await recalcGlobalScores();
+    } catch (e: any) {
+        console.error('[Scheduler] Global score recalc failed:', e.message);
+    }
+    try {
+        const n = await refreshUserProductScores();
+        console.log(`[Scoring] Re-decayed ${n} per-user score(s).`);
+    } catch (e: any) {
+        console.error('[Scheduler] User score re-decay failed:', e.message);
+    }
 }, { timezone: 'Europe/Vilnius' });
 
 // Nightly 03:30 — propagate cross-chain images so newly-scraped chain

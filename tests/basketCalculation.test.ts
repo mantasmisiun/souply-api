@@ -129,6 +129,25 @@ describe('pickCheapestForQuantity — non-weighable per-total semantics', () => 
         expect(result!.id).toBe(3);
     });
 
+    it('null canonical: a count quantity prices as PACKS, not divided by pack weight', () => {
+        // Regression: a product with no canonical (no own SPs → resolved via a
+        // substitute) whose SP is an 80 g bar stored as 0.08 kg. The client sent
+        // a COUNT of 1. Must price 1 pack — NOT ceil(1 / 0.08) = 13 packs.
+        const bar = makeSpRow({ id: 1, price: '2.19', amount: '0.08', unit: 'kg', isWeighable: false });
+        const priced = priceItem(100, 1, 'Chocolate bar', 'sku',
+            { ...bar, effectivePrice: 2.19 }, { isSubstituted: true, isCrossChainAverage: false }, null);
+        expect(priced.packsNeeded).toBe(1);
+        expect(priced.totalPrice).toBeCloseTo(2.19); // 1 × 2.19, not 13 × 2.19
+    });
+
+    it('null canonical: weighable item still scales by weight', () => {
+        // A weighable substitute (per-kg) under a null canonical keeps weight math.
+        const deli = makeSpRow({ id: 1, price: '10.00', amount: '1', unit: 'kg', isWeighable: true });
+        const priced = priceItem(100, 0.5, 'Deli item', 'sku',
+            { ...deli, effectivePrice: 10.00 }, { isSubstituted: true, isCrossChainAverage: false }, null);
+        expect(priced.totalPrice).toBeCloseTo(5.00); // 0.5 kg × 10.00/kg
+    });
+
     it('excludes outlier-family SPs from the candidate pool', () => {
         // Product is fluid-majority (2 fluid + 1 count). The count SP is an
         // outlier — must never win even if its raw price is lower.

@@ -14,6 +14,7 @@ import {
     ackAutoUpdate,
     generateShareLink,
     revokeShareLink,
+    createTemplateInvite,
     fetchSharedTemplate,
     buildDefault,
     duplicateTemplate,
@@ -181,6 +182,18 @@ router.post('/basket-templates/:id/ack-auto-update', requireUser, ackAutoUpdate)
  */
 router.post('/basket-templates/:id/share', requireUser, attachVerifiedUser, generateShareLink);
 router.delete('/basket-templates/:id/share', requireUser, attachVerifiedUser, revokeShareLink);
+
+/**
+ * @swagger
+ * /api/basket-templates/{id}/invites:
+ *   post:
+ *     summary: Addressed invite ({ email? | handle? }) — delivers the /t/:slug share link
+ *     description: |
+ *       Owner-only. Mirrors POST /trips/:id/invites — registered target gets
+ *       an in-app notification, unknown email gets a branded invite email,
+ *       and the 200 response never reveals whether the target exists.
+ */
+router.post('/basket-templates/:id/invites', requireUser, attachVerifiedUser, createTemplateInvite);
 
 /**
  * @swagger

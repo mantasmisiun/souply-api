@@ -1,4 +1,5 @@
 import * as cheerio from 'cheerio';
+import { fetchWithRetry } from '../shared/net.js';
 import { parseSize } from '../shared/parseSize.js';
 import { upsertPromo, upsertPriceForSpId } from '../shared/promoUpsert.js';
 import { fuzzyMatchSpMulti } from '../shared/productMatcher.js';
@@ -15,16 +16,19 @@ const HEADERS = {
     'Accept': 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.8',
 };
 
-// "MM DD-MM DD" or "MM DD- MM DD" → end date at 23:59:59
-function parsePromoEnd(moreInfoText: string): Date | null {
+// "MM DD-MM DD" or "MM DD- MM DD" → full promo window. The START (groups 1-2)
+// was always in the flyer text — now captured so future-dated promos insert
+// with validFrom instead of showing the promo price early.
+function parsePromoWindow(moreInfoText: string): { promoStart: Date | null; promoEnd: Date } | null {
     const m = moreInfoText.match(/(\d{2})\s+(\d{2})\s*-\s*(\d{2})\s+(\d{2})/);
     if (!m) return null;
-    const month = parseInt(m[3], 10) - 1;
-    const day = parseInt(m[4], 10);
     const now = new Date();
-    const d = new Date(now.getFullYear(), month, day, 23, 59, 59, 0);
-    if (d < now) d.setFullYear(d.getFullYear() + 1);
-    return d;
+    const end = new Date(now.getFullYear(), parseInt(m[3], 10) - 1, parseInt(m[4], 10), 23, 59, 59, 0);
+    if (end < now) end.setFullYear(end.getFullYear() + 1);
+    let start: Date | null = new Date(end.getFullYear(), parseInt(m[1], 10) - 1, parseInt(m[2], 10), 0, 0, 0, 0);
+    if (start > end) start.setFullYear(start.getFullYear() - 1); // Dec→Jan span
+    if (start <= now) start = null; // only future starts matter (validFrom semantics)
+    return { promoStart: start, promoEnd: end };
 }
 
 function parseEuroPrice(text: string): number | null {
@@ -34,11 +38,13 @@ function parseEuroPrice(text: string): number | null {
     return Number.isFinite(val) && val > 0 ? val : null;
 }
 
-interface ScrapedProduct {
+export interface ScrapedProduct {
     name: string;
     imageUrl: string | null;
     regularPrice: number;
-    promoPrice: number;
+    /** null = no-discount price stamp (regular-price observation, Lidl parity). */
+    promoPrice: number | null;
+    promoStart: Date | null;
     promoEnd: Date;
 }
 
@@ -52,22 +58,27 @@ function parseProducts(html: string): ScrapedProduct[] {
         const name = card.find('.c-product__name').first().text().trim();
         if (!name) return;
 
-        const oldPriceText = card.find('.c-product__old-price').first().text().trim();
-        const regularPrice = parseEuroPrice(oldPriceText);
-        if (!regularPrice) return;
+        const priceText = card.find('.c-product__price').first().text().trim();
+        const price = parseEuroPrice(priceText);
+        if (!price) return;
 
-        const promoPriceText = card.find('.c-product__price').first().text().trim();
-        const promoPrice = parseEuroPrice(promoPriceText);
-        if (!promoPrice || promoPrice >= regularPrice) return;
+        // Discount card: old price present → promo. No old price → the flyer
+        // is a plain price stamp (arbūzas 0.55 €) — keep it as a REGULAR-price
+        // observation (essential grocery data, same treatment as Lidl).
+        const oldPriceText = card.find('.c-product__old-price').first().text().trim();
+        const oldPrice = parseEuroPrice(oldPriceText);
+        const regularPrice = oldPrice ?? price;
+        const promoPrice = oldPrice != null && price < oldPrice ? price : null;
+        if (oldPrice != null && promoPrice == null) return; // old ≥ new — malformed card
 
         const moreInfo = card.find('.c-more-info__content').first().text();
-        const promoEnd = parsePromoEnd(moreInfo);
-        if (!promoEnd) return;
+        const window = parsePromoWindow(moreInfo);
+        if (!window) return;
 
         const imgEl = card.find('.c-product__media img').first();
         const imageUrl = imgEl.attr('src') ?? null;
 
-        products.push({ name, imageUrl, regularPrice, promoPrice, promoEnd });
+        products.push({ name, imageUrl, regularPrice, promoPrice, promoStart: window.promoStart, promoEnd: window.promoEnd });
     });
 
     return products;
@@ -82,6 +93,8 @@ interface Counters {
 }
 
 async function processRusiai(item: ScrapedProduct, c: Counters): Promise<void> {
+    const promoPrice = item.promoPrice;
+    if (promoPrice == null) { await processClean(item, c); return; } // narrowing; routed earlier
     const parsed = parseRusiai(item.name);
     if (!parsed) {
         // Fallback: treat as clean product
@@ -103,7 +116,8 @@ async function processRusiai(item: ScrapedProduct, c: Counters): Promise<void> {
             for (const sp of matches) {
                 const r = await upsertPriceForSpId(
                     sp.id, NORFA_CHAIN_ID, item.imageUrl,
-                    item.regularPrice, item.promoPrice, item.promoEnd,
+                    item.regularPrice, promoPrice, item.promoEnd,
+                    false, item.promoStart,
                 );
                 if (r === 'inserted') c.inserted++;
                 else c.skipped++;
@@ -119,6 +133,7 @@ async function processRusiai(item: ScrapedProduct, c: Counters): Promise<void> {
                 imageUrl: item.imageUrl,
                 regularPrice: item.regularPrice,
                 promoPrice: item.promoPrice,
+                promoStart: item.promoStart,
                 promoEnd: item.promoEnd,
             });
             if (r === 'skipped')              c.skipped++;
@@ -142,6 +157,7 @@ async function processVariants(item: ScrapedProduct, c: Counters): Promise<void>
             imageUrl: item.imageUrl,
             regularPrice: item.regularPrice,
             promoPrice: item.promoPrice,
+            promoStart: item.promoStart,
             promoEnd: item.promoEnd,
         });
         if (r === 'skipped')              c.skipped++;
@@ -162,6 +178,7 @@ async function processClean(item: ScrapedProduct, c: Counters): Promise<void> {
         imageUrl: item.imageUrl,
         regularPrice: item.regularPrice,
         promoPrice: item.promoPrice,
+        promoStart: item.promoStart,
         promoEnd: item.promoEnd,
     });
     if (r === 'skipped')              c.skipped++;
@@ -170,21 +187,29 @@ async function processClean(item: ScrapedProduct, c: Counters): Promise<void> {
     else c.inserted++;
 }
 
+/** Scrape-only pass (no DB writes) — shared by the real run and the dry harness. */
+export async function collectNorfaProducts(): Promise<ScrapedProduct[]> {
+    const res = await fetchWithRetry(OFFERS_URL, { headers: HEADERS });
+    return parseProducts(await res.text());
+}
+
 export async function runNorfaPromoScraper(): Promise<void> {
     console.log('[Norfa] Starting promo scrape…');
     const c: Counters = { inserted: 0, skipped: 0, spCreated: 0, productCreated: 0, parseErrors: 0 };
 
     try {
-        const res = await fetch(OFFERS_URL, { headers: HEADERS });
-        if (!res.ok) throw new Error(`HTTP ${res.status} fetching Norfa offers`);
-        const html = await res.text();
-
-        const allProducts = parseProducts(html);
+        const allProducts = await collectNorfaProducts();
         console.log(`[Norfa] ${allProducts.length} discounted products parsed`);
 
         for (let i = 0; i < allProducts.length; i++) {
             const item = allProducts[i];
             try {
+                // No-discount price stamps go straight to the clean path — the
+                // aggregate handlers' slot-fill needs a numeric promo price.
+                if (item.promoPrice == null) {
+                    await processClean(item, c);
+                    continue;
+                }
                 const isRusiai  = /rūšių/i.test(item.name);
                 const isArbaIr  = !isRusiai && (/\barba\b/.test(item.name) || /[A-ZÄÖÜÕŽŠĖ]\s+ir\s+[A-ZÄÖÜÕŽŠĖ]/.test(item.name));
                 const multiBrand = (!isRusiai && !isArbaIr) ? expandMultiBrand(item.name) : null;
@@ -205,6 +230,7 @@ export async function runNorfaPromoScraper(): Promise<void> {
                             imageUrl: item.imageUrl,
                             regularPrice: item.regularPrice,
                             promoPrice: item.promoPrice,
+                            promoStart: item.promoStart,
                             promoEnd: item.promoEnd,
                         });
                         if (r === 'skipped')              c.skipped++;

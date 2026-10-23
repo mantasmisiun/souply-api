@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import pool from '../config/db.js';
 import { auditLog } from '../models/adminInviteModel.js';
+import { ADMIN_OPEN_ACCESS } from '../config/adminAccess.js';
 
 /**
  * Gate for admin-only endpoints.
@@ -22,6 +23,9 @@ export const requireAdmin = async (
         res.status(401).json({ error: 'X-Admin-Id header required' });
         return;
     }
+
+    // Dev-only open access: any authenticated header passes (see config/adminAccess).
+    if (ADMIN_OPEN_ACCESS) { next(); return; }
 
     const [rows]: any = await pool.query(
         `SELECT isAdmin, shadowBanned FROM User WHERE id = ? LIMIT 1`,

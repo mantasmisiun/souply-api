@@ -1,8 +1,40 @@
 import { Request, Response, NextFunction } from 'express';
-import { createBasketItem, getBasketItemById, getBasketItemsByBasketId, updateBasketItemQuantity, deleteBasketItem, getBasketItemByBasketAndProduct, convertBasketItemsMode } from '../models/basketItemModel.js';
+import { createBasketItem, getBasketItemById, getBasketItemsByBasketId, updateBasketItemQuantity, deleteBasketItem, getBasketItemByBasketAndProduct, convertBasketItemsMode, getBasketQuantitiesByBasketId, upsertBasketItemByProduct } from '../models/basketItemModel.js';
 import { getProductById } from '../models/productModel.js';
-import { getBasketById, updateBasketUpdatedAt, markBasketUserEdited } from '../models/basketModel.js';
+import { getBasketById, updateBasketUpdatedAt, markBasketUserEdited, updateBasketStatus } from '../models/basketModel.js';
 import { logInteraction } from '../models/productInteractionModel.js';
+
+/**
+ * EDIT GATE for a basket's items. A 'compared' basket is one we have PRICED, not
+ * one that is finished — editing it is normal (the user adds a forgotten item
+ * after seeing the store results), it just invalidates those results. So editing
+ * REVERTS it to 'draft' rather than being refused.
+ *
+ * This used to reject anything non-draft, and only the basket-detail screen knew
+ * to call its own revertToDraftIfCompared() first. Every other entry point (the
+ * catalog card + amount modal, product detail, search, the session dock) hit a
+ * silent 400: the spinner ran, the item never landed, the button fell back to
+ * "Add". Enforcing the rule HERE — the one choke point all of them share — fixes
+ * every path at once instead of duplicating the revert into each surface.
+ *
+ * 'inProgress' / 'completed' stay refused: those have shopping lists or receipts
+ * hanging off them, so mutating their items really would corrupt state.
+ *
+ * Returns `reverted` so the response can tell the client its cached price
+ * results for this basket are now stale.
+ */
+type EditGate = { ok: true; reverted: boolean } | { ok: false; status: number; error: string };
+
+export const ensureBasketEditable = async (basketId: number): Promise<EditGate> => {
+    const basket = await getBasketById(basketId);
+    if (!basket) return { ok: false, status: 404, error: 'Basket not found' };
+    if (basket.status === 'draft') return { ok: true, reverted: false };
+    if (basket.status === 'compared') {
+        await updateBasketStatus(basketId, 'draft');
+        return { ok: true, reverted: true };
+    }
+    return { ok: false, status: 400, error: 'Cannot modify a basket that is not in draft status' };
+};
 
 export const addBasketItem = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -22,12 +54,13 @@ export const addBasketItem = async (req: Request, res: Response, next: NextFunct
             res.status(404).json({ error: 'Basket not found' });
             return;
         }
-        if (basket.status !== 'draft') {
-            res.status(400).json({ error: 'Cannot modify a basket that is not in draft status' });
+        const gate = await ensureBasketEditable(basketId);
+        if (!gate.ok) {
+            res.status(gate.status).json({ error: gate.error });
             return;
         }
 
-        const product = await getProductById(productId);
+        const product = await getProductById(productId, req.locale);
         if (!product) {
             res.status(404).json({ error: 'Product not found' });
             return;
@@ -46,7 +79,9 @@ export const addBasketItem = async (req: Request, res: Response, next: NextFunct
         // the basket is no longer "untouched template instance".
         await markBasketUserEdited(basketId);
         logInteraction(basket.userId, productId, 'basket_add').catch(() => {});
-        res.status(201).json({ id, basketId, productId, quantity, matchMode: resolvedMatchMode });
+        // `revertedToDraft` → the client drops its cached price results for this
+        // basket; they were computed before this item existed.
+        res.status(201).json({ id, basketId, productId, quantity, matchMode: resolvedMatchMode, revertedToDraft: gate.reverted });
     } catch (error) {
         next(error);
     }
@@ -60,8 +95,69 @@ export const fetchBasketItemsByBasketId = async (req: Request, res: Response, ne
             return;
         }
         const basket = await getBasketById(basketId);
-        const items = await getBasketItemsByBasketId(basketId, basket?.userId ?? null);
+        const items = await getBasketItemsByBasketId(basketId, basket?.userId ?? null, req.locale);
         res.json(items);
+    } catch (error) {
+        next(error);
+    }
+};
+
+/**
+ * GET /api/baskets/:basketId/quantities → { "<productId>": qty }
+ *
+ * The catalog surfaces' read: just enough to decide Add vs stepper. See
+ * getBasketQuantitiesByBasketId for why this exists next to /items.
+ */
+export const fetchBasketQuantities = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const basketId = Number(req.params.basketId);
+        if (isNaN(basketId)) {
+            res.status(400).json({ error: 'Invalid basket ID' });
+            return;
+        }
+        res.json(await getBasketQuantitiesByBasketId(basketId));
+    } catch (error) {
+        next(error);
+    }
+};
+
+/**
+ * PUT /api/baskets/:basketId/items/by-product/:productId  { quantity, matchMode? }
+ *
+ * Set a product's quantity in one call — the stepper's write. quantity 0 removes
+ * the line. Addressing by PRODUCT is what removes the client's "fetch the whole
+ * basket to find the row id" step before every ±.
+ *
+ * Same edit gate as every other item mutation (a priced basket reverts to
+ * draft), and the same interaction logging as a fresh add.
+ */
+export const putBasketItemByProduct = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const basketId = Number(req.params.basketId);
+        const productId = Number(req.params.productId);
+        const quantity = Number(req.body?.quantity);
+        const matchMode = req.body?.matchMode === 'base' ? 'base' : 'sku';
+        if (!Number.isFinite(basketId) || !Number.isFinite(productId) || !Number.isFinite(quantity)) {
+            res.status(400).json({ error: 'basketId, productId and quantity are required' });
+            return;
+        }
+
+        const gate = await ensureBasketEditable(basketId);
+        if (!gate.ok) {
+            res.status(gate.status).json({ error: gate.error });
+            return;
+        }
+
+        const result = await upsertBasketItemByProduct(basketId, productId, quantity, matchMode);
+        await updateBasketUpdatedAt(basketId);
+        await markBasketUserEdited(basketId);
+        if (result.created) {
+            const basket = await getBasketById(basketId);
+            if (basket?.userId) {
+                logInteraction(basket.userId, productId, 'basket_add').catch(() => {});
+            }
+        }
+        res.json({ ...result, revertedToDraft: gate.reverted });
     } catch (error) {
         next(error);
     }
@@ -83,21 +179,17 @@ export const updateBasketItem = async (req: Request, res: Response, next: NextFu
             return;
         }
 
-        // Check basket status
-        const basket = await getBasketById(basketItem.basketId);
-        if (!basket) {
-            res.status(404).json({ error: 'Basket not found' });
-            return;
-        }
-        if (basket.status !== 'draft') {
-            res.status(400).json({ error: 'Cannot modify a basket that is not in draft status' });
+        // Editing quantity is an edit like any other — a priced basket reverts.
+        const gate = await ensureBasketEditable(basketItem.basketId);
+        if (!gate.ok) {
+            res.status(gate.status).json({ error: gate.error });
             return;
         }
 
         await updateBasketItemQuantity(id, quantity);
         await updateBasketUpdatedAt(basketItem.basketId);
         await markBasketUserEdited(basketItem.basketId);
-        res.json({ id, quantity });
+        res.json({ id, quantity, revertedToDraft: gate.reverted });
     } catch (error) {
         next(error);
     }
@@ -112,6 +204,15 @@ export const removeBasketItem = async (req: Request, res: Response, next: NextFu
         }
         // Look up the row before deleting so we know which basket to bump.
         const basketItem = await getBasketItemById(id);
+        if (basketItem) {
+            // Removing an item from a priced basket reverts it too — otherwise the
+            // stored results would price a line the basket no longer holds.
+            const gate = await ensureBasketEditable(basketItem.basketId);
+            if (!gate.ok) {
+                res.status(gate.status).json({ error: gate.error });
+                return;
+            }
+        }
         await deleteBasketItem(id);
         if (basketItem) {
             await updateBasketUpdatedAt(basketItem.basketId);

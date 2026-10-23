@@ -18,7 +18,8 @@ import mysql from 'mysql2/promise';
  * admin — see tests/schema/README.md.
  */
 export default async function globalSetup() {
-    dotenv.config({ path: resolve(process.cwd(), '.env.test') });
+    // `npm run test:local` points this at .env.test.local (same knob as src/config/env.ts).
+    dotenv.config({ path: resolve(process.cwd(), process.env.DOTENV_CONFIG_PATH || '.env.test') });
 
     const dbName = process.env.DB_NAME;
     const conn = await mysql.createConnection({
@@ -55,6 +56,23 @@ export default async function globalSetup() {
             const [after]: any = await conn.query('SHOW TABLES');
             // eslint-disable-next-line no-console
             console.log(`[testdb] bootstrapped ${dbName}: ${after.length} tables`);
+        }
+
+        // Already in tests/schema/schema.sql, but that dump is only loaded into
+        // a COMPLETELY EMPTY database — a souply_test_ci bootstrapped from an
+        // older dump would otherwise never gain these tables/columns. Both
+        // are idempotent (CREATE TABLE IF NOT EXISTS / ADD COLUMN IF NOT
+        // EXISTS), so re-running them every boot costs nothing.
+        for (const file of [
+            'sql/household_ledger.sql',
+            'sql/household_member_leaving.sql',
+            'sql/receipt_item_family_scope.sql',
+        ]) {
+            const sql = readFileSync(resolve(process.cwd(), file), 'utf8')
+                .split('\n').filter(l => !l.trimStart().startsWith('--')).join('\n');
+            for (const stmt of sql.split(';').map(s => s.trim()).filter(Boolean)) {
+                await conn.query(stmt);
+            }
         }
 
         // Reference rows that tests assume exist. The "Nepriskirta"

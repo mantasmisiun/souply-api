@@ -378,12 +378,23 @@ export interface NameLaneProv {
     abbrev?: number;   // abbreviation bonus added
 }
 
+// Typed (basket) mode: a mild, SYMMETRIC penalty for words on one side but not
+// the other, so a branded SP ("Rokiškio Naminis sviestas") ranks just BELOW the
+// exact item ("Naminis sviestas") without ever being dropped. (Query-extra words
+// are already penalised by the length-weighted token average; this adds the
+// mirror for candidate-extra words.) Mild by design — nudges ranking, never gates.
+const TYPED_EXTRA_WORD_PENALTY = 0.03;   // per uncovered candidate long token
+const TYPED_EXTRA_WORD_CAP = 0.09;
+
 function scoreNameConfidence(
     normalizedQuery: string,
     queryTokens: string[],
     normalizedName: string,
     nameTokens: string[],
     prov?: NameLaneProv,
+    // typed=true: clean catalog input (basket). Skips the OCR space-heal and adds
+    // the symmetric length penalty. Default false → OCR receipt path unchanged.
+    typed = false,
 ): number {
     // Anchor-token gate: a single-significant-word query may only match a name that
     // contains it EXACTLY, unless the two strings are near-identical char-wise (the
@@ -397,7 +408,9 @@ function scoreNameConfidence(
     // OCR space-heal the query against THIS name so a split word ("KIAUL IENA") is
     // glued back ("kiauliena") before the token lane scores it.
     const sharedAnchor = sharedSignificantToken(normalizedQuery, normalizedName);
-    const healedQuery = healQueryTokens(queryTokens, nameTokens);
+    // Typed input never has OCR-split words, so skip the space-heal (which could
+    // otherwise mis-glue two legitimately separate typed words).
+    const healedQuery = typed ? queryTokens : healQueryTokens(queryTokens, nameTokens);
     if (prov) prov.healed = healedQuery.join(' ') !== queryTokens.join(' ');
 
     let tokenScore = scoreTokens(healedQuery, nameTokens);
@@ -458,6 +471,16 @@ function scoreNameConfidence(
         }
         if (prov) prov.abbrev = abbrevAdd;
     }
+    // Typed: mild symmetric length penalty — dock for candidate long tokens the
+    // query never covered (the branded-word case), floored at 0 so a genuine
+    // match is nudged in ranking, never dropped.
+    if (typed && confidence > 0) {
+        const SHORT = RECOGNITION.match.shortTokenThreshold;
+        const uncovered = nameTokens
+            .filter(t => t.length > SHORT)
+            .filter(ct => bestTokenMatch(ct, healedQuery, true) < RECOGNITION.match.tokenMatchThreshold).length;
+        if (uncovered > 0) confidence = Math.max(0, confidence - Math.min(TYPED_EXTRA_WORD_CAP, uncovered * TYPED_EXTRA_WORD_PENALTY));
+    }
     return confidence;
 }
 
@@ -499,7 +522,11 @@ export function findBestProductMatches(
     // onto a packaged "Raudonosios paprikos BON VIA" (180 g) — different product
     // forms the name matcher can't tell apart. Null = no gate (legacy callers).
     ocrIsWeighable: boolean | null = null,
+    // typed=true: clean catalog/basket input — skips OCR space-heal, adds the
+    // symmetric length penalty. Default {} → receipt/OCR behaviour unchanged.
+    opts: { typed?: boolean } = {},
 ): ProductMatch[] {
+    const { typed = false } = opts;
     const normalizedQuery = normalizeProductName(ocrName);
     const queryTokens = tokenize(normalizedQuery);
     if (queryTokens.length === 0) return [];
@@ -569,12 +596,12 @@ export function findBestProductMatches(
         // normalizeProductName as the query). scoreNameConfidence applies the anchor
         // gate + all lanes per name and returns 0 when gated.
         let confidence = candTokens.length > 0
-            ? scoreNameConfidence(normalizedQuery, queryTokens, normalizedCand, candTokens)
+            ? scoreNameConfidence(normalizedQuery, queryTokens, normalizedCand, candTokens, undefined, typed)
             : 0;
         for (const alias of cand.aliases ?? []) {
             const aliasTokens = tokenize(alias);
             if (aliasTokens.length === 0) continue;
-            const aliasConf = scoreNameConfidence(normalizedQuery, queryTokens, alias, aliasTokens);
+            const aliasConf = scoreNameConfidence(normalizedQuery, queryTokens, alias, aliasTokens, undefined, typed);
             if (aliasConf > confidence) confidence = aliasConf;
         }
         if (confidence <= 0) continue;

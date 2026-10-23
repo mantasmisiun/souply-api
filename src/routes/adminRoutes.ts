@@ -49,6 +49,8 @@ import {
     applySplit,
 } from '../controllers/adminReceiptSplitController.js';
 import { mergeProductsHandler, moveProductsHandler, renameProductHandler } from '../controllers/adminCatalogController.js';
+import { getScrapeDays, getScrapeReview, setScrapeVerification } from '../controllers/adminScrapeReviewController.js';
+import { getProductCategorySuggestions } from '../controllers/adminCategorySuggestController.js';
 import {
     getAdminProductDetail,
     deleteAdminStoreProduct,
@@ -124,6 +126,13 @@ router.get('/admin/amounts/:spId/receipt-crop', requireAdmin, getAmountReceiptCr
 // doesn't greedily match them as the dynamic param.
 router.get('/admin/products/search', requireAdmin, adminProductSearch);
 router.get('/admin/categories/search', requireAdmin, adminCategorySearch);
+// Scrape review: inspect a chain's scrape day, checkmark/flag products.
+router.get('/admin/catalog/scrape-days', requireAdmin, getScrapeDays);
+router.get('/admin/catalog/scrape-review', requireAdmin, getScrapeReview);
+router.post('/admin/catalog/scrape-review/verify', requireAdmin, adminRateLimit, setScrapeVerification);
+
+router.get('/admin/products/:id/category-suggestions', requireAdmin, getProductCategorySuggestions);
+
 router.post('/admin/products/merge', requireAdmin, adminRateLimit, mergeProductsHandler);
 router.post('/admin/products/move', requireAdmin, adminRateLimit, moveProductsHandler);
 router.get('/admin/products/:id', requireAdmin, getAdminProductDetail);

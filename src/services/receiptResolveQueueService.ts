@@ -68,6 +68,7 @@ export async function buildReceiptResolveCards(
     receiptId: number,
     conn: Db,
     limit: number = RECOGNITION.queue.mandatoryReceiptMax,
+    quiet: boolean = false,
 ): Promise<ReceiptResolveResult> {
     const [rows]: any = await conn.query('SELECT parsedData FROM Receipt WHERE id = ?', [receiptId]);
     const raw = rows?.[0]?.parsedData;
@@ -135,7 +136,10 @@ export async function buildReceiptResolveCards(
                 .map((am: any) => ({
                     am,
                     rank: (Number.isFinite(am?.confidence) ? Number(am.confidence) : 0)
-                        + (am?.viaPrice ? RECOGNITION.price.fishPriceBonus : 0),
+                        + (am?.viaPrice ? RECOGNITION.price.fishPriceBonus : 0)
+                        // A list-anchored candidate (the linked shopping list's product) is
+                        // strong same-chain corroboration — same tier as the price anchor.
+                        + (am?.viaList ? RECOGNITION.list.listBonus : 0),
                 }))
                 .sort((a: any, b: any) => b.rank - a.rank);
             let proposal: { spId: number; name: string | null; imageUrl: string | null; sourceChainId?: number } | null = null;
@@ -206,7 +210,9 @@ export async function buildReceiptResolveCards(
         else t.verdict = 'SKIP over card limit (deprioritized this session)';
     }
 
-    console.log(
+    // Suppressed on the COUNT path (the badge check) — it fires on every stats
+    // view and only carded-vs-skipped bookkeeping, no serve. Kept for real serves.
+    if (!quiet) console.log(
         `=== RECEIPT ${receiptId} CARDING (chain ${Number.isFinite(chainId) ? chainId : '—'}, limit ${limit}) ===\n` +
         trail.map((t) =>
             `  L${t.idx} ${JSON.stringify(t.ocr)} → ${t.sp ? `SP ${t.sp}${t.name ? ` ${JSON.stringify(t.name)}` : ''}` : 'no SP'}` +
@@ -250,17 +256,34 @@ export async function buildReceiptResolveCards(
 }
 
 /**
- * Terminal ask-once write for a completed MANDATORY session: every Card-B line
- * still SERVABLE (offered but not yet resolved by a vote) is recorded 'asked',
- * so future sessions don't re-nag it. Called from POST /complete-swipes — NOT
- * from the resolve-queue GET, which must stay a pure idempotent read (else a
- * benign re-fetch would mark the cards asked and the second fetch would return
- * an empty queue, the "cards not showing up" bug). Returns how many were marked.
+ * Terminal ask-once write for a completed MANDATORY session: mark EXACTLY the
+ * receipt-line indices that were SERVED this session (the Card-B cards the client
+ * actually received) as 'asked', so future sessions don't re-nag them. The served
+ * set is passed IN by the caller (POST /complete-swipes) — derived from the
+ * mandatory-queue snapshot the client was served, or an explicit client-reported
+ * set — and is NEVER recomputed here.
+ *
+ * WHY NOT RECOMPUTE: the old body re-ran buildReceiptResolveCards at completion.
+ * By then the served lines the user resolved carry resolved_user rows, so the
+ * recompute EXCLUDES them and picks the NEXT top uncertain lines — lines the user
+ * NEVER SAW — then marks THOSE 'asked', permanently suppressing them from every
+ * future (voluntary) session. Marking only the served set can never burn an unseen
+ * line. markLineAsked is INSERT IGNORE, so re-marking an already-resolved served
+ * line is a harmless no-op. Returns how many were marked.
  */
-export async function markServedResolveLinesAsked(receiptId: number, conn: Db): Promise<number> {
-    const { cards } = await buildReceiptResolveCards(receiptId, conn);
-    for (const c of cards) {
-        await markLineAsked(receiptId, c.receiptLineIdx, conn);
+export async function markServedResolveLinesAsked(
+    receiptId: number,
+    conn: Db,
+    servedLineIdxs: number[],
+): Promise<number> {
+    const seen = new Set<number>();
+    let marked = 0;
+    for (const raw of servedLineIdxs ?? []) {
+        const idx = Number(raw);
+        if (!Number.isInteger(idx) || idx < 0 || seen.has(idx)) continue;
+        seen.add(idx);
+        await markLineAsked(receiptId, idx, conn);
+        marked++;
     }
-    return cards.length;
+    return marked;
 }

@@ -23,6 +23,8 @@ const KNOWN_LINE_KEYS = new Set<string>([
     // match binding (storeProductId is renamed to matchedSpId)
     'storeProductId', 'matchSource', 'matchedName', 'storeProductImageUrl', 'matchConfidence',
     'matchConfirmed', 'priceVerified', 'variantUncertain', 'priceImplausible',
+    // FAMILY SHOPPING §4.1 — family (0, the default) vs personal (1)
+    'isPersonal',
     // confidence + category
     'needsHuman', 'categoryId', 'categoryName', 'categoryL2Name',
     // cold JSON columns
@@ -52,6 +54,8 @@ export interface ReceiptItemRow {
     priceVerified: boolean;
     variantUncertain: boolean;
     priceImplausible: boolean;
+    /** §4.1 — false = FAMILY (the default), true = PERSONAL. */
+    isPersonal: boolean;
     band: string | null;
     needsHuman: number | null;
     categoryId: number | null;
@@ -114,6 +118,7 @@ export function lineToItem(receiptId: number, lineIdx: number, line: any): Recei
         priceVerified: bool(line?.priceVerified),
         variantUncertain: bool(line?.variantUncertain),
         priceImplausible: bool(line?.priceImplausible),
+        isPersonal: bool(line?.isPersonal),
         band: ic && typeof ic.band === 'string' ? ic.band.slice(0, 8) : null,
         needsHuman: num(line?.needsHuman),
         categoryId: num(line?.categoryId),
@@ -155,6 +160,7 @@ export function itemToLine(row: any): any {
         priceVerified: bool(row?.priceVerified),
         variantUncertain: bool(row?.variantUncertain),
         priceImplausible: bool(row?.priceImplausible),
+        isPersonal: bool(row?.isPersonal),
         needsHuman: num(row?.needsHuman),
         categoryId: num(row?.categoryId),
         categoryName: str(row?.categoryName),
@@ -174,7 +180,7 @@ const INSERT_COLS = [
     'receiptId', 'lineIdx', 'name', 'price', 'promoPrice', 'quantity', 'unit', 'amount',
     'sizeUnit', 'isWeighable', 'pricePerUnit', 'brandName', 'matchedSpId', 'matchSource',
     'matchedName', 'storeProductImageUrl', 'matchConfidence', 'matchConfirmed', 'priceVerified',
-    'variantUncertain', 'priceImplausible', 'band', 'needsHuman', 'categoryId', 'categoryName',
+    'variantUncertain', 'priceImplausible', 'isPersonal', 'band', 'needsHuman', 'categoryId', 'categoryName',
     'categoryL2Name', 'itemConfidence', 'altMatches', 'region', 'rawLines', 'extra',
 ] as const;
 const JSON_COLS = new Set(['itemConfidence', 'altMatches', 'region', 'rawLines', 'extra']);
@@ -198,9 +204,38 @@ export async function replaceReceiptItems(
     conn?: Connection,
 ): Promise<Map<number, number>> {
     const db = conn || (pool as any);
+    // FAMILY SHOPPING §4.1 — CARRY THE SCOPE FLAG ACROSS THE REPLACE.
+    //
+    // This function is DELETE-then-INSERT, and it is on the autosave, heal,
+    // dev-replace and backfill paths — none of which reliably round-trip the
+    // flag: a heal/re-parse builds brand-new line objects, and an older client
+    // simply doesn't know the key exists. Without this snapshot a single
+    // autosave would silently reset every PERSONAL item back to FAMILY, i.e.
+    // silently move money onto everyone else's balance — and after the §4.4
+    // lock it would do so with no adjustment event, because no toggle was ever
+    // requested. So the stored value wins unless the caller EXPLICITLY carries
+    // `isPersonal` on the line (hasOwnProperty, not truthiness: an explicit
+    // `false` must be able to clear the flag).
+    //
+    // Keyed on lineIdx, the same identity every other per-line write here uses.
+    // A re-parse that RENUMBERS lines can therefore carry a flag to a
+    // neighbouring item — but the alternative is losing the user's
+    // categorisation outright on every heal, which is strictly worse and
+    // silently under-counts the family subtotal. New lines default to FAMILY.
+    const [priorRows]: any = await db.query(
+        'SELECT lineIdx, isPersonal FROM ReceiptItem WHERE receiptId = ?', [receiptId]);
+    const priorScope = new Map<number, boolean>(
+        (priorRows as any[]).map((r) => [Number(r.lineIdx), r.isPersonal === 1 || r.isPersonal === true]));
+
     await db.query('DELETE FROM ReceiptItem WHERE receiptId = ?', [receiptId]);
     if (!Array.isArray(lines) || lines.length === 0) return new Map();
-    const rows = lines.map((line, i) => lineToItem(receiptId, i, line));
+    const rows = lines.map((line, i) => {
+        const row = lineToItem(receiptId, i, line);
+        if (!(line && Object.prototype.hasOwnProperty.call(line, 'isPersonal'))) {
+            row.isPersonal = priorScope.get(i) ?? false;
+        }
+        return row;
+    });
     // Guard the matchedSpId FK: a stored blob (esp. when backfilling) may reference an SP
     // that has since been DELETED (dedupe / purge). NULL those out so the insert succeeds —
     // the line is simply unmatched (its SP is gone). A single indexed PK lookup.
@@ -282,6 +317,125 @@ export async function updateReceiptItem(
         [...vals, receiptId, lineIdx],
     );
     return res?.affectedRows ?? 0;
+}
+
+// ── FAMILY SHOPPING §4.3 — the family subtotal ───────────────────────────────────────
+
+/** One line's money, as the whole codebase computes it (cf. tripStatsService). */
+export interface ScopedItemRow {
+    lineIdx: number;
+    name: string;
+    isPersonal: boolean;
+    price: number | null;
+    promoPrice: number | null;
+    quantity: number | null;
+    unit: string | null;
+    amount: number | null;
+    sizeUnit: string | null;
+    isWeighable: boolean;
+    matchedSpId: number | null;
+    matchedName: string | null;
+    storeProductImageUrl: string | null;
+    categoryId: number | null;
+    categoryName: string | null;
+    categoryL2Name: string | null;
+}
+
+/**
+ * The money a single receipt line contributed, in INTEGER CENTS.
+ *
+ * Deliberately the SAME formula the trip stats use
+ * (`unit = promoPrice > 0 ? promoPrice : price`, times `quantity || 1`), so the
+ * family subtotal and every other spend number in the app are computed one way.
+ * Rounded PER LINE, then summed: cents are the unit of truth (§1.3), and
+ * rounding once at the end would let float error ride on the whole receipt.
+ *
+ * Non-positive lines contribute 0 — the same clamp tripStatsService applies.
+ * A weighed item whose price could not be recovered is stored as price = 0 and
+ * must never be invented into a number here either.
+ */
+export const lineTotalCents = (row: { price?: any; promoPrice?: any; quantity?: any }): number => {
+    const promo = row.promoPrice != null ? Number(row.promoPrice) : 0;
+    const unit = promo > 0 ? promo : (Number(row.price) || 0);
+    const qty = Number(row.quantity) || 1;
+    const cents = Math.round(unit * qty * 100);
+    return Number.isFinite(cents) && cents > 0 ? cents : 0;
+};
+
+/** Every line of a receipt with the fields the §4.5 family view and the subtotal need. */
+export async function getScopedReceiptItems(receiptId: number, conn?: Connection): Promise<ScopedItemRow[]> {
+    const db = conn || (pool as any);
+    const [rows]: any = await db.query(
+        `SELECT lineIdx, name, isPersonal, price, promoPrice, quantity, unit, amount, sizeUnit,
+                isWeighable, matchedSpId, matchedName, storeProductImageUrl,
+                categoryId, categoryName, categoryL2Name
+           FROM ReceiptItem WHERE receiptId = ? ORDER BY lineIdx ASC`,
+        [receiptId],
+    );
+    return (rows as any[]).map((r) => ({
+        lineIdx: Number(r.lineIdx),
+        name: typeof r.name === 'string' ? r.name : '',
+        isPersonal: bool(r.isPersonal),
+        price: num(r.price),
+        promoPrice: num(r.promoPrice),
+        quantity: num(r.quantity),
+        unit: str(r.unit),
+        amount: num(r.amount),
+        sizeUnit: str(r.sizeUnit),
+        isWeighable: bool(r.isWeighable),
+        matchedSpId: num(r.matchedSpId),
+        matchedName: str(r.matchedName),
+        storeProductImageUrl: str(r.storeProductImageUrl),
+        categoryId: num(r.categoryId),
+        categoryName: str(r.categoryName),
+        categoryL2Name: str(r.categoryL2Name),
+    }));
+}
+
+/**
+ * §4.3 — "Only FAMILY items count. receipt_recorded's amountCents is the family
+ * subtotal, not the receipt grand total."
+ *
+ * THE definition of that number, in one place, so the ledger write, the §4.5
+ * read and the §4.4 adjustment can never disagree about it. Note what it is NOT
+ * derived from: `parsedData.footer.total`. The printed grand total covers
+ * personal items too, so anchoring to it — even by scaling — would put personal
+ * spend back into a family number. Set-deal discounts are likewise NOT
+ * distributed across lines (long-standing project rule: a combo discount
+ * belongs to no single product), so a combo receipt's family subtotal is the
+ * gross family line-sum.
+ */
+export async function computeFamilySubtotalCents(receiptId: number, conn?: Connection): Promise<number> {
+    const items = await getScopedReceiptItems(receiptId, conn);
+    let total = 0;
+    for (const it of items) if (!it.isPersonal) total += lineTotalCents(it);
+    return total;
+}
+
+/**
+ * Flip the scope of specific lines. Returns the lineIdxs that actually CHANGED
+ * (the `isPersonal <> ?` predicate makes it a compare-and-set), so the caller
+ * can skip the ledger work entirely when a toggle is a no-op.
+ */
+export async function setReceiptItemsScope(
+    receiptId: number,
+    lineIdxs: number[],
+    isPersonal: boolean,
+    conn?: Connection,
+): Promise<number[]> {
+    const db = conn || (pool as any);
+    if (lineIdxs.length === 0) return [];
+    const [changedRows]: any = await db.query(
+        'SELECT lineIdx FROM ReceiptItem WHERE receiptId = ? AND lineIdx IN (?) AND isPersonal <> ?',
+        [receiptId, lineIdxs, isPersonal ? 1 : 0],
+    );
+    const changed = (changedRows as any[]).map((r) => Number(r.lineIdx));
+    if (changed.length === 0) return [];
+    await db.query(
+        'UPDATE ReceiptItem SET isPersonal = ? WHERE receiptId = ? AND lineIdx IN (?)',
+        [isPersonal ? 1 : 0, receiptId, changed],
+    );
+    return changed;
 }
 
 /**
