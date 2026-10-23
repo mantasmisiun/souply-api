@@ -8,7 +8,8 @@
 # the VM: the dump is streamed into the staging MariaDB container (root password
 # from that container's own env), and objects are copied by a one-off container
 # started with `--env-file .env.staging`.
-# SEED_YES=1 skips the prompt; STAGING_SSH picks the ssh alias (default: staging).
+# SEED_YES=1 skips the prompt; STAGING_SSH picks the ssh alias (default: staging);
+# ONLY_OBJECTS=1 re-runs just the MinIO copy (the DB load takes ~1 h on the VM).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -40,6 +41,9 @@ if [[ "${SEED_YES:-}" != "1" ]]; then
     [[ "$ans" == "y" || "$ans" == "Y" ]] || { echo "aborted"; exit 1; }
 fi
 
+if [[ "${ONLY_OBJECTS:-}" == "1" ]]; then
+    echo "[staging] ONLY_OBJECTS=1 — database left as is"
+else
 echo "[staging] recreating $STAGING_DB"
 staging_sql <<SQL
 DROP DATABASE IF EXISTS $STAGING_DB;
@@ -65,15 +69,20 @@ WHERE c.table_schema = '$STAGING_DB' AND t.table_type = 'BASE TABLE' AND c.is_ge
   AND c.data_type IN ('char', 'varchar', 'tinytext', 'text', 'mediumtext', 'longtext', 'json');
 SQL
 done
+fi
 
-echo "[staging] copying MinIO objects (staging pulls from this PC over NetBird)"
+echo "[staging] copying MinIO objects"
 # Ship this checkout's copy of the helper, so the run doesn't depend on what the
 # VM's checkout currently has.
 scp -q scripts/staging/mirror-objects.mjs "$SSH_HOST:/tmp/souply-mirror-objects.mjs"
-src_host=$(echo "$LOCAL_MINIO" | sed -E 's#^https?://([^:/]+).*#\1#')
-src_port=$(echo "$LOCAL_MINIO" | sed -nE 's#^https?://[^:/]+:([0-9]+).*#\1#p')
-ssh "$SSH_HOST" "cd $REMOTE_DIR && docker run --rm --network souply-staging_default --env-file .env.staging \
-    -e SRC_ENDPOINT=$src_host -e SRC_PORT=${src_port:-9000} \
+# Staging may not open connections to this PC (NetBird policy is devices → staging
+# only — keep it that way), so this PC opens a reverse tunnel for the copy: the
+# VM's 127.0.0.1:19000 reaches the local MinIO only while this ssh session lives.
+# The one-off container uses host networking to see both that tunnel and
+# staging's own MinIO on 127.0.0.1:9000.
+ssh -o ExitOnForwardFailure=yes -R 127.0.0.1:19000:127.0.0.1:9000 "$SSH_HOST" \
+    "cd $REMOTE_DIR && docker run --rm --network host --env-file .env.staging -e MINIO_ENDPOINT=127.0.0.1 \
+    -e SRC_ENDPOINT=127.0.0.1 -e SRC_PORT=19000 \
     -e SRC_ACCESS_KEY=$(envval .env.local MINIO_ACCESS_KEY) -e SRC_SECRET_KEY=$(envval .env.local MINIO_SECRET_KEY) \
     -v /tmp/souply-mirror-objects.mjs:/app/mirror-objects.mjs:ro \
     --entrypoint node souply-api:staging /app/mirror-objects.mjs"
