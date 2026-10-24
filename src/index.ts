@@ -1,5 +1,6 @@
 import './config/env.js';
 import './config/sentry.js';
+import { assertTestLoginSafe } from './config/testLogin.js';
 import express from 'express';
 import cors from 'cors';
 import compression from 'compression';
@@ -44,6 +45,15 @@ import swaggerSpec from './config/swagger.js';
 import { refreshDiscountedSummary } from './models/productModel.js';
 import { startVersionTelemetry } from './services/versionTelemetry.js';
 import { Sentry } from './config/sentry.js';
+
+// Fail closed: a test-login key in production must stop the API from starting
+// rather than open a sign-in shortcut (config/testLogin.ts).
+try {
+    assertTestLoginSafe();
+} catch (e: any) {
+    console.error(`[test-login] ${e.message}`);
+    process.exit(1);
+}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
