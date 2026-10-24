@@ -84,3 +84,7 @@ export const recipeImportLimiter = createRateLimiter({ windowMs: 60 * 1000, max:
 // auth, cap the rate so one client can't wedge the single Node event loop with a stream
 // of PDFs. A real user converts a handful of receipt PDFs per minute at most.
 export const pdfConvertLimiter = createRateLimiter({ windowMs: 60 * 1000, max: 10 });
+
+// Staging/dev test login: one automated tester signs in a few times per run, so a
+// tight cap costs nothing and makes guessing the shared key pointless.
+export const testLoginLimiter = createRateLimiter({ windowMs: 15 * 60 * 1000, max: 20 });

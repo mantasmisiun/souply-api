@@ -10,6 +10,9 @@ import {
     fetchPublicProfile,
 } from '../controllers/authController.js';
 import { requireVerifiedUser, attachVerifiedUser } from '../middleware/requireVerifiedUser.js';
+import { testLogin, redeemTestLogin } from '../controllers/testLoginController.js';
+import { testLoginLimiter } from '../middleware/rateLimit.js';
+import { isTestLoginEnabled } from '../config/testLogin.js';
 
 const router = Router();
 
@@ -89,5 +92,12 @@ router.post('/users/me/avatar', attachVerifiedUser, setAvatar);
  *     tags: [Auth]
  */
 router.get('/users/@:username', fetchPublicProfile);
+
+// STAGING/DEV ONLY — registered only when TEST_LOGIN_KEY is set (index.ts refuses
+// to start if it is set in production). See config/testLogin.ts.
+if (isTestLoginEnabled()) {
+    router.post('/auth/test-login', testLoginLimiter, testLogin);
+    router.get('/auth/test-login/redeem', testLoginLimiter, redeemTestLogin);
+}
 
 export default router;

@@ -16,6 +16,22 @@ import { isValidAvatarColor, randomAvatarColor } from '../utils/avatarColor.js';
 
 const SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days, matches the JWT
 
+/**
+ * Web session: the JWT as an httpOnly cookie so the browser holds it XSS-safely
+ * (mobile ignores this and keeps using the `token` from the body as a Bearer
+ * header). Host-only (no Domain) so it never leaks to sibling subdomains.
+ * `secure` only in production — local dev runs over http://localhost.
+ */
+export function setSessionCookie(res: Response, token: string): void {
+    res.cookie(SESSION_COOKIE, token, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'lax',
+        maxAge: SESSION_MAX_AGE_MS,
+        path: '/',
+    });
+}
+
 function getProviderClientId(provider: AuthProvider): string | string[] | null {
     if (provider === 'google') {
         // Comma-separated list so the server trusts ID tokens from ALL of this
@@ -95,18 +111,7 @@ export const oauthSignIn = async (req: Request, res: Response, next: NextFunctio
         const token = await issueSessionToken(link.userId);
         const user = await getVerifiedUser(link.userId);
 
-        // Web session: also set the JWT as an httpOnly cookie so the
-        // browser holds it XSS-safely (mobile ignores this and keeps
-        // using the `token` from the body as a Bearer header). Host-only
-        // (no Domain) so it never leaks to sibling subdomains. `secure`
-        // only in production — local dev runs over http://localhost.
-        res.cookie(SESSION_COOKIE, token, {
-            httpOnly: true,
-            secure: process.env.NODE_ENV === 'production',
-            sameSite: 'lax',
-            maxAge: SESSION_MAX_AGE_MS,
-            path: '/',
-        });
+        setSessionCookie(res, token);
 
         res.json({
             token,
